@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Add combo{% endblock %}
+{% block content %}
+<h1>Add combo</h1>
+<form method="post" action="/combos" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. default">
+  <p class="hint">1&ndash;64 characters: letters, digits, underscore, dot, hyphen.</p>
+  <div class="form-actions">
+    <a class="btn" href="/combos">Cancel</a>
+    <button class="btn primary" type="submit">Create combo</button>
+  </div>
+</form>
+{% endblock %}

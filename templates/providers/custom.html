@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Add custom provider{% endblock %}
+{% block content %}
+<h1>Add custom provider</h1>
+<form method="post" action="/providers/custom" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label for="name">Provider name</label>
+  <input id="name" name="name" type="text" required maxlength="100" placeholder="e.g. Company LLM">
+  <p class="hint">A label for this endpoint, such as Company LLM or Local vLLM.</p>
+  <label for="base_url">Base URL</label>
+  <input id="base_url" name="base_url" type="text" required placeholder="https://api.example.com/v1">
+  <p class="hint">Include http:// or https:// and the API prefix, such as /v1. Trailing slashes are trimmed.</p>
+  <label for="protocol">Protocol</label>
+  <select id="protocol" name="protocol" required>
+    <option value="openai" selected>OpenAI</option>
+    <option value="anthropic">Anthropic</option>
+  </select>
+  <p class="hint">Creates an empty provider card; add named API-key connections on the next screen.</p>
+  <div class="form-actions">
+    <a class="btn" href="/providers">Cancel</a>
+    <button class="btn primary" type="submit">Create provider</button>
+  </div>
+</form>
+{% endblock %}

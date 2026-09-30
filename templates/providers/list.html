@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Providers{% endblock %}
+{% block main_class %}provider-page{% endblock %}
+{% block topbar_heading %}
+<div class="topbar-heading">
+  <h1>Providers</h1>
+  <p class="topbar-subtitle">Each tile is one upstream endpoint. Open a tile to manage its named connections; combos route to enabled connections.</p>
+</div>
+{% endblock %}
+{% block content %}
+<div class="page-head page-actions">
+  <a class="btn primary" href="/providers/new">Add custom provider</a>
+</div>
+<div class="provider-grid">
+  {% for t in tiles %}
+  <a class="provider-tile" href="{{ t.href }}">
+    <span class="provider-tile-heading">
+      <span class="provider-initial" aria-hidden="true">{{ t.name|first_char }}</span>
+      <span class="provider-title-row">
+        <span class="provider-tile-title">{{ t.name }}</span>
+      </span>
+    </span>
+    <span class="provider-tile-meta">
+      <span class="badge">{% if t.protocol == "openai" %}OpenAI{% else %}Anthropic{% endif %}</span>
+      {% if t.is_custom %}<span class="badge">Custom</span>{% endif %}
+    </span>
+    {% if t.connection_count == 0 %}
+    <span class="provider-tile-status"><span class="badge">not connected</span></span>
+    {% else %}
+    <span class="provider-tile-status">
+      <span class="badge">{{ t.connection_count }} connection{{ t.connection_count|pluralize }}</span>
+      <span class="badge{% if t.enabled_count == 0 %} off{% else %} ok{% endif %}">{{ t.enabled_count }} enabled</span>
+    </span>
+    {% endif %}
+  </a>
+  {% endfor %}
+  <a class="provider-tile" href="/providers/new">
+    <span class="provider-tile-heading">
+      <span class="provider-initial" aria-hidden="true">+</span>
+      <span class="provider-title-row">
+        <span class="provider-tile-title">Custom provider</span>
+      </span>
+    </span>
+    <span class="provider-tile-meta">Create a provider, then add connections.</span>
+  </a>
+</div>
+{% endblock %}

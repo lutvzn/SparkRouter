@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ name }}</h1>
+  <div class="page-head-actions">
+    <a class="btn" href="/providers">All providers</a>
+    {% if is_custom %}
+    <span class="badge">Custom</span>
+    <form class="inline" method="post" action="{{ action }}/delete">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn danger" type="submit">Delete provider</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+<section class="connection-section">
+  <div class="card">
+    <p><strong>Base URL</strong> <code>{{ base_url }}</code></p>
+    <p><strong>Protocol</strong> <code>{{ protocol }}</code></p>
+    <p class="hint">Every connection on this page uses this endpoint and stores its own API key.</p>
+    {% if is_custom %}
+    <p class="hint">Deleting this provider also deletes its connections. Remove any linked combo steps first.</p>
+    {% endif %}
+  </div>
+</section>
+<h2>Connections</h2>
+{% if providers.is_empty() %}
+<p class="empty">No connections for this endpoint yet. Add the first one below.</p>
+{% else %}
+<div class="connection-grid">
+  {% for p in providers %}
+  <div class="card connection-card">
+    <div class="connection-head">
+      <span class="provider-tile-title">{{ p.name }}</span>
+      {% if p.has_key %}<span class="badge ok">stored</span>{% else %}<span class="badge">none</span>{% endif %}
+      {% if p.enabled %}<span class="badge ok">enabled</span>{% else %}<span class="badge off">disabled</span>{% endif %}
+    </div>
+    <div class="connection-actions">
+      <a class="btn small" href="/providers/{{ p.id }}">Edit</a>
+      <form class="inline" method="post" action="/providers/{{ p.id }}/test" hx-post="/providers/{{ p.id }}/test" hx-target="#test-{{ p.id }}" hx-swap="innerHTML">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small" type="submit">Test</button>
+      </form>
+      <span id="test-{{ p.id }}" class="test-result"></span>
+      <form class="inline" method="post" action="/providers/{{ p.id }}/delete">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small danger" type="submit">Delete</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+<h2>Add connection</h2>
+<form method="post" action="{{ action }}" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="base_url" value="{{ base_url }}">
+  <input type="hidden" name="protocol" value="{{ protocol }}">
+  <label for="name">Connection name</label>
+  <input id="name" name="name" type="text" required maxlength="100" placeholder="e.g. Work or Personal">
+  <p class="hint">A short label for this endpoint, such as Work or Personal.</p>
+  <label for="api_key">API key</label>
+  <input id="api_key" name="api_key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Optional for local no-auth providers">
+  <p class="hint">Encrypted at rest with the master key and never shown again. Leave blank for local no-auth providers.</p>
+  <label class="check">
+    <input type="checkbox" name="enabled" value="1" checked>
+    Enabled (eligible for routing)
+  </label>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Add connection</button>
+  </div>
+</form>
+{% endblock %}

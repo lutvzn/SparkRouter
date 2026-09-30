@@ -1,0 +1,37 @@
+{% if steps.is_empty() %}
+<p class="empty">No steps yet. Add the first fallback connection below.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Provider / connection</th>
+      <th>Model</th>
+      <th class="actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in steps %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ s.provider_name }}{% if s.provider_disabled %} (disabled){% endif %}</td>
+      <td><code>{{ s.model }}</code></td>
+      <td class="actions">
+        <form class="inline" method="post" action="/combos/{{ combo_id }}/steps/{{ s.id }}/up" hx-post="/combos/{{ combo_id }}/steps/{{ s.id }}/up" hx-target="#combo-steps" hx-swap="innerHTML">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small" type="submit" {% if loop.first %}disabled{% endif %} aria-label="Move step up">&#8593;</button>
+        </form>
+        <form class="inline" method="post" action="/combos/{{ combo_id }}/steps/{{ s.id }}/down" hx-post="/combos/{{ combo_id }}/steps/{{ s.id }}/down" hx-target="#combo-steps" hx-swap="innerHTML">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small" type="submit" {% if loop.last %}disabled{% endif %} aria-label="Move step down">&#8595;</button>
+        </form>
+        <form class="inline" method="post" action="/combos/{{ combo_id }}/steps/{{ s.id }}/remove" hx-post="/combos/{{ combo_id }}/steps/{{ s.id }}/remove" hx-target="#combo-steps" hx-swap="innerHTML">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small danger" type="submit">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

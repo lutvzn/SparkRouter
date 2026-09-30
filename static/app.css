@@ -1,0 +1,411 @@
+/* SparkRouter admin UI — small, dependency-free, utilitarian styles. */
+:root {
+  color-scheme: light;
+  --fg: #1b1f24;
+  --muted: #5b6472;
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --line: #d8dce3;
+  --accent: #2456c8;
+  --accent-dark: #1c46a4;
+  --primary-bg: var(--accent);
+  --primary-hover: var(--accent-dark);
+  --danger: #b3261e;
+  --ok: #1a7f37;
+  --field: #ffffff;
+  --soft: #eef1f5;
+  --danger-line: #e2b4b0;
+  --danger-soft: #fbeae9;
+  --badge-bg: #e4e7ec;
+  --badge-ok-bg: #e1f2e5;
+  --badge-fail-bg: #f2e4e4;
+}
+
+/* The "System" preference (no data-theme, or data-theme="system") is driven
+   purely by this media query, so it tracks OS changes without JavaScript. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --fg: #e6e9ee;
+    --muted: #9aa4b2;
+    --bg: #0f1318;
+    --card: #161b22;
+    --line: #2c3440;
+    --accent: #5a8aff;
+    --accent-dark: #7ba2ff;
+    --primary-bg: #315fcb;
+    --primary-hover: #3b6cda;
+    --danger: #f08a80;
+    --ok: #4cb962;
+    --field: #1c232c;
+    --soft: #232b35;
+    --danger-line: #6b403c;
+    --danger-soft: #2a1d1c;
+    --badge-bg: #262d37;
+    --badge-ok-bg: #142619;
+    --badge-fail-bg: #2c1b1a;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --fg: #e6e9ee;
+  --muted: #9aa4b2;
+  --bg: #0f1318;
+  --card: #161b22;
+  --line: #2c3440;
+  --accent: #5a8aff;
+  --accent-dark: #7ba2ff;
+  --primary-bg: #315fcb;
+  --primary-hover: #3b6cda;
+  --danger: #f08a80;
+  --ok: #4cb962;
+  --field: #1c232c;
+  --soft: #232b35;
+  --danger-line: #6b403c;
+  --danger-soft: #2a1d1c;
+  --badge-bg: #262d37;
+  --badge-ok-bg: #142619;
+  --badge-fail-bg: #2c1b1a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  display: flex;
+  min-height: 100vh;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.sidebar {
+  flex: 0 0 14rem;
+  width: 14rem;
+  padding: 1.2rem;
+  background: var(--card);
+  border-right: 1px solid var(--line);
+  align-self: stretch;
+}
+.sidebar .brand a { font-weight: 700; color: var(--fg); font-size: 1.05rem; }
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 1.5rem;
+}
+.sidebar nav a {
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.35rem;
+  color: var(--fg);
+}
+.sidebar nav a:hover { background: var(--soft); text-decoration: none; }
+
+.dashboard-content { flex: 1; min-width: 0; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1rem;
+  padding: 0.6rem 1.2rem;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+.theme-toggle {
+  margin-left: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+
+/* Page title/subtitle live in the topbar; the heading flexes and wraps so the
+   theme button keeps its natural width down to narrow viewports. */
+.topbar-heading {
+  flex: 1;
+  min-width: 0;
+}
+.topbar-heading h1 { margin: 0; font-size: 1.4rem; }
+.topbar-subtitle {
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 40rem) {
+  body { display: block; }
+  .sidebar {
+    width: auto;
+    padding: 0.8rem 1.2rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .sidebar nav { flex-direction: row; flex-wrap: wrap; margin-top: 0.5rem; }
+}
+
+main { max-width: 60rem; margin: 1.5rem auto 0; padding: 0 1.2rem; }
+
+h1 { font-size: 1.4rem; margin: 0.2rem 0 1rem; }
+h2 { font-size: 1.1rem; margin: 1.6rem 0 0.6rem; }
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+/* List pages whose title moved to the topbar keep only the action, so it is
+   pushed to the trailing edge of the content column. */
+.page-actions {
+  justify-content: flex-end;
+  margin-bottom: 1rem;
+}
+
+.page-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: 0; }
+th {
+  background: var(--soft);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+td.url { max-width: 18rem; overflow-wrap: anywhere; color: var(--muted); font-size: 0.85rem; }
+.actions { white-space: nowrap; text-align: right; }
+th.actions { text-align: right; }
+
+form.inline { display: inline-block; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  max-width: 36rem;
+}
+
+label { display: block; margin: 0.8rem 0 0.25rem; font-weight: 600; font-size: 0.9rem; }
+label.check { display: flex; align-items: center; gap: 0.45rem; font-weight: 500; }
+
+input[type="text"], input[type="password"], select {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  background: var(--field);
+  color: var(--fg);
+}
+input[type="checkbox"] { width: auto; }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
+@media (max-width: 40rem) { .grid2 { grid-template-columns: 1fr; } }
+
+.form-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
+
+.btn {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--field);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+.btn[hidden] { display: none; }
+.btn:hover { background: var(--soft); text-decoration: none; }
+.btn.primary { background: var(--primary-bg); border-color: var(--primary-bg); color: #fff; }
+.btn.primary:hover { background: var(--primary-hover); }
+.btn.small { padding: 0.2rem 0.5rem; font-size: 0.82rem; }
+.btn.danger { color: var(--danger); border-color: var(--danger-line); }
+.btn.danger:hover { background: var(--danger-soft); }
+.btn[disabled] { opacity: 0.45; cursor: default; }
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 99px;
+  font-size: 0.75rem;
+  background: var(--badge-bg);
+  color: var(--muted);
+}
+.badge.ok { background: var(--badge-ok-bg); color: var(--ok); }
+.badge.off, .badge.fail { background: var(--badge-fail-bg); color: var(--danger); }
+
+.empty {
+  color: var(--muted);
+  background: var(--card);
+  border: 1px dashed var(--line);
+  padding: 0.8rem 1rem;
+  border-radius: 6px;
+}
+
+.hint { color: var(--muted); font-size: 0.82rem; margin: 0.25rem 0 0; }
+
+.test { font-size: 0.82rem; margin-left: 0.35rem; }
+.test.ok { color: var(--ok); }
+.test.fail { color: var(--danger); }
+
+code {
+  background: var(--soft);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+}
+
+.footer {
+  max-width: 60rem;
+  margin: 2rem auto 1rem;
+  padding: 0 1.2rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* Provider catalog tiles (new-connection picker). */
+main.provider-page { max-width: 90rem; }
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, max(12rem, calc((100% - 5rem) / 6))), 1fr));
+  gap: 1rem;
+}
+
+a.provider-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem;
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  text-decoration: none;
+}
+a.provider-tile:hover,
+a.provider-tile:focus {
+  border-color: var(--accent);
+  background: var(--soft);
+  text-decoration: none;
+}
+a.provider-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.provider-initial {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 4px;
+  background: var(--soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Avatar, title, and Custom tag share one compact header row. */
+.provider-tile-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.provider-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.provider-tile-title {
+  margin: 0; /* override the general h2 margin */
+  font-size: 1rem;
+  font-weight: 700;
+}
+/* Protocol and Custom badges share one wrap-friendly row; the static create
+   tile reuses it for its plain-text hint. */
+.provider-tile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* Badges stay content-sized and wrap instead of stacking full-width. */
+.provider-tile-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: auto;
+}
+
+/* Grouped connection cards. */
+.connection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 1rem;
+}
+
+.connection-card {
+  margin: 0;
+  min-width: 0;
+}
+
+.connection-card h3, .provider-tile-title { overflow-wrap: anywhere; }
+
+.connection-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+}
+
+.connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.connection-section { margin-top: 1.5rem; }
+.connection-section h2,
+.connection-section h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+.connection-section code { overflow-wrap: anywhere; }

@@ -1,0 +1,266 @@
+# SparkRouter architecture
+
+## Design goal
+
+SparkRouter keeps configuration management and request routing in one Rust
+application. It is not a reduced copy of every OmniRoute subsystem.
+
+```text
+Browser ──> Askama dashboard + HTMX ──> SQLite configuration
+                                               │
+OpenAI client ──> /v1/* ──> ordered combo ──> protocol adapter ──> upstream
+                                               │
+                                      shared Reqwest client
+```
+
+There is one Cargo package with a library (`src/lib.rs`) and executable
+(`src/main.rs`). The library lets integration tests exercise the actual router
+without starting a separate gateway process. No frontend service, distributed
+state, cache, queue, or routing worker is involved.
+
+## Module boundaries
+
+| Module | Responsibility |
+| --- | --- |
+| `main.rs` | Logging setup, configuration, listener, graceful shutdown |
+| `config.rs` | Environment parsing and startup validation |
+| `app.rs` | Shared `AppState`, one HTTP client, router composition and middleware |
+| `error.rs` | `thiserror` categories and sanitized HTTP error envelopes |
+| `crypto.rs` | Versioned AES-256-GCM credential envelopes |
+| `db/mod.rs` | SQLite pool setup and embedded SQLx migrations |
+| `db/providers.rs` | Provider CRUD and ciphertext persistence |
+| `db/combos.rs` | Combo CRUD, step order, transactional mutations |
+| `web/` | Form validation, CSRF verification, rendering and dashboard actions |
+| `api/chat.rs` | JSON boundary validation and overall routing deadline |
+| `api/models.rs` | Combos listed as virtual OpenAI models |
+| `routing/combo.rs` | Sequential fallback loop and retryable status helper |
+| `providers/mod.rs` | Protocol selection, authentication, bounded HTTP bodies and stream commitment |
+| `providers/openai.rs` | OpenAI passthrough and terminal SSE tracking |
+| `providers/anthropic.rs` | Anthropic request, response, and event translation |
+| `providers/sse.rs` | Private incremental SSE framing shared by both adapters |
+
+`APP_NAME` in `src/lib.rs` centralizes the dashboard's display name. The package,
+binary, and API `owned_by` value are separate identifiers.
+
+## Startup and state
+
+1. Initialize `tracing-subscriber`, respecting `RUST_LOG`.
+2. Read environment configuration and validate the master key and bind address.
+3. Construct one pooled Reqwest client; disable redirects.
+4. Open SQLite with foreign keys, WAL, a five-second busy timeout, and embedded
+   migrations. File-backed databases use at most five connections; in-memory
+   test databases use one.
+5. Generate a process-wide random CSRF token and compose API/dashboard routers.
+6. Bind the listener and serve until shutdown. Close the database pool afterward.
+
+`AppState` clones share the SQLx pool and Reqwest client. Crypto state, optional
+gateway secret, and CSRF token are shared through `Arc`. There is no global
+provider cache: routing reads persisted configuration for each request.
+
+## Persistence model
+
+| Table | Important columns and constraints |
+| --- | --- |
+| `providers` | UUID string ID, name, base URL, protocol, encrypted key blob, enabled flag, creation/update timestamps |
+| `combos` | UUID string ID, unique name, creation/update timestamps |
+| `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
+| `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
+| `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
+
+Combo deletion cascades to steps. Provider deletion is restricted while steps
+reference it. An index supports provider-reference lookups. There is no models
+table or provider-specific vendor metadata.
+
+Combo names are case-sensitive, 1–64 ASCII letters/digits or `-`, `_`, `.`.
+Model strings are trimmed, nonempty, and at most 256 characters. Stored step
+positions are zero-based; the dashboard displays one-based numbers.
+
+Step mutations use `BEGIN IMMEDIATE`, taking the SQLite write lock before
+reading positions. Adds append, removals renumber, and swaps temporarily park a
+step at position `-1` inside the transaction to avoid uniqueness conflicts.
+Timestamps are updated on edits; provider creation time is preserved by upserts.
+
+Routing snapshots the ordered step list, then loads each provider as its attempt
+begins. Changes made during an active request are not a single transactional
+configuration snapshot. A provider removed after its snapshotted step is deleted
+is skipped when no longer found; other database failures remain errors.
+
+## Public API and fallback
+
+The public router is mounted at `/v1` separately from the dashboard:
+
+- `POST /v1/chat/completions`
+- `GET /v1/models`
+
+If `ROUTER_API_KEY` is configured, API middleware requires `Authorization:
+Bearer <key>` and compares it using `subtle`. Otherwise these endpoints permit
+unauthenticated requests. Model listing returns configured combos as
+`combo/<name>`, including empty combos and those with no enabled provider.
+
+For chat requests:
+
+1. Parse the body into `serde_json::Value`, requiring an object, a model string
+   prefixed with `combo/`, and a boolean `stream` if supplied.
+2. Look up the combo by name and load steps in ascending position order.
+3. Skip disabled or concurrently removed providers.
+4. Clone the request for the attempt and replace `model` with the step's actual
+   upstream model. Let the selected protocol adapter prepare and send it.
+5. Return the first successful response. Retryable failures advance to the next
+   step; permanent errors stop the chain immediately.
+
+The explicit retryable HTTP statuses are **408, 429, 500, 502, 503, 504**.
+Transport failures, timeouts, and invalid/incomplete upstream success payloads
+can also fail over before commitment. Local credential/configuration failures
+are permanent. Most malformed-request and authorization statuses stop the chain.
+There are no repeated attempts, hedged requests, cooldowns, or load balancing.
+
+Unknown combos return `404`; exhausted, empty, or wholly disabled chains return
+`502`. Errors have an OpenAI-shaped `error` object without raw upstream bodies.
+Upstream authentication errors are labeled `upstream_error`, distinct from local
+gateway `authentication_error`. Rejected redirects are surfaced as gateway errors,
+not forwarded to the client as redirect instructions.
+
+## Protocols rather than vendors
+
+`Protocol::{OpenAi, Anthropic}` is the dispatch boundary. OpenRouter, Groq,
+DeepSeek, and similar vendors share OpenAI handling through configuration.
+No trait hierarchy or per-vendor implementation is necessary.
+
+Base URLs retain their configured API prefix and lose trailing slashes. Only
+HTTP(S) URLs without embedded credentials, query strings, or fragments are
+accepted. HTTP/private endpoints are intentionally allowed for self-hosted models.
+
+| Protocol | Generation endpoint | Authentication | Response handling |
+| --- | --- | --- | --- |
+| OpenAI | `{base_url}/chat/completions` | Bearer key when configured | Preserve request extensions and original valid JSON response bytes; raw SSE passthrough |
+| Anthropic | `{base_url}/messages` | `x-api-key` and `anthropic-version: 2023-06-01` | Translate messages, tools, text/image input, usage, finish reasons, and SSE to OpenAI shapes |
+
+Both protocols test connectivity with `GET {base_url}/models`. That is not a
+generation test or a guarantee of access to a particular model.
+
+Anthropic translation deliberately rejects unsupported semantics rather than
+pretending to provide full OpenAI parity. Its default token budget is 1024.
+Unknown extension fields can pass through, while known bookkeeping fields are
+omitted. Thinking blocks are not exposed as answer text. See the README for the
+current supported subset.
+
+## Streaming ownership and limits
+
+**The fallback loop ends when the adapter returns a response to Axum.**
+
+```text
+Before response commitment:
+  upstream failure / timeout / empty stream -> retry next step if eligible
+
+After response commitment:
+  upstream interruption -> body error and terminated stream
+  never re-enter fallback, restart text, or emit a fake successful completion
+```
+
+The shared streaming helper prefetches the first nonempty output before returning
+the response. For OpenAI, this is raw upstream data; even a comment can commit
+the stream. For Anthropic, it is the first translated chunk, usually the
+assistant-role chunk from `message_start`. Commitment does not wait for the first
+answer token or for an acknowledgment that a client received it.
+
+SSE parsing handles fragmented UTF-8, LF/CRLF lines, and multiple events per HTTP
+chunk. OpenAI bytes are not re-encoded; the framing tracker watches for `[DONE]`.
+Anthropic events are translated incrementally until `message_stop`, then `[DONE]`
+is emitted. EOF without a completion marker is an error. The upstream body is
+dropped on completion, cancellation, or error. Streams remain backpressured.
+
+| Setting | Current limit |
+| --- | --- |
+| Incoming request body | 4 MiB |
+| Non-streaming upstream response | 16 MiB |
+| Individual SSE event | 1 MiB |
+| Connect timeout | 10 seconds |
+| Upstream idle read timeout | 120 seconds |
+| Each attempt's response-preparation deadline | 120 seconds |
+| Whole pre-commit fallback deadline | 180 seconds |
+| Provider connection test | 15 seconds |
+| HTTP pool idle lifetime / idle connections per host | 90 seconds / 4 |
+
+Committed streams are not subject to the pre-commit deadlines; they can run
+longer while data arrives. The individual read timeout still applies.
+
+## Dashboard and trust boundaries
+
+Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matching
+combo pages. POST actions handle create/edit/delete, connection tests, and step
+add/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
+forms generally use 303 redirects back to GET pages. There is no SPA state store.
+
+The providers index is a preset/custom tile catalog. `/providers/catalog/{slug}`
+and `/providers/groups/{id}` show named connections and an add-connection form.
+Custom providers are stored separately from their connections. `POST
+/providers/custom` creates a named, empty provider from its name, base URL, and
+protocol; its card remains after the last connection is deleted. Membership is
+explicit, so custom providers sharing an endpoint remain separate. Each
+connection retains its provider UUID, encrypted credential, enabled flag, and
+combo references. Combo selectors show provider/connection labels and target
+one connection explicitly. Preset add forms take their URL and protocol from
+the server-side catalog; custom connection forms take them from the stored
+provider. Legacy custom connections are assigned to groups by a new migration
+without changing ciphertext. The legacy `POST /providers` connection form is
+retained for compatibility.
+`POST /providers/groups/{id}/delete` accepts canonical custom-provider IDs only
+and requires dashboard CSRF/origin checks. It deletes the provider and all member
+connections in one immediate transaction; combo foreign keys block the entire
+operation while any connection is referenced. Preset tiles are not deletable.
+
+Every mutation form supplies the process's CSRF token. Unsafe dashboard requests
+also reject cross-site fetch metadata and mismatched supplied Origin/Host values.
+`Referrer-Policy: same-origin` preserves the browser's Origin on native form
+POSTs while withholding referrers from external destinations. `no-referrer`
+would turn those form origins into `null`, which the origin check rejects.
+These protections do not provide user authentication. **Dashboard access permits
+changing credentials and making outbound connections, including to local hosts.**
+An internet-facing deployment needs authenticated dashboard access at a reverse
+proxy or a future dashboard-specific middleware layer. Gateway API authentication
+does not cover the dashboard. TLS is terminated outside the application.
+
+Askama escapes user-controlled HTML. Embedded scripts/styles are served from
+`/static/`; CSP permits self-hosted assets and blocks framing. HTMX evaluation,
+script injection, and inline indicator styles are disabled. Small local JavaScript
+reports HTMX failures using text, not injected server HTML.
+The embedded theme script applies a browser-local Light/Dark preference before
+the stylesheet loads. Without a saved choice, CSS follows `prefers-color-scheme`;
+the button displays the resolved mode and toggles directly to its opposite.
+Theme selection does not mutate server configuration or relax CSP.
+
+## Credential protection and observability
+
+Configured API keys use AES-256-GCM with a random 96-bit nonce and the provider
+ID as authenticated associated data. The blob is:
+
+```text
+version byte (1) | nonce (12 bytes) | ciphertext | GCM authentication tag
+```
+
+The master key is 32 bytes decoded from `ROUTER_MASTER_KEY`, held in a zeroizing
+buffer and never written to SQLite. Secret strings use `secrecy`; decrypted
+temporary buffers use `zeroize`. An empty blob is the deliberate sentinel for a
+provider without authentication. A malformed nonempty blob fails closed.
+
+The dashboard never decrypts keys for display. Blank edits keep existing bytes
+unchanged. Key rotation/recovery tooling is not implemented; keep the original
+master key securely available across restarts and backups.
+
+Request middleware generates/propagates `x-request-id` and creates tracing spans.
+Routing records combo, provider ID, model, status, latency, and fallback events.
+HTTP errors are logged through sanitized categories rather than full Reqwest
+errors. Do not enable or introduce credential/header/body dumps.
+
+## Extension rules
+
+- Add protocols in `src/providers/` with explicit request/JSON/SSE translation,
+  preserving the existing retry and commitment contracts.
+- Add new database changes as SQLx migrations, retaining ordering constraints.
+- Add dashboard authentication on the dashboard router, independently of the
+  gateway's bearer middleware.
+- Prefer configuration over vendor-specific code; avoid adding new services or
+  generic abstractions without an actual requirement.
+
+See [AGENTS.md](AGENTS.md) for contributor invariants and [TESTING.md](TESTING.md)
+for the regression checks that protect these boundaries.

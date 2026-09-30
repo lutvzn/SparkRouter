@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Combos{% endblock %}
+{% block topbar_heading %}
+<div class="topbar-heading">
+  <h1>Combos</h1>
+  <p class="topbar-subtitle">Route requests through ordered provider/model connections.</p>
+</div>
+{% endblock %}
+{% block content %}
+<div class="page-head page-actions">
+  <a class="btn primary" href="/combos/new">Add combo</a>
+</div>
+{% if combos.is_empty() %}
+<p class="empty">No combos configured yet. <a href="/combos/new">Add one</a> to start routing with ordered fallbacks.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Fallbacks</th>
+      <th class="actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in combos %}
+    <tr>
+      <td><a href="/combos/{{ c.id }}">{{ c.name }}</a></td>
+      <td>{{ c.step_summary }}</td>
+      <td class="actions">
+        <a class="btn small" href="/combos/{{ c.id }}">Edit</a>
+        <form class="inline" method="post" action="/combos/{{ c.id }}/delete">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small danger" type="submit">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Edit combo {{ combo_name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Combo <code>{{ combo_name }}</code></h1>
+</div>
+<form method="post" action="/combos/{{ combo_id }}" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" required maxlength="64" value="{{ combo_name }}">
+  <p class="hint">1&ndash;64 characters: letters, digits, underscore, dot, hyphen.</p>
+  <div class="form-actions">
+    <a class="btn" href="/combos">Done</a>
+    <button class="btn primary" type="submit">Rename</button>
+  </div>
+</form>
+
+<h2>Steps</h2>
+<p class="hint">Requests try each step in order until one succeeds. Use the arrows to reorder; remove and re-add a step to change its model.</p>
+<div id="combo-steps">
+{% include "combos/_steps.html" %}
+</div>
+
+<h2>Add step</h2>
+{% if providers.is_empty() %}
+<p class="empty">No connections configured. <a href="/providers">Add a connection</a> first.</p>
+{% else %}
+<form method="post" action="/combos/{{ combo_id }}/steps" class="card" hx-post="/combos/{{ combo_id }}/steps" hx-target="#combo-steps" hx-swap="innerHTML">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <div class="grid2">
+    <div>
+      <label for="provider_id">Provider / connection</label>
+      <select id="provider_id" name="provider_id" required>
+        {% for p in providers %}
+        <option value="{{ p.id }}">{{ p.name }}{% if p.disabled %} (disabled){% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="model">Model</label>
+      <input id="model" name="model" type="text" required maxlength="256" placeholder="e.g. gpt-4o-mini">
+    </div>
+  </div>
+  <p class="hint">Model is a free-form string of at most 256 characters, forwarded upstream as-is.</p>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">Add step</button>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{% if is_edit %}Edit connection{% else %}Add custom connection{% endif %}{% endblock %}
+{% block content %}
+<h1>{% if is_edit %}Edit connection{% else %}Add custom connection{% endif %}</h1>
+<form method="post" action="{{ action }}" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label for="name">Connection name</label>
+  <input id="name" name="name" type="text" required maxlength="100" value="{{ name }}">
+  <p class="hint">A short label for this endpoint, such as Work or Personal.</p>
+  {% if endpoint_locked %}
+  <input type="hidden" name="base_url" value="{{ base_url }}">
+  <input type="hidden" name="protocol" value="{{ protocol }}">
+  <p><strong>Base URL</strong> <code>{{ base_url }}</code></p>
+  <p><strong>Protocol</strong> <code>{{ protocol }}</code></p>
+   <p class="hint">This endpoint is set by the provider and cannot be changed per connection.</p>
+  {% else %}
+  <label for="base_url">Base URL</label>
+  <input id="base_url" name="base_url" type="text" required placeholder="https://api.example.com/v1" value="{{ base_url }}">
+  <p class="hint">Include http:// or https:// and the API prefix, such as /v1. Trailing slashes are trimmed.</p>
+  <label for="protocol">Protocol</label>
+  <select id="protocol" name="protocol" required>
+    {% for opt in protocols %}
+    <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  <label for="api_key">API key</label>
+  <input id="api_key" name="api_key" type="password" autocomplete="new-password" spellcheck="false" placeholder="{{ key_placeholder }}">
+  {% if is_edit %}
+  <p class="hint">Encrypted at rest with the master key and never shown again. Leave blank to keep the stored key.</p>
+  {% else %}
+  <p class="hint">Encrypted at rest with the master key and never shown again. Leave blank for local no-auth providers.</p>
+  {% endif %}
+  <label class="check">
+    <input type="checkbox" name="enabled" value="1"{% if enabled %} checked{% endif %}>
+    Enabled (eligible for routing)
+  </label>
+  <div class="form-actions">
+    <a class="btn" href="{{ back_href }}">Cancel</a>
+    <button class="btn primary" type="submit">{% if is_edit %}Save changes{% else %}Add connection{% endif %}</button>
+  </div>
+</form>
+{% endblock %}

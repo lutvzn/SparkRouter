@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false}'>
+  <title>{{ app_name }} :: {% block title %}{% endblock %}</title>
+  <script src="/static/theme.js"></script>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx-2.0.4.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><a href="/">{{ app_name }}</a></div>
+    <nav aria-label="Dashboard">
+      <a href="/providers">Providers</a>
+      <a href="/combos">Combos</a>
+    </nav>
+  </aside>
+  <div class="dashboard-content">
+    <header class="topbar">
+{% block topbar_heading %}{% endblock %}
+      <button id="theme-toggle" type="button" class="btn theme-toggle" hidden>Theme: Light</button>
+    </header>
+    <main class="{% block main_class %}{% endblock %}">
+      <p id="action-error" class="test fail" role="alert" hidden></p>
+{% block content %}{% endblock %}
+    </main>
+    <footer class="footer">{{ app_name }} &mdash; self-hosted LLM gateway with ordered fallback combos</footer>
+  </div>
+</body>
+</html>
