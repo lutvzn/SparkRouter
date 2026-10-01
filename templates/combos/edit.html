@@ -9,14 +9,21 @@
   <label for="name">Name</label>
   <input id="name" name="name" type="text" required maxlength="64" value="{{ combo_name }}">
   <p class="hint">1&ndash;64 characters: letters, digits, underscore, dot, hyphen.</p>
+  <label for="strategy">Strategy</label>
+  <select id="strategy" name="strategy" required>
+    <option value="priority"{% if strategy == "priority" %} selected{% endif %}>Priority</option>
+    <option value="round_robin"{% if strategy == "round_robin" %} selected{% endif %}>Round robin</option>
+    <option value="random"{% if strategy == "random" %} selected{% endif %}>Random</option>
+  </select>
+  <p class="hint">Priority tries enabled steps in order; round robin rotates the starting step; random picks a random starting step. Retryable failures fall back to the remaining steps; streaming never switches after it starts.</p>
   <div class="form-actions">
     <a class="btn" href="/combos">Done</a>
-    <button class="btn primary" type="submit">Rename</button>
+    <button class="btn primary" type="submit">Save changes</button>
   </div>
 </form>
 
 <h2>Steps</h2>
-<p class="hint">Requests try each step in order until one succeeds. Use the arrows to reorder; remove and re-add a step to change its model.</p>
+<p class="hint">Order defines priority and fallback order. Disabled connections are skipped. Retryable failures try remaining steps; streaming never switches after it starts. Use the arrows to reorder; remove and re-add a step to change its model.</p>
 <div id="combo-steps">
 {% include "combos/_steps.html" %}
 </div>
@@ -38,10 +45,17 @@
     </div>
     <div>
       <label for="model">Model</label>
-      <input id="model" name="model" type="text" required maxlength="256" placeholder="e.g. gpt-4o-mini">
+      <input id="model" name="model" type="text" required maxlength="256" placeholder="e.g. gpt-4o-mini" autocomplete="off">
+      {% for p in providers %}
+      <datalist id="models-{{ p.id }}">
+        {% for model in p.models %}
+        <option value="{{ model }}"></option>
+        {% endfor %}
+      </datalist>
+      {% endfor %}
     </div>
   </div>
-  <p class="hint">Model is a free-form string of at most 256 characters, forwarded upstream as-is.</p>
+  <p class="hint">Model is a free-form string of at most 256 characters, forwarded upstream as-is. Suggestions come from that connection's refreshed model list.</p>
   <div class="form-actions">
     <button class="btn primary" type="submit">Add step</button>
   </div>

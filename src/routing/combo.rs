@@ -4,8 +4,45 @@ use crate::{
     error::AppError,
     providers::{self, AttemptError},
 };
+use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use axum::{http::StatusCode, response::Response};
 use serde_json::Value;
+use std::{collections::HashMap, sync::Mutex};
+
+/// Ephemeral per-combo cursors shared by every request handler in this process.
+/// No lock is held during database or upstream I/O; restarts reset the sequence.
+#[derive(Default)]
+pub(crate) struct RoundRobin {
+    cursors: Mutex<HashMap<String, usize>>,
+}
+
+impl RoundRobin {
+    fn next(&self, id: &str, count: usize) -> Result<usize, AppError> {
+        let mut cursors = self.cursors.lock().map_err(|_| AppError::Routing)?;
+        let cursor = cursors.entry(id.to_owned()).or_default();
+        let start = *cursor % count;
+        *cursor = (start + 1) % count;
+        Ok(start)
+    }
+
+    pub(crate) fn forget(&self, id: &str) {
+        if let Ok(mut cursors) = self.cursors.lock() {
+            cursors.remove(id);
+        }
+    }
+}
+
+/// Rejection sampling avoids modulo bias when selecting a random starting step.
+fn random_start(count: usize, mut draw: impl FnMut() -> u64) -> usize {
+    let count = count as u64;
+    let limit = u64::MAX - u64::MAX % count;
+    loop {
+        let value = draw();
+        if value < limit {
+            return (value % count) as usize;
+        }
+    }
+}
 
 /// Deliberately small policy: transient transport failures are handled separately.
 /// Authentication, permissions, not-found and malformed requests stop the chain.
@@ -15,7 +52,32 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
 
 pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Response, AppError> {
     let combo = combos::by_name(&state.db, name).await?;
-    let steps = combos::steps(&state.db, &combo.id).await?;
+    let mut steps = combos::steps(&state.db, &combo.id).await?;
+    if combo.strategy != combos::Strategy::Priority {
+        // Disabled connections do not consume turns. Snapshot eligible steps
+        // before selecting a start, but recheck providers below before calls so
+        // concurrent deletion/disable edits retain the existing safety behavior.
+        let mut eligible = Vec::with_capacity(steps.len());
+        for step in steps {
+            match provider_db::get(&state.db, &step.provider_id).await {
+                Ok(provider) if provider.enabled => eligible.push(step),
+                Ok(_) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        steps = eligible;
+        if steps.is_empty() {
+            return Err(AppError::Routing);
+        }
+        let start = match combo.strategy {
+            combos::Strategy::RoundRobin => state.round_robin.next(&combo.id, steps.len())?,
+            combos::Strategy::Random => random_start(steps.len(), || OsRng.next_u64()),
+            combos::Strategy::Priority => unreachable!("priority retains its original order"),
+        };
+        // Each step is attempted at most once; fallback follows configured order
+        // cyclically from the selected start without advancing the cursor again.
+        steps.rotate_left(start);
+    }
     for step in steps {
         let provider = match provider_db::get(&state.db, &step.provider_id).await {
             Ok(provider) => provider,
@@ -61,6 +123,48 @@ pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Respons
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn round_robin_wraps_and_keeps_combos_independent() {
+        let cursors = RoundRobin::default();
+        assert_eq!(cursors.next("a", 3).unwrap(), 0);
+        assert_eq!(cursors.next("a", 3).unwrap(), 1);
+        assert_eq!(cursors.next("b", 3).unwrap(), 0);
+        assert_eq!(cursors.next("a", 3).unwrap(), 2);
+        assert_eq!(cursors.next("a", 3).unwrap(), 0);
+        assert_eq!(cursors.next("a", 2).unwrap(), 1);
+        cursors.forget("a");
+        assert_eq!(cursors.next("a", 2).unwrap(), 0);
+        assert_eq!(cursors.next("b", 3).unwrap(), 1);
+    }
+
+    #[test]
+    fn round_robin_concurrent_requests_reserve_one_turn_each() {
+        let cursors = std::sync::Arc::new(RoundRobin::default());
+        let threads: Vec<_> = (0..12)
+            .map(|_| {
+                let cursors = cursors.clone();
+                std::thread::spawn(move || cursors.next("shared", 3).unwrap())
+            })
+            .collect();
+        let mut counts = [0; 3];
+        for thread in threads {
+            counts[thread.join().unwrap()] += 1;
+        }
+        assert_eq!(counts, [4, 4, 4]);
+    }
+
+    #[test]
+    fn random_start_covers_every_step_and_rejects_biased_tail() {
+        for count in [1, 2, 3, 7] {
+            for index in 0..count {
+                assert_eq!(random_start(count, || index as u64), index);
+            }
+        }
+        let mut draws = [u64::MAX, 5].into_iter();
+        assert_eq!(random_start(3, || draws.next().unwrap()), 2);
+        assert!(draws.next().is_none());
+    }
+
     #[test]
     fn retry_policy_is_explicit() {
         for status in [408, 429, 500, 502, 503, 504] {

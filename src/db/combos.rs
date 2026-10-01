@@ -10,10 +10,50 @@ pub const MAX_NAME_LENGTH: usize = 64;
 /// Maximum length of a step model identifier (after trimming).
 pub const MAX_MODEL_LENGTH: usize = 256;
 
+/// How a combo orders its fallback attempts across its steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Strategy {
+    #[default]
+    Priority,
+    RoundRobin,
+    Random,
+}
+
+impl Strategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Priority => "priority",
+            Self::RoundRobin => "round_robin",
+            Self::Random => "random",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Priority => "Priority",
+            Self::RoundRobin => "Round robin",
+            Self::Random => "Random",
+        }
+    }
+
+    /// Parse a stored or submitted strategy name, rejecting unknown values.
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "priority" => Ok(Self::Priority),
+            "round_robin" => Ok(Self::RoundRobin),
+            "random" => Ok(Self::Random),
+            _ => Err(AppError::InvalidRequest(
+                "unknown combo routing strategy".into(),
+            )),
+        }
+    }
+}
+
 /// A named fallback combo.
 pub struct Combo {
     pub id: String,
     pub name: String,
+    pub strategy: Strategy,
 }
 
 /// One entry in a combo's ordered fallback chain.
@@ -88,6 +128,7 @@ fn combo_from_row(row: &SqliteRow) -> Result<Combo, AppError> {
     Ok(Combo {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
+        strategy: Strategy::parse(&row.try_get::<String, _>("strategy")?)?,
     })
 }
 
@@ -103,7 +144,7 @@ fn step_from_row(row: &SqliteRow) -> Result<ComboStep, AppError> {
 
 /// All combos, ordered by name.
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Combo>, AppError> {
-    let rows = sqlx::query("SELECT id, name FROM combos ORDER BY name")
+    let rows = sqlx::query("SELECT id, name, strategy FROM combos ORDER BY name")
         .fetch_all(pool)
         .await?;
     rows.iter().map(combo_from_row).collect()
@@ -111,7 +152,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Combo>, AppError> {
 
 /// Look up a combo by id.
 pub async fn get(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
-    let row = sqlx::query("SELECT id, name FROM combos WHERE id = ?")
+    let row = sqlx::query("SELECT id, name, strategy FROM combos WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -123,7 +164,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
 
 /// Look up a combo by its unique name.
 pub async fn by_name(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
-    let row = sqlx::query("SELECT id, name FROM combos WHERE name = ?")
+    let row = sqlx::query("SELECT id, name, strategy FROM combos WHERE name = ?")
         .bind(name)
         .fetch_optional(pool)
         .await?;
@@ -133,16 +174,27 @@ pub async fn by_name(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
         .ok_or_else(|| AppError::NotFound(format!("no combo named '{name}' exists")))
 }
 
-/// Create a combo with a fresh UUID id.
+/// Create a combo with a fresh UUID id and the default strategy.
 pub async fn create(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
+    create_with_strategy(pool, name, Strategy::default()).await
+}
+
+/// Create a combo with a fresh UUID id and an explicit routing strategy.
+pub async fn create_with_strategy(
+    pool: &SqlitePool,
+    name: &str,
+    strategy: Strategy,
+) -> Result<Combo, AppError> {
     validate_name(name)?;
     let combo = Combo {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_owned(),
+        strategy,
     };
-    let result = sqlx::query("INSERT INTO combos (id, name) VALUES (?1, ?2)")
+    let result = sqlx::query("INSERT INTO combos (id, name, strategy) VALUES (?1, ?2, ?3)")
         .bind(&combo.id)
         .bind(&combo.name)
+        .bind(combo.strategy.as_str())
         .execute(pool)
         .await;
     match result {
@@ -154,14 +206,93 @@ pub async fn create(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
     }
 }
 
-/// Rename a combo.
-pub async fn rename(pool: &SqlitePool, id: &str, name: &str) -> Result<(), AppError> {
-    validate_name(name)?;
-    let result = sqlx::query("UPDATE combos SET name = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
-        .bind(name)
+/// Duplicate a combo and its ordered steps atomically, using a unique copy name.
+pub async fn duplicate(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
+    let mut transaction = begin_immediate(pool).await?;
+    let source = sqlx::query("SELECT id, name, strategy FROM combos WHERE id = ?")
         .bind(id)
-        .execute(pool)
-        .await;
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("combo '{id}' was not found")))?;
+    let source = combo_from_row(&source)?;
+    validate_name(&source.name)?;
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM combos")
+        .fetch_all(&mut *transaction)
+        .await?;
+    let names: std::collections::HashSet<_> = names.into_iter().collect();
+    let name = (1..=names.len() + 1)
+        .map(|number| {
+            let suffix = if number == 1 {
+                "-copy".to_owned()
+            } else {
+                format!("-copy-{number}")
+            };
+            let prefix = &source.name[..source.name.len().min(MAX_NAME_LENGTH - suffix.len())];
+            format!("{prefix}{suffix}")
+        })
+        .find(|name| !names.contains(name))
+        .expect("more candidate names than existing combos guarantees an available name");
+    let combo = Combo {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        strategy: source.strategy,
+    };
+    sqlx::query("INSERT INTO combos (id, name, strategy) VALUES (?, ?, ?)")
+        .bind(&combo.id)
+        .bind(&combo.name)
+        .bind(combo.strategy.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    let rows = sqlx::query(
+        "SELECT id, combo_id, position, provider_id, model FROM combo_steps WHERE combo_id = ? ORDER BY position",
+    )
+    .bind(id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in rows {
+        let step = step_from_row(&row)?;
+        sqlx::query(
+            "INSERT INTO combo_steps (id, combo_id, position, provider_id, model) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&combo.id)
+        .bind(step.position)
+        .bind(&step.provider_id)
+        .bind(&step.model)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(combo)
+}
+
+/// Rename a combo, preserving its routing strategy.
+pub async fn rename(pool: &SqlitePool, id: &str, name: &str) -> Result<(), AppError> {
+    update(pool, id, name, None).await
+}
+
+/// Update a combo's name and, optionally, its routing strategy.
+///
+/// A `None` strategy keeps the stored strategy unchanged.
+pub async fn update(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    strategy: Option<Strategy>,
+) -> Result<(), AppError> {
+    validate_name(name)?;
+    let result = sqlx::query(
+        "UPDATE combos
+         SET name = ?,
+             strategy = COALESCE(?, strategy),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?",
+    )
+    .bind(name)
+    .bind(strategy.map(|strategy| strategy.as_str()))
+    .bind(id)
+    .execute(pool)
+    .await;
     match result {
         Ok(result) if result.rows_affected() == 0 => {
             Err(AppError::NotFound(format!("combo '{id}' was not found")))
@@ -170,6 +301,27 @@ pub async fn rename(pool: &SqlitePool, id: &str, name: &str) -> Result<(), AppEr
         Err(error) if super::is_constraint_violation(&error) => Err(AppError::InvalidRequest(
             format!("a combo named '{name}' already exists"),
         )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Change a combo's routing strategy, leaving its name untouched.
+pub async fn set_strategy(pool: &SqlitePool, id: &str, strategy: Strategy) -> Result<(), AppError> {
+    let result = sqlx::query(
+        "UPDATE combos
+         SET strategy = ?,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?",
+    )
+    .bind(strategy.as_str())
+    .bind(id)
+    .execute(pool)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 0 => {
+            Err(AppError::NotFound(format!("combo '{id}' was not found")))
+        }
+        Ok(_) => Ok(()),
         Err(error) => Err(error.into()),
     }
 }
@@ -442,6 +594,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_names_are_unique_and_fit_the_name_limit() {
+        let pool = pool_with_providers().await;
+        let name = "a".repeat(MAX_NAME_LENGTH);
+        let source = create(&pool, &name).await.expect("source");
+        let reserved = format!("{}-copy", "a".repeat(MAX_NAME_LENGTH - 5));
+        create(&pool, &reserved).await.expect("reserved name");
+        let copy = duplicate(&pool, &source.id).await.expect("duplicate");
+        assert_eq!(
+            copy.name,
+            format!("{}-copy-2", "a".repeat(MAX_NAME_LENGTH - 7))
+        );
+        assert_eq!(copy.name.len(), MAX_NAME_LENGTH);
+        validate_name(&copy.name).expect("valid copy name");
+        assert!(
+            steps(&pool, &copy.id)
+                .await
+                .expect("empty steps")
+                .is_empty()
+        );
+        let second = duplicate(&pool, &source.id)
+            .await
+            .expect("second duplicate");
+        assert_eq!(
+            second.name,
+            format!("{}-copy-3", "a".repeat(MAX_NAME_LENGTH - 7))
+        );
+        assert_eq!(get(&pool, &source.id).await.expect("source").name, name);
+    }
+
+    #[tokio::test]
+    async fn duplicate_missing_combo_creates_nothing() {
+        let pool = pool_with_providers().await;
+        assert!(matches!(
+            duplicate(&pool, "missing").await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(list(&pool).await.expect("combos").is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_rolls_back_combo_and_steps_on_insert_failure() {
+        let pool = pool_with_providers().await;
+        let source = create(&pool, "original").await.expect("source");
+        add_step(&pool, &source.id, "provider-a", "first")
+            .await
+            .expect("first step");
+        add_step(&pool, &source.id, "provider-b", "second")
+            .await
+            .expect("second step");
+        // Reject the second copied step, after the new combo and first step exist.
+        sqlx::query("CREATE TRIGGER reject_copied_second_step BEFORE INSERT ON combo_steps WHEN NEW.position = 1 BEGIN SELECT RAISE(ABORT, 'test insert failure'); END")
+            .execute(&pool).await.expect("failure trigger");
+        assert!(duplicate(&pool, &source.id).await.is_err());
+        assert_eq!(list(&pool).await.expect("combos").len(), 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM combo_steps")
+            .fetch_one(&pool)
+            .await
+            .expect("step count");
+        assert_eq!(count, 2);
+        assert_eq!(model_sequence(&pool, &source.id).await, ["first", "second"]);
+    }
+
+    #[tokio::test]
     async fn steps_keep_insertion_order_with_contiguous_positions() {
         let pool = pool_with_providers().await;
         let combo = create(&pool, "fallback").await.expect("combo");
@@ -702,5 +917,231 @@ mod tests {
             .map(|combo| combo.name)
             .collect();
         assert_eq!(names, ["aaa", "renamed"]);
+    }
+
+    #[test]
+    fn strategy_parsing_is_strict_and_priority_is_the_default() {
+        assert_eq!(Strategy::default(), Strategy::Priority);
+        for (value, strategy) in [
+            ("priority", Strategy::Priority),
+            ("round_robin", Strategy::RoundRobin),
+            ("random", Strategy::Random),
+        ] {
+            assert_eq!(strategy.as_str(), value);
+            assert_eq!(Strategy::parse(value).expect("parse"), strategy);
+        }
+        assert_eq!(Strategy::Priority.label(), "Priority");
+        assert_eq!(Strategy::RoundRobin.label(), "Round robin");
+        assert_eq!(Strategy::Random.label(), "Random");
+
+        // Parsing is strict: no case folding, no trimming, no silent default.
+        for value in [
+            "",
+            "Priority",
+            "ROUND_ROBIN",
+            "random ",
+            "weighted",
+            "roundrobin",
+        ] {
+            assert!(
+                matches!(
+                    Strategy::parse(value),
+                    Err(AppError::InvalidRequest(message))
+                        if message == "unknown combo routing strategy"
+                ),
+                "expected {value:?} to be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_defaults_to_priority_and_persists_every_strategy() {
+        let pool = pool_with_providers().await;
+        let combo = create(&pool, "default").await.expect("combo");
+        assert_eq!(combo.strategy, Strategy::Priority);
+        assert_eq!(
+            get(&pool, &combo.id).await.expect("get").strategy,
+            Strategy::Priority
+        );
+
+        for (name, strategy) in [
+            ("prio", Strategy::Priority),
+            ("robin", Strategy::RoundRobin),
+            ("rand", Strategy::Random),
+        ] {
+            let created = create_with_strategy(&pool, name, strategy)
+                .await
+                .expect("create");
+            assert_eq!(created.strategy, strategy);
+            let stored = get(&pool, &created.id).await.expect("get");
+            assert_eq!(stored.name, name);
+            assert_eq!(stored.strategy, strategy);
+            assert_eq!(
+                by_name(&pool, name).await.expect("by name").strategy,
+                strategy
+            );
+        }
+
+        let listed: Vec<_> = list(&pool)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|combo| (combo.name, combo.strategy))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("default".to_owned(), Strategy::Priority),
+                ("prio".to_owned(), Strategy::Priority),
+                ("rand".to_owned(), Strategy::Random),
+                ("robin".to_owned(), Strategy::RoundRobin),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn update_sets_strategy_and_rename_preserves_it() {
+        let pool = pool_with_providers().await;
+        let combo = create_with_strategy(&pool, "orig", Strategy::RoundRobin)
+            .await
+            .expect("combo");
+
+        // The legacy rename path keeps the stored strategy.
+        rename(&pool, &combo.id, "renamed").await.expect("rename");
+        let stored = get(&pool, &combo.id).await.expect("get");
+        assert_eq!(stored.name, "renamed");
+        assert_eq!(stored.strategy, Strategy::RoundRobin);
+
+        // update without a strategy only changes the name.
+        update(&pool, &combo.id, "again", None)
+            .await
+            .expect("update");
+        let stored = get(&pool, &combo.id).await.expect("get");
+        assert_eq!(stored.name, "again");
+        assert_eq!(stored.strategy, Strategy::RoundRobin);
+
+        // update with a strategy changes both columns in one statement.
+        update(&pool, &combo.id, "final", Some(Strategy::Random))
+            .await
+            .expect("update");
+        let stored = get(&pool, &combo.id).await.expect("get");
+        assert_eq!(stored.name, "final");
+        assert_eq!(stored.strategy, Strategy::Random);
+
+        // set_strategy only touches the strategy.
+        set_strategy(&pool, &combo.id, Strategy::Priority)
+            .await
+            .expect("set strategy");
+        let stored = get(&pool, &combo.id).await.expect("get");
+        assert_eq!(stored.name, "final");
+        assert_eq!(stored.strategy, Strategy::Priority);
+
+        // Names are still validated and missing combos still report NotFound.
+        assert!(matches!(
+            update(&pool, &combo.id, "bad name", None).await,
+            Err(AppError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            update(&pool, "missing", "x", Some(Strategy::Random)).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            set_strategy(&pool, "missing", Strategy::Random).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_copies_the_source_strategy() {
+        let pool = pool_with_providers().await;
+        let source = create_with_strategy(&pool, "source", Strategy::Random)
+            .await
+            .expect("source");
+        add_step(&pool, &source.id, "provider-a", "model")
+            .await
+            .expect("step");
+
+        let copy = duplicate(&pool, &source.id).await.expect("duplicate");
+        assert_eq!(copy.strategy, Strategy::Random);
+        assert_eq!(
+            get(&pool, &copy.id).await.expect("get").strategy,
+            Strategy::Random
+        );
+        assert_eq!(
+            get(&pool, &source.id).await.expect("get").strategy,
+            Strategy::Random
+        );
+    }
+
+    #[tokio::test]
+    async fn the_schema_rejects_unknown_strategy_values() {
+        let pool = pool_with_providers().await;
+        let error = sqlx::query(
+            "INSERT INTO combos (id, name, strategy) VALUES ('bad', 'bad', 'weighted')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("CHECK constraint should reject the insert");
+        assert!(crate::db::is_constraint_violation(&error));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM combos")
+                .fetch_one(&pool)
+                .await
+                .expect("count"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn strategy_migration_defaults_existing_rows_to_priority() {
+        // Build a pre-migration database by hand so 0003 runs against rows
+        // created by 0001/0002, exactly like an existing deployment.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("raw pool");
+        sqlx::raw_sql(include_str!("../../migrations/0001_initial.sql"))
+            .execute(&pool)
+            .await
+            .expect("apply 0001");
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0002_custom_provider_groups.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply 0002");
+        sqlx::query(
+            "INSERT INTO combos (id, name) VALUES ('legacy-1', 'kept'), ('legacy-2', 'other')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy rows");
+
+        sqlx::raw_sql(include_str!("../../migrations/0003_combo_strategies.sql"))
+            .execute(&pool)
+            .await
+            .expect("apply 0003");
+
+        let rows: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT id, name, strategy FROM combos ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("rows");
+        assert_eq!(
+            rows,
+            [
+                (
+                    "legacy-1".to_owned(),
+                    "kept".to_owned(),
+                    "priority".to_owned()
+                ),
+                (
+                    "legacy-2".to_owned(),
+                    "other".to_owned(),
+                    "priority".to_owned()
+                ),
+            ]
+        );
     }
 }

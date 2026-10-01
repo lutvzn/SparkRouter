@@ -41,7 +41,18 @@
   function render(toggle) {
     var mode = resolvedMode();
     var next = opposite(mode);
-    toggle.textContent = "Theme: " + (mode === "dark" ? "Dark" : "Light");
+    // The button keeps an inline icon plus a label span; only the label text
+    // and the sprite reference change so textContent stays "Theme: Light" /
+    // "Theme: Dark" and the icon is never clobbered. The icon always shows
+    // the mode the toggle switches to, matching the title below.
+    var label = toggle.querySelector(".btn-label");
+    if (label) {
+      label.textContent = "Theme: " + (mode === "dark" ? "Dark" : "Light");
+    }
+    var iconUse = toggle.querySelector("use");
+    if (iconUse) {
+      iconUse.setAttribute("href", "/static/icons.svg#" + (next === "dark" ? "moon" : "sun"));
+    }
     toggle.title = "Switch to " + next + " mode";
     toggle.setAttribute("aria-label", toggle.title);
   }

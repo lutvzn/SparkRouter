@@ -4,7 +4,8 @@
 
 SparkRouter is a deliberately small, self-hosted LLM gateway: one Rust package,
 one executable, SQLite, and a server-rendered dashboard. A combo is an ordered
-list of provider/model targets, not a load-balancing strategy.
+list of provider/model targets with Priority (default), Round robin, or Random
+selection of the starting step; retryable failures use ordered fallback.
 
 Implement the requested change, not OmniRoute's wider feature set. Do not add a
 frontend service, Node.js runtime, SPA framework, external database, queues,
@@ -54,7 +55,9 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
 
 - Preserve unknown OpenAI request fields. Route using `serde_json::Value`; change
   the target model without reconstructing the complete request schema.
-- Attempt enabled combo steps sequentially. Permanent client/upstream request
+- Attempt enabled combo steps sequentially from the strategy-selected start,
+  at most once per request. Round robin advances once per request, not per retry.
+  Permanent client/upstream request
   errors stop the chain; retry classification belongs in the routing helper.
 - **Never fall back after a streaming response has been returned to Axum.**
   Before commitment, adapters may report a retryable failure. After commitment,
@@ -69,7 +72,8 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   or unsanitized HTTP errors containing sensitive URLs. Do not add `Debug` to
   structures holding unprotected credential strings.
 - Keep the default bind loopback. Gateway authentication protects `/v1/*`, not
-  the dashboard. Preserve dashboard CSRF checks, origin checks, autoescaping,
+  the dashboard. `ROUTER_API_KEY` and generated API keys both authorize every
+  combo; `/v1/*` stays open only when neither is configured. Preserve dashboard CSRF checks, origin checks, autoescaping,
   and security headers; they are not a substitute for dashboard authentication.
 - Use parameterized SQL. Serialize step mutations in transactions and preserve
   unique positions, cascade combo deletion, and restricted provider deletion.

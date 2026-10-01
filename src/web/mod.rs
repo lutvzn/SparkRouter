@@ -5,6 +5,7 @@
 //! tests, step reordering) uses a self-hosted, version-pinned HTMX asset served
 //! from `/static/...`; every form works without JavaScript too.
 
+mod api_keys;
 mod combos;
 mod provider_catalog;
 mod providers;
@@ -53,10 +54,15 @@ pub fn router() -> Router<AppState> {
         )
         .route("/providers/{id}/delete", post(providers::delete))
         .route("/providers/{id}/test", post(providers::test))
+        .route("/providers/{id}/models", post(providers::refresh_models))
+        .route("/api-keys", get(api_keys::list).post(api_keys::create))
+        .route("/api-keys/{id}", get(api_keys::created))
+        .route("/api-keys/{id}/delete", post(api_keys::delete))
         .route("/combos", get(combos::list).post(combos::create))
         .route("/combos/new", get(combos::new))
         .route("/combos/{id}", get(combos::edit).post(combos::rename))
         .route("/combos/{id}/delete", post(combos::delete))
+        .route("/combos/{id}/duplicate", post(combos::duplicate))
         .route("/combos/{id}/steps", post(combos::add_step))
         .route(
             "/combos/{id}/steps/{step_id}/remove",
@@ -173,6 +179,7 @@ mod tests {
             ),
             api_key: None,
             csrf_token: Arc::new("expected-token".to_string()),
+            round_robin: Arc::default(),
         };
         assert!(super::check_csrf(&state, "expected-token").is_ok());
         assert!(super::check_csrf(&state, "expected-toke").is_err());

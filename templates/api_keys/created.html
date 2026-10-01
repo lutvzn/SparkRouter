@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}API key created{% endblock %}
+{% block main_class %}combo-page{% endblock %}
+{% block topbar_heading %}
+<div class="topbar-heading">
+  <h1>API key created</h1>
+  <p class="topbar-subtitle">Copy this key now. SparkRouter will not show it again.</p>
+</div>
+{% endblock %}
+{% block content %}
+<div class="card">
+  <p><strong>{{ name }}</strong> can call every combo. Send it as <code>Authorization: Bearer</code>.</p>
+  {% if revealed %}
+  <code class="key-secret">{{ secret }}</code>
+  <button type="button" class="btn" data-copy-model="{{ secret }}" aria-label="Copy API key" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label">Copy</span></button>
+  {% else %}
+  <p class="hint">This key was already shown and cannot be displayed again. Revoke it and generate a new one if you no longer have the secret.</p>
+  {% endif %}
+  <div class="form-actions">
+    <a class="btn" href="/api-keys"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#arrow-left"></use></svg>All API keys</a>
+  </div>
+</div>
+{% endblock %}

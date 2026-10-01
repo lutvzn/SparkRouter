@@ -1,41 +1,44 @@
 {% extends "base.html" %}
 {% block title %}Combos{% endblock %}
+{% block main_class %}combo-page{% endblock %}
 {% block topbar_heading %}
 <div class="topbar-heading">
   <h1>Combos</h1>
-  <p class="topbar-subtitle">Route requests through ordered provider/model connections.</p>
+  <p class="topbar-subtitle">Route requests through provider/model connections.</p>
 </div>
 {% endblock %}
 {% block content %}
 <div class="page-head page-actions">
-  <a class="btn primary" href="/combos/new">Add combo</a>
+  <a class="btn primary" href="/combos/new"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Add combo</a>
 </div>
 {% if combos.is_empty() %}
 <p class="empty">No combos configured yet. <a href="/combos/new">Add one</a> to start routing with ordered fallbacks.</p>
 {% else %}
-<table>
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Fallbacks</th>
-      <th class="actions">Actions</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for c in combos %}
-    <tr>
-      <td><a href="/combos/{{ c.id }}">{{ c.name }}</a></td>
-      <td>{{ c.step_summary }}</td>
-      <td class="actions">
-        <a class="btn small" href="/combos/{{ c.id }}">Edit</a>
-        <form class="inline" method="post" action="/combos/{{ c.id }}/delete">
-          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-          <button class="btn small danger" type="submit">Delete</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="combo-list">
+  {% for c in combos %}
+  <article class="card combo-list-row">
+    <div class="combo-list-info">
+      <div class="combo-list-title">
+        <a class="provider-tile-title" href="/combos/{{ c.id }}">{{ c.name }}</a>
+        <button type="button" class="btn small combo-copy" data-copy-model="combo/{{ c.name }}" aria-label="Copy model ID for {{ c.name }}" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label">Copy</span></button>
+      </div>
+      <span class="hint">{{ c.step_summary }}</span>
+      <span class="badge">{{ c.strategy_label }}</span>
+    </div>
+    <div class="combo-list-actions">
+      <form class="inline" method="post" action="/combos/{{ c.id }}/duplicate">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg>Duplicate</button>
+      </form>
+      <a class="btn small" href="/combos/{{ c.id }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#pencil"></use></svg>Edit</a>
+      <form class="inline" method="post" action="/combos/{{ c.id }}/delete">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Delete</button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+<span class="visually-hidden" id="copy-status" role="status" aria-live="polite"></span>
 {% endif %}
 {% endblock %}

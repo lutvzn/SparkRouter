@@ -22,6 +22,7 @@ pub struct AppState {
     pub crypto: Arc<Crypto>,
     pub api_key: Option<Arc<SecretString>>,
     pub csrf_token: Arc<String>,
+    pub(crate) round_robin: Arc<crate::routing::combo::RoundRobin>,
 }
 
 impl AppState {
@@ -46,6 +47,7 @@ impl AppState {
             crypto: Arc::new(config.crypto),
             api_key: config.api_key.map(Arc::new),
             csrf_token: Arc::new(uuid::Uuid::new_v4().to_string()),
+            round_robin: Arc::default(),
         })
     }
 }
@@ -73,22 +75,28 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    if let Some(expected) = &state.api_key {
-        let supplied = request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if !bool::from(
+    let supplied = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let env_match = state.api_key.as_ref().is_some_and(|expected| {
+        bool::from(
             supplied
                 .as_bytes()
                 .ct_eq(expected.expose_secret().as_bytes()),
-        ) {
-            return Err(AppError::Unauthorized);
-        }
+        )
+    });
+    if env_match || crate::db::api_keys::matches(&state.db, &state.crypto, supplied).await? {
+        return Ok(next.run(request).await);
     }
-    Ok(next.run(request).await)
+    // Open only when neither the environment key nor a generated key exists.
+    // A generated key is unrestricted and can call every combo.
+    if state.api_key.is_none() && !crate::db::api_keys::any(&state.db).await? {
+        return Ok(next.run(request).await);
+    }
+    Err(AppError::Unauthorized)
 }
 
 async fn dashboard_origin(request: Request, next: Next) -> Result<Response, AppError> {

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}API keys{% endblock %}
+{% block main_class %}combo-page{% endblock %}
+{% block topbar_heading %}
+<div class="topbar-heading">
+  <h1>API keys</h1>
+  <p class="topbar-subtitle">Keys authorize <code>/v1</code> requests. Each key can call every combo.</p>
+</div>
+{% endblock %}
+{% block content %}
+<form method="post" action="/api-keys" class="card">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. laptop">
+  <p class="hint">1&ndash;64 characters. The key is unrestricted and is shown only once.</p>
+  <div class="form-actions">
+    <button class="btn primary" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>
+  </div>
+</form>
+{% if keys.is_empty() %}
+<p class="empty">No API keys yet. Until one is generated, <code>/v1</code> stays open unless <code>ROUTER_API_KEY</code> is set.</p>
+{% else %}
+<div class="combo-list">
+  {% for key in keys %}
+  <article class="card combo-list-row">
+    <div class="combo-list-info">
+      <div class="combo-list-title">
+        <span class="provider-tile-title">{{ key.name }}</span>
+      </div>
+      <span class="hint"><code>{{ key.prefix }}&hellip;</code> &middot; {{ key.created_at }}</span>
+    </div>
+    <div class="combo-list-actions">
+      <form class="inline" method="post" action="/api-keys/{{ key.id }}/delete">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Revoke</button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

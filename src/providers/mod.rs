@@ -133,6 +133,132 @@ fn request(
     Ok(request)
 }
 
+const MAX_LISTED_MODELS: usize = 500;
+const MAX_MODEL_PAGES: usize = 5;
+const MAX_MODEL_LIST_BYTES: usize = 1024 * 1024;
+
+/// Model IDs returned by a provider's `/models` endpoint, in upstream order.
+pub struct ListedModels {
+    pub ids: Vec<String>,
+    pub truncated: bool,
+}
+
+pub async fn list_models(
+    client: &reqwest::Client,
+    crypto: &Crypto,
+    provider: &Provider,
+) -> Result<ListedModels, AppError> {
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut after: Option<String> = None;
+    let mut truncated = false;
+    for _ in 0..MAX_MODEL_PAGES {
+        if ids.len() >= MAX_LISTED_MODELS {
+            truncated = true;
+            break;
+        }
+        let endpoint = match &after {
+            Some(cursor) => format!("models?limit=100&after_id={}", query_component(cursor)),
+            None => "models".to_owned(),
+        };
+        let response = request(client, crypto, provider, reqwest::Method::GET, &endpoint)?
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| AppError::HttpClient)?;
+        if !response.status().is_success() {
+            return Err(AppError::Upstream(response.status()));
+        }
+        let bytes = read_model_body(response).await?;
+        let body: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::InvalidRequest("provider did not return a model list".into()))?;
+        let (page, next) = parse_model_page(&body)?;
+        for id in page {
+            if seen.insert(id.clone()) {
+                ids.push(id);
+                if ids.len() == MAX_LISTED_MODELS {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        match next {
+            Some(cursor) if !truncated && ids.len() < MAX_LISTED_MODELS => after = Some(cursor),
+            Some(_) => {
+                truncated = true;
+                break;
+            }
+            None => break,
+        }
+    }
+    Ok(ListedModels { ids, truncated })
+}
+
+/// Reads one OpenAI- or Anthropic-shaped models page. Unknown entries are
+/// skipped; a missing `data` array is an error so a success page is not stored
+/// as an empty catalog.
+pub fn parse_model_page(body: &Value) -> Result<(Vec<String>, Option<String>), AppError> {
+    let data = body
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::InvalidRequest("provider did not return a model list".into()))?;
+    let mut ids = Vec::new();
+    for item in data {
+        let raw = item.get("id").and_then(Value::as_str).unwrap_or("");
+        let id = raw.trim();
+        if id.is_empty() || id.chars().count() > 256 || id.chars().any(char::is_control) {
+            continue;
+        }
+        ids.push(id.to_owned());
+    }
+    let next = if body.get("has_more").and_then(Value::as_bool) == Some(true) {
+        body.get("last_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    Ok((ids, next))
+}
+
+fn query_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+async fn read_model_body(response: reqwest::Response) -> Result<Bytes, AppError> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_MODEL_LIST_BYTES as u64)
+    {
+        return Err(AppError::InvalidRequest(
+            "provider model list is too large".into(),
+        ));
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| AppError::HttpClient)?;
+        if chunk.len() > MAX_MODEL_LIST_BYTES.saturating_sub(body.len()) {
+            return Err(AppError::InvalidRequest(
+                "provider model list is too large".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(body))
+}
+
 pub async fn test_connection(
     client: &reqwest::Client,
     crypto: &Crypto,
@@ -282,6 +408,29 @@ mod tests {
         ] {
             assert!(normalize_base_url(url).is_err());
         }
+    }
+
+    #[test]
+    fn parse_model_page_reads_ids_and_anthropic_pagination() {
+        let (ids, next) = parse_model_page(&json!({
+            "data": [
+                {"id": " gpt-4o "},
+                {"id": ""},
+                {"id": "gpt-4o-mini"},
+                {"name": "missing-id"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(ids, vec!["gpt-4o".to_owned(), "gpt-4o-mini".to_owned()]);
+        assert!(next.is_none());
+        let (_, next) = parse_model_page(&json!({
+            "data": [{"id": "claude-sonnet"}],
+            "has_more": true,
+            "last_id": "claude-sonnet"
+        }))
+        .unwrap();
+        assert_eq!(next.as_deref(), Some("claude-sonnet"));
+        assert!(parse_model_page(&json!({"models": ["nope"]})).is_err());
     }
 
     #[test]

@@ -4,7 +4,9 @@ use aes_gcm::{
     aead::{Aead, AeadCore, OsRng, Payload},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use hmac::{Hmac, Mac};
 use secrecy::{ExposeSecret, SecretString};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 // v1 envelope: version byte | random 96-bit nonce | ciphertext and GCM tag.
@@ -78,6 +80,16 @@ impl Crypto {
         let text = std::str::from_utf8(&plain).map_err(|_| AppError::Encryption)?;
         Ok(SecretString::from(text))
     }
+
+    /// HMAC-SHA256 fingerprint of a gateway API key. The master key is the HMAC
+    /// key, so a database copy cannot be matched without it. Not reversible.
+    pub fn gateway_key_fingerprint(&self, secret: &str) -> Result<String, AppError> {
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.key.as_ref())
+            .map_err(|_| AppError::Encryption)?;
+        <Hmac<Sha256> as Mac>::update(&mut mac, b"sparkrouter.gateway-api-key.v1\0");
+        <Hmac<Sha256> as Mac>::update(&mut mac, secret.as_bytes());
+        Ok(STANDARD.encode(<Hmac<Sha256> as Mac>::finalize(mac).into_bytes()))
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +114,18 @@ mod tests {
         tampered[15] ^= 1;
         assert!(crypto.decrypt_api_key("p1", &tampered).is_err());
         assert!(crypto.decrypt_api_key("p1", &[1, 2]).is_err());
+    }
+
+    #[test]
+    fn gateway_key_fingerprint_is_stable_and_not_the_secret() {
+        let crypto = Crypto::from_base64(&SecretString::from(STANDARD.encode([42; 32]))).unwrap();
+        let first = crypto.gateway_key_fingerprint("sk-example").unwrap();
+        let second = crypto.gateway_key_fingerprint("sk-example").unwrap();
+        assert_eq!(first, second);
+        assert!(!first.contains("sk-example"));
+        let other = Crypto::from_base64(&SecretString::from(STANDARD.encode([43; 32]))).unwrap();
+        assert_ne!(other.gateway_key_fingerprint("sk-example").unwrap(), first);
+        assert_ne!(crypto.gateway_key_fingerprint("sk-other").unwrap(), first);
     }
 
     #[test]

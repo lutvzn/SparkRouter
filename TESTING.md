@@ -24,8 +24,7 @@ configuration directly with test-only keys. Tests create local mock HTTP servers
 on `127.0.0.1:0` and temporary or in-memory SQLite databases. Loopback networking
 and a writable temporary directory must be available.
 
-The suite currently contains 87 tests (59 library tests and 28 integration tests).
-That count is descriptive, not a fixed acceptance target; list current tests with:
+The suite includes library and integration tests. List current tests with:
 
 ```sh
 cargo test --locked -- --list
@@ -37,7 +36,7 @@ cargo test --locked -- --list
 | --- | --- |
 | `src/crypto.rs` tests | Encryption round-trip, unique nonces, wrong key/provider context, tampering, invalid master-key lengths |
 | `src/db/` tests | Migrations, foreign keys, WAL persistence, CRUD, validation, ordering, transactional swaps/removals, delete constraints, timestamps |
-| `src/routing/combo.rs` tests | Explicit retryable and permanent HTTP status classification |
+| `src/routing/combo.rs` tests | Retry classification, per-combo/concurrent round-robin turns, unbiased random index selection |
 | `src/providers/` tests | URL normalization, unknown-field preservation, model replacement, response translation, fragmented UTF-8/CRLF SSE, tools, usage, truncation, limits, stream commitment |
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
@@ -98,6 +97,12 @@ the intended behavior, update helpers, and keep precise protocol assertions.
 
 ## Manual acceptance smoke test
 
+On a provider page, check that the name and subtitle appear in the top bar,
+the Custom badge stays in the wide details card, and **Add connection** opens
+a popup. Check focus, Close/Cancel, Escape, native form submission, and narrow
+viewport layout in both themes. The popup uses native HTML popover controls,
+so it also works with JavaScript disabled in browsers supporting popovers.
+
 Use a **disposable database** and a saved test master key. Start the release
 executable following [BUILD.md](BUILD.md); never point an exploratory test at an
 existing installation's database.
@@ -124,7 +129,7 @@ existing installation's database.
    named custom providers may share URLs without merging their connections.
    Check the Custom badge and Delete provider action. Deletion removes the
    provider and all its connections, but a connection used by a combo must block
-   the entire deletion without losing any keys. Presets have no provider-delete action.
+   the entire deletion without losing any keys. Presets have no provider-delete action. The providers search box filters tile titles as you type, without Enter, and does not match the protocol badge alone. Refresh models on a connection and confirm those IDs appear as combo-step suggestions; a typed ID must still be accepted.
    Check preset tiles and Custom provider. Add two named connections to one
    preset and verify both appear on its page without exposing keys. Connections
    in separate custom providers must remain separate. Confirm the combo
@@ -133,6 +138,13 @@ existing installation's database.
    enabled state and verify its label. Ensure keys never appear in page HTML.
 4. Create `coding`, add two provider/model steps, reorder them, and remove/re-add
    a step. Verify the order persists after restarting with the **same** master key.
+   Check full-width combo rows: name and Copy on the left; Duplicate, Edit, and
+   Delete on the right. Copy must write `combo/coding`. Duplicate twice and check
+   unique copy names, identical ordered targets, and independent edits/deletion.
+   Check narrow layout and clipboard failure feedback without inline scripts.
+   Combo titles should be near-white in dark mode and dark in light mode, with
+   no underline on hover. Check local SVG icons on navigation and action buttons;
+   Copy feedback and theme toggling must preserve their icons and text labels.
 5. List virtual models and make normal and streaming calls:
 
    ```sh
@@ -150,14 +162,19 @@ existing installation's database.
      -d '{"model":"combo/coding","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
    ```
 
-   Omit Authorization if `ROUTER_API_KEY` is unset. In PowerShell, use `curl.exe`
+   Omit Authorization if ROUTER_API_KEY is unset and no dashboard API key exists. In PowerShell, use `curl.exe`
    or its native HTTP commands and `$env:ROUTER_API_KEY` for environment access.
 
 6. If a gateway key is configured, verify missing/wrong keys receive `401` on
-   both API endpoints. Dashboard pages remain unauthenticated by design.
+   both API endpoints. Generate an API key and confirm it can call every combo, is shown only once, and is absent from the list and stored plaintext. Revoking the last generated key reopens the API when ROUTER_API_KEY is unset. Dashboard pages remain unauthenticated by design.
 7. Verify ordered fallback using a controlled local mock that returns `503` for
    its first step and success for its second. A `400` must stop the chain. Do not
    deliberately generate rate-limit traffic against real providers.
+   Priority must retain this behavior. Round robin should rotate enabled starting
+   steps across requests (not across retries), skip disabled connections, and
+   restart its sequence after process restart. Random should choose one enabled
+   start per request; repeat selections are valid. For both strategies, verify
+   cyclic fallback, permanent-error stopping, and no post-commit streaming retry.
 8. Check that deleting a referenced provider is rejected. Delete its combo steps
    first, then retry. Check HTMX actions and their error display in a browser.
    Create providers and combos using their ordinary form submits too; the pages

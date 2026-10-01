@@ -41,8 +41,10 @@ Open **http://127.0.0.1:8080/providers**:
 Use the left sidebar to switch between **Providers** and **Combos**.
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
+Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
+font dependency. Their license is included at `/static/icons-LICENSE.txt`.
 
-1. Select the **OpenRouter** provider tile, give the connection a name (such as
+1. Select the **OpenRouter** provider tile, click **Add connection**, give the connection a name (such as
    `Personal`), and add its API key. Add more named connections on the same page.
 2. Select another preset, such as **Groq**, or **Custom provider** to create a
    named provider with a base URL and protocol. This creates an empty card;
@@ -53,6 +55,15 @@ matches your device's theme; after toggling, your choice is saved in your browse
 4. Choose a specific **provider / connection** for each step and use the up/down
    buttons to change fallback order. Enter model IDs exactly as your upstream
    accepts them. Keys within a provider are not automatically rotated or retried.
+
+Choose **Priority**, **Round robin**, or **Random** when creating or editing a
+combo. Existing combos default to Priority. The Combos list shows its strategy.
+
+The Combos list has a **Copy** button beside each name for its `combo/<name>`
+model ID. **Duplicate** creates an independent combo with the same ordered steps
+and opens it for editing. Copies are named `<name>-copy`, then `<name>-copy-2`,
+and so on; long names are shortened to keep the 64-character limit. Existing
+connections are reused, not duplicated, and the selected strategy is preserved.
 
 ```sh
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -65,7 +76,7 @@ curl http://127.0.0.1:8080/v1/models \
   -H "Authorization: Bearer $ROUTER_API_KEY"
 ```
 
-Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. If `ROUTER_API_KEY` is unset, omit Authorization (clients requiring a key may send any placeholder).
+Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. Either key can call every combo. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
 
 ## Configuration
 
@@ -73,7 +84,7 @@ Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and mod
 | --- | --- | --- |
 | `ROUTER_MASTER_KEY` | **required** | Base64-encoded 32 random bytes; AES-256-GCM master key |
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite URL; database and schema created on startup |
-| `ROUTER_API_KEY` | unset | Optional bearer key protecting `/v1/*`; an explicitly empty value is rejected |
+| `ROUTER_API_KEY` | unset | Optional bearer key protecting `/v1/*`; an explicitly empty value is rejected. Dashboard-generated keys also authorize `/v1/*` and, once any exist, require authentication even when this variable is unset |
 | `ROUTER_BIND` | `127.0.0.1:8080` | IP address and port |
 | `RUST_LOG` | `info` | `tracing` filter |
 
@@ -81,11 +92,11 @@ The parent database directory must already exist and be writable. SQLite WAL/SHM
 
 ## Providers and protocols
 
-Providers are configuration, not vendor-specific implementations. OpenRouter, Groq, DeepSeek, Together, Fireworks, and local OpenAI-compatible servers all use the **OpenAI** protocol. Include any required API prefix (usually `/v1`) in the base URL. Trailing slashes are normalized; URL credentials, query strings, and fragments are rejected. HTTP is supported for local servers. An empty API key is allowed for unauthenticated local servers.
+Providers are configuration, not vendor-specific implementations. The dashboard includes OmniRoute's API-key chat presets that use the **OpenAI** or **Anthropic** adapters, including OpenRouter, Groq, DeepSeek, Together, and Fireworks. Local OpenAI-compatible servers use the **OpenAI** protocol too. Include any required API prefix (usually `/v1`) in the base URL. Trailing slashes are normalized; URL credentials, query strings, and fragments are rejected. HTTP is supported for local servers. An empty API key is allowed for unauthenticated local servers.
 
 The **Anthropic** protocol uses `https://api.anthropic.com/v1` and translates Chat Completions to `/messages`, including text, system instructions, tools, and streaming. Vendor-specific protocol limitations are described below.
 
-The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. Some compatible servers do not implement model listing; a failed test does not necessarily mean their chat endpoint is unusable. Save changes before testing them.
+The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** on a connection stores that list and the combo editor suggests those IDs; you can still type any model. Some compatible servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
 
 Saved API keys are never rendered back into HTML. Leaving the key field blank
 when editing a connection preserves the existing encrypted value. To clear a
@@ -97,7 +108,10 @@ any connection is referenced by a combo; preset provider tiles are not removable
 
 ## Routing and streaming
 
-- Combos are ordered fallback chains, with each enabled step attempted at most once. Disabled providers are skipped.
+- **Priority** (default) starts at the first enabled step, then follows configured order on retryable failures.
+- **Round robin** rotates the starting step across enabled steps, once per request. After the last step it returns to the first. Cursors are per combo, shared across concurrent requests in one process, and reset on restart; changes to enabled steps may change the next starting step.
+- **Random** chooses a uniformly random enabled starting step for each request. Repeated selections are normal; it does not guarantee equal traffic counts.
+- Round robin and Random fall back cyclically through the remaining enabled steps in configured order. Each step is attempted at most once per request. Disabled providers never consume a turn. Permanent errors stop all strategies; streaming cannot switch after commitment.
 - Connect/read/request failures and HTTP **408, 429, 500, 502, 503, 504** try the next step. The status policy lives in `src/routing/combo.rs`.
 - Other HTTP failures, including **400, 401, 403, 404, 422**, stop the chain. No repeated attempts, cooldown state, or background work.
 - Empty combos, entirely disabled combos, or exhausted chains return a sanitized OpenAI-shaped `502` error. Unknown combo names return `404`.
@@ -110,7 +124,7 @@ any connection is referenced by a combo; preset provider tiles are not removable
 
 Keys are encrypted using AES-256-GCM with a fresh random nonce and authenticated provider ID. The database stores versioned ciphertext; the master key is never stored there. Secret values are wrapped with `secrecy` and key/decryption buffers use `zeroize`. Normal logs include routing IDs, model, latency, status, and fallback events; they omit credentials and upstream bodies.
 
-The dashboard has **no user accounts or login**. Keep it on localhost or put it behind an authenticated reverse proxy when exposing it on a network. `ROUTER_API_KEY` protects gateway endpoints only. Dashboard forms have CSRF tokens and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
+The dashboard has **no user accounts or login**. Keep it on localhost or put it behind an authenticated reverse proxy when exposing it on a network. `ROUTER_API_KEY` and dashboard-generated API keys protect gateway endpoints only. Generated keys are unrestricted, shown once, and stored as a master-key fingerprint rather than a recoverable secret. Dashboard forms have CSRF tokens and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
 
 The dashboard uses `Referrer-Policy: same-origin`: native form submissions retain their Origin for validation, and external destinations receive no referrer. If a submission is rejected, reload the form after a server restart (CSRF tokens change), use one consistent hostname and port, and ensure a reverse proxy preserves the browser-facing Host header.
 
@@ -145,6 +159,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-Only `/v1/chat/completions` and `/v1/models` are implemented; requests route via combo names. No embeddings, Responses API, Gemini, OAuth, load balancing, price optimization, queues, caching, telemetry platform, or automatic model discovery. Model IDs are arbitrary strings. To change a combo step's provider/model, remove it and add the replacement. Model listing includes configured combos even if empty or disabled.
+Only `/v1/chat/completions` and `/v1/models` are implemented; requests route via combo names. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. No embeddings, Responses API, Gemini, OAuth, routing optimization, price optimization, queues, caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. To change a combo step's provider/model, remove it and add the replacement. Model listing includes configured combos even if empty or disabled.
 
 Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 1024 if unspecified. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow or dashboard authentication in this version.

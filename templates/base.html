@@ -14,14 +14,15 @@
   <aside class="sidebar">
     <div class="brand"><a href="/">{{ app_name }}</a></div>
     <nav aria-label="Dashboard">
-      <a href="/providers">Providers</a>
-      <a href="/combos">Combos</a>
+      <a href="/providers"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#server"></use></svg>Providers</a>
+      <a href="/combos"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#layers"></use></svg>Combos</a>
+      <a href="/api-keys"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#key"></use></svg>API keys</a>
     </nav>
   </aside>
   <div class="dashboard-content">
     <header class="topbar">
 {% block topbar_heading %}{% endblock %}
-      <button id="theme-toggle" type="button" class="btn theme-toggle" hidden>Theme: Light</button>
+      <button id="theme-toggle" type="button" class="btn theme-toggle" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#moon"></use></svg><span class="btn-label">Theme: Light</span></button>
     </header>
     <main class="{% block main_class %}{% endblock %}">
       <p id="action-error" class="test fail" role="alert" hidden></p>

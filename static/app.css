@@ -83,6 +83,25 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+/* Inline SVG icons come from the local Lucide sprite and are colored purely
+   through inheritance (currentColor), so they follow the active theme. */
+.icon {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  vertical-align: -0.15em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Icons only get a trailing gap where they share a row with a label; .btn
+   itself stays inline-block so button and header layouts do not shift. */
+.btn .icon,
+.sidebar .icon { margin-right: 0.4rem; }
+
 .sidebar {
   flex: 0 0 14rem;
   width: 14rem;
@@ -99,6 +118,8 @@ a:hover { text-decoration: underline; }
   margin-top: 1.5rem;
 }
 .sidebar nav a {
+  display: flex;
+  align-items: center;
   padding: 0.6rem 0.75rem;
   border-radius: 0.35rem;
   color: var(--fg);
@@ -129,7 +150,7 @@ a:hover { text-decoration: underline; }
   flex: 1;
   min-width: 0;
 }
-.topbar-heading h1 { margin: 0; font-size: 1.4rem; }
+.topbar-heading h1 { margin: 0; font-size: 1.4rem; overflow-wrap: anywhere; }
 .topbar-subtitle {
   margin: 0.2rem 0 0;
   font-size: 0.85rem;
@@ -167,6 +188,32 @@ h2 { font-size: 1.1rem; margin: 1.6rem 0 0.6rem; }
   justify-content: flex-end;
   margin-bottom: 1rem;
 }
+
+.provider-toolbar { justify-content: space-between; align-items: flex-end; }
+.provider-search { flex: 1 1 16rem; max-width: 28rem; margin: 0; }
+.provider-search-label { display: block; margin: 0 0 0.25rem; font-weight: 600; font-size: 0.9rem; }
+.provider-search-field {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--field);
+  color: var(--muted);
+}
+.provider-search-field:focus-within { border-color: var(--accent); color: var(--fg); }
+.provider-search-field input[type="search"] {
+  width: 100%;
+  padding: 0.45rem 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg);
+}
+.provider-search-field input[type="search"]:focus { outline: none; }
+.provider-search-empty { margin: 0 0 1rem; color: var(--muted); }
+a.provider-tile[hidden], .provider-search-empty[hidden] { display: none; }
 
 .page-head-actions {
   display: flex;
@@ -212,7 +259,7 @@ form.inline { display: inline-block; }
 label { display: block; margin: 0.8rem 0 0.25rem; font-weight: 600; font-size: 0.9rem; }
 label.check { display: flex; align-items: center; gap: 0.45rem; font-weight: 500; }
 
-input[type="text"], input[type="password"], select {
+input[type="text"], input[type="password"], input[type="search"], select {
   width: 100%;
   padding: 0.45rem 0.55rem;
   border: 1px solid var(--line);
@@ -268,6 +315,20 @@ input[type="checkbox"] { width: auto; }
 
 .hint { color: var(--muted); font-size: 0.82rem; margin: 0.25rem 0 0; }
 
+/* Reusable screen-reader-only region for polite status announcements. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 .test { font-size: 0.82rem; margin-left: 0.35rem; }
 .test.ok { color: var(--ok); }
 .test.fail { color: var(--danger); }
@@ -277,6 +338,12 @@ code {
   padding: 0.05rem 0.3rem;
   border-radius: 3px;
   font-size: 0.85em;
+}
+code.key-secret {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 0.8rem 0;
+  padding: 0.7rem;
 }
 
 .footer {
@@ -386,6 +453,10 @@ a.provider-tile:focus-visible {
 }
 
 .connection-card h3, .provider-tile-title { overflow-wrap: anywhere; }
+.model-list { margin-top: 0.7rem; }
+.model-list details { margin-bottom: 0.45rem; }
+.model-list ul { max-height: 12rem; overflow: auto; margin: 0.4rem 0 0; padding-left: 1.1rem; }
+.model-list li { overflow-wrap: anywhere; }
 
 .connection-head {
   display: flex;
@@ -402,10 +473,126 @@ a.provider-tile:focus-visible {
   margin-top: 1rem;
 }
 
-.connection-section { margin-top: 1.5rem; }
-.connection-section h2,
-.connection-section h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.95rem;
+/* Provider group details card: a full-width summary of the shared endpoint. */
+.provider-details {
+  width: 100%;
+  max-width: none;
 }
-.connection-section code { overflow-wrap: anywhere; }
+
+.provider-details-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.provider-details-heading h2 { margin: 0; }
+
+/* The URL column gets twice the space of the protocol column; minmax(0, ...)
+   lets long values wrap instead of blowing out the grid. */
+.provider-details-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 0.6rem 1.5rem;
+  margin: 0.8rem 0 0;
+}
+.provider-details-grid div { min-width: 0; }
+.provider-details-grid dt {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.provider-details-grid dd { margin: 0.15rem 0 0; }
+.provider-details code { overflow-wrap: anywhere; }
+@media (max-width: 40rem) {
+  .provider-details-grid { grid-template-columns: 1fr; gap: 0.6rem; }
+}
+
+/* Connections heading shares its row with the Add connection trigger. */
+.connections-head { margin-top: 1.6rem; margin-bottom: 0.6rem; }
+.connections-head h2 { margin: 0; }
+
+/* Native popover for the Add connection form; no JavaScript involved. The
+   popover attribute itself hides the container in supporting browsers, so it
+   must not be display:none here: older browsers render it inline as a plain
+   card and the form stays reachable without popover support. */
+.connection-popup {
+  width: min(36rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  margin: auto;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1.2rem;
+}
+.connection-popup::backdrop {
+  background: rgb(0 0 0 / 0.35);
+}
+.connection-popup-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.connection-popup-head h2 { margin: 0; }
+/* The popup container carries the card look, so the form drops its own. */
+.connection-popup .connection-popup-form {
+  border: 0;
+  padding: 0;
+  max-width: none;
+}
+
+/* Combos list: wide page of full-width card rows, name + copy left and
+   Duplicate/Edit/Delete right. */
+main.combo-page { max-width: 90rem; }
+
+.combo-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.combo-list-row {
+  width: 100%;
+  max-width: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.combo-list-info { min-width: 0; }
+
+.combo-list-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.combo-list-title .provider-tile-title { overflow-wrap: anywhere; }
+
+/* Combo names read as row titles, not links: plain foreground color with no
+   underline on hover/focus either; the browser focus outline is untouched. */
+.combo-list-title a.provider-tile-title,
+.combo-list-title a.provider-tile-title:hover,
+.combo-list-title a.provider-tile-title:focus {
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.combo-list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+/* Narrow viewports: let long rows wrap, keeping the actions trailing. */
+@media (max-width: 40rem) {
+  .combo-list-row { flex-wrap: wrap; }
+  .combo-list-actions { margin-left: auto; }
+}

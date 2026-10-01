@@ -8,10 +8,18 @@
 </div>
 {% endblock %}
 {% block content %}
-<div class="page-head page-actions">
-  <a class="btn primary" href="/providers/new">Add custom provider</a>
+<div class="page-head page-actions provider-toolbar">
+  <label class="provider-search" for="provider-search">
+    <span class="provider-search-label">Search</span>
+    <span class="provider-search-field">
+      <svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#search"></use></svg>
+      <input id="provider-search" type="search" placeholder="Filter by name" autocomplete="off" enterkeyhint="search" aria-controls="provider-grid">
+    </span>
+  </label>
+  <a class="btn primary" href="/providers/new"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Add custom provider</a>
 </div>
-<div class="provider-grid">
+<p id="provider-search-empty" class="provider-search-empty" hidden>No providers match.</p>
+<div id="provider-grid" class="provider-grid">
   {% for t in tiles %}
   <a class="provider-tile" href="{{ t.href }}">
     <span class="provider-tile-heading">
@@ -36,7 +44,7 @@
   {% endfor %}
   <a class="provider-tile" href="/providers/new">
     <span class="provider-tile-heading">
-      <span class="provider-initial" aria-hidden="true">+</span>
+      <span class="provider-initial" aria-hidden="true"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg></span>
       <span class="provider-title-row">
         <span class="provider-tile-title">Custom provider</span>
       </span>

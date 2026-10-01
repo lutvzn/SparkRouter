@@ -21,7 +21,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
     response::Response,
-    routing::post,
+    routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
@@ -35,7 +35,10 @@ use sparkrouter::{
     app::{self, AppState},
     config::Config,
     crypto::Crypto,
-    db::{combos, providers as provider_db},
+    db::{
+        combos::{self, Strategy},
+        providers as provider_db,
+    },
     providers::Protocol,
 };
 
@@ -91,6 +94,42 @@ async fn combo_with_steps(state: &AppState, steps: &[(&str, &str)]) -> TestResul
     for (provider_id, model) in steps {
         combos::add_step(&state.db, &combo.id, provider_id, model).await?;
     }
+    Ok(())
+}
+
+/// Create a named combo with ordered steps and a routing strategy, returning
+/// the stored combo so tests can address it by id.
+async fn combo_with_strategy(
+    state: &AppState,
+    name: &str,
+    steps: &[(&str, &str)],
+    strategy: Strategy,
+) -> Result<combos::Combo, BoxError> {
+    let combo = combos::create_with_strategy(&state.db, name, strategy).await?;
+    for (provider_id, model) in steps {
+        combos::add_step(&state.db, &combo.id, provider_id, model).await?;
+    }
+    Ok(combo)
+}
+
+/// Send one chat completion to `combo/<name>` and assert it succeeded and was
+/// served by the step configured with `expected_model`.
+async fn assert_combo_reply(state: &AppState, name: &str, expected_model: &str) -> TestResult {
+    let body = json!({
+        "model": format!("combo/{name}"),
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let response = send(state, chat_request(&body)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "combo {name} expected a reply from {expected_model}"
+    );
+    let payload = json_body(response).await;
+    assert_eq!(
+        payload["model"], expected_model,
+        "combo {name} was served by the wrong step"
+    );
     Ok(())
 }
 
@@ -512,6 +551,728 @@ async fn disabled_provider_is_skipped() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
+// Routing strategies: round robin and random step selection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn round_robin_rotates_the_starting_step_once_per_request() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(openai_echo_router("first reply")).await;
+    let second = spawn_upstream(openai_echo_router("second reply")).await;
+    let third = spawn_upstream(openai_echo_router("third reply")).await;
+
+    save_provider(
+        &state,
+        "prov-first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-second",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-third",
+        &third.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-third",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-first", "model-first"),
+            ("prov-second", "model-second"),
+            ("prov-third", "model-third"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // Each `send` builds a fresh router over a cloned AppState, so rotation
+    // surviving across requests also proves the cursor is shared state behind
+    // those clones rather than per-request data.
+    assert_combo_reply(&state, "coding", "model-first").await?;
+    assert_combo_reply(&state, "coding", "model-second").await?;
+    assert_combo_reply(&state, "coding", "model-third").await?;
+    assert_combo_reply(&state, "coding", "model-first").await?;
+
+    assert_eq!(first.hits.count(), 2);
+    assert_eq!(second.hits.count(), 1);
+    assert_eq!(third.hits.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round_robin_skips_disabled_steps_without_taking_rotation_turns() -> TestResult {
+    let state = test_state().await;
+    let off_first = spawn_upstream(openai_echo_router("off first reply")).await;
+    let on_first = spawn_upstream(openai_echo_router("on first reply")).await;
+    let off_middle = spawn_upstream(openai_echo_router("off middle reply")).await;
+    let on_last = spawn_upstream(openai_echo_router("on last reply")).await;
+
+    save_provider(
+        &state,
+        "prov-off-first",
+        &off_first.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-1",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-on-first",
+        &on_first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-2",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-off-middle",
+        &off_middle.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-3",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-on-last",
+        &on_last.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-4",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-off-first", "model-off-first"),
+            ("prov-on-first", "model-on-first"),
+            ("prov-off-middle", "model-off-middle"),
+            ("prov-on-last", "model-on-last"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // Disabled steps neither receive traffic nor consume a rotation turn:
+    // the two eligible steps simply alternate.
+    assert_combo_reply(&state, "coding", "model-on-first").await?;
+    assert_combo_reply(&state, "coding", "model-on-last").await?;
+    assert_combo_reply(&state, "coding", "model-on-first").await?;
+    assert_combo_reply(&state, "coding", "model-on-last").await?;
+
+    assert_eq!(
+        off_first.hits.count(),
+        0,
+        "disabled first step must never be contacted"
+    );
+    assert_eq!(on_first.hits.count(), 2);
+    assert_eq!(
+        off_middle.hits.count(),
+        0,
+        "disabled middle step must never be contacted"
+    );
+    assert_eq!(on_last.hits.count(), 2);
+
+    // With every step disabled there is nothing left to rotate to.
+    let dead = spawn_upstream(openai_echo_router("never used")).await;
+    save_provider(
+        &state,
+        "prov-dead-a",
+        &dead.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-dead-a",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-dead-b",
+        &dead.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-dead-b",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "alldown",
+        &[
+            ("prov-dead-a", "model-dead-a"),
+            ("prov-dead-b", "model-dead-b"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    let body = json!({"model": "combo/alldown", "messages": [{"role": "user", "content": "hi"}]});
+    let response = send(&state, chat_request(&body)).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let payload = json_body(response).await;
+    assert_eq!(payload["error"]["code"], 502);
+    assert_eq!(dead.hits.count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn round_robin_falls_back_cyclically_and_advances_once_per_request() -> TestResult {
+    let state = test_state().await;
+    let flaky = spawn_upstream(error_status_router(StatusCode::TOO_MANY_REQUESTS)).await;
+    let second = spawn_upstream(openai_echo_router("second reply")).await;
+    let third = spawn_upstream(openai_echo_router("third reply")).await;
+
+    save_provider(
+        &state,
+        "prov-flaky",
+        &flaky.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-flaky",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-second",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-third",
+        &third.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-third",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-flaky", "model-flaky"),
+            ("prov-second", "model-second"),
+            ("prov-third", "model-third"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // Request 1 starts at the flaky step; 429 is retryable, so the cyclic
+    // in-request fallback moves on to the second step, which answers.
+    assert_combo_reply(&state, "coding", "model-second").await?;
+    assert_eq!(flaky.hits.count(), 1);
+    assert_eq!(second.hits.count(), 1);
+    assert_eq!(third.hits.count(), 0);
+
+    // Request 2 must start at the second step directly: the cursor advanced
+    // exactly once for request 1 as a whole, not once per upstream attempt.
+    assert_combo_reply(&state, "coding", "model-second").await?;
+    assert_eq!(flaky.hits.count(), 1);
+    assert_eq!(second.hits.count(), 2);
+    assert_eq!(third.hits.count(), 0);
+
+    // Request 3 rotates on to the third step.
+    assert_combo_reply(&state, "coding", "model-third").await?;
+    assert_eq!(flaky.hits.count(), 1);
+    assert_eq!(second.hits.count(), 2);
+    assert_eq!(third.hits.count(), 1);
+
+    // Request 4 wraps around to the flaky step, fails retryably again, and
+    // falls back to the second step: fallback stays cyclic per request.
+    assert_combo_reply(&state, "coding", "model-second").await?;
+    assert_eq!(flaky.hits.count(), 2);
+    assert_eq!(second.hits.count(), 3);
+    assert_eq!(third.hits.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn permanent_error_on_the_selected_round_robin_step_stops_the_chain() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(openai_echo_router("first reply")).await;
+    let rejecting = spawn_upstream(error_status_router(StatusCode::BAD_REQUEST)).await;
+    let last = spawn_upstream(openai_echo_router("last reply")).await;
+
+    save_provider(
+        &state,
+        "prov-first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-rejecting",
+        &rejecting.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-bad",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-last",
+        &last.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-last",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-first", "model-first"),
+            ("prov-rejecting", "model-bad"),
+            ("prov-last", "model-last"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // The first request starts at the healthy first step...
+    assert_combo_reply(&state, "coding", "model-first").await?;
+
+    // ...so the second request starts at the rejecting step. Its 400 is
+    // permanent: the healthy third step must not be contacted and the client
+    // sees the upstream status.
+    let body = json!({"model": "combo/coding", "messages": [{"role": "user", "content": "hi"}]});
+    let response = send(&state, chat_request(&body)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload = json_body(response).await;
+    assert_eq!(payload["error"]["code"], 400);
+
+    assert_eq!(first.hits.count(), 1);
+    assert_eq!(rejecting.hits.count(), 1);
+    assert_eq!(
+        last.hits.count(),
+        0,
+        "a permanent error must stop the chain"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn round_robin_cursors_are_independent_per_combo() -> TestResult {
+    let state = test_state().await;
+    let alpha_one = spawn_upstream(openai_echo_router("alpha one")).await;
+    let alpha_two = spawn_upstream(openai_echo_router("alpha two")).await;
+    let beta_one = spawn_upstream(openai_echo_router("beta one")).await;
+    let beta_two = spawn_upstream(openai_echo_router("beta two")).await;
+
+    save_provider(
+        &state,
+        "prov-alpha-one",
+        &alpha_one.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-a1",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-alpha-two",
+        &alpha_two.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-a2",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-beta-one",
+        &beta_one.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-b1",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-beta-two",
+        &beta_two.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-b2",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "alpha",
+        &[
+            ("prov-alpha-one", "alpha-one"),
+            ("prov-alpha-two", "alpha-two"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "beta",
+        &[("prov-beta-one", "beta-one"), ("prov-beta-two", "beta-two")],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // Interleaved requests over the shared state: each combo rotates through
+    // its own steps. A single process-global cursor would make beta's first
+    // request start at its second step instead of its first.
+    assert_combo_reply(&state, "alpha", "alpha-one").await?;
+    assert_combo_reply(&state, "beta", "beta-one").await?;
+    assert_combo_reply(&state, "alpha", "alpha-two").await?;
+    assert_combo_reply(&state, "beta", "beta-two").await?;
+    assert_combo_reply(&state, "alpha", "alpha-one").await?;
+    assert_combo_reply(&state, "beta", "beta-one").await?;
+
+    assert_eq!(alpha_one.hits.count(), 2);
+    assert_eq!(alpha_two.hits.count(), 1);
+    assert_eq!(beta_one.hits.count(), 2);
+    assert_eq!(beta_two.hits.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_round_robin_requests_distribute_exactly_evenly() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(openai_echo_router("first reply")).await;
+    let second = spawn_upstream(openai_echo_router("second reply")).await;
+    let third = spawn_upstream(openai_echo_router("third reply")).await;
+
+    save_provider(
+        &state,
+        "prov-a",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-a",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-b",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-b",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-c",
+        &third.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-c",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-a", "model-a"),
+            ("prov-b", "model-b"),
+            ("prov-c", "model-c"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // Six requests in flight at once over cloned AppState handles. Completion
+    // order is arbitrary, so the served models are sorted before comparing
+    // and nothing relies on await ordering. Whatever the interleaving, each
+    // request must claim exactly one rotation slot: two per step.
+    let body = json!({"model": "combo/coding", "messages": [{"role": "user", "content": "hi"}]});
+    let requests = (0..6).map(|_| send(&state, chat_request(&body)));
+    let responses = futures_util::future::join_all(requests).await;
+
+    let mut served = Vec::with_capacity(responses.len());
+    for response in responses {
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        served.push(
+            payload["model"]
+                .as_str()
+                .expect("echo upstream reports its model")
+                .to_owned(),
+        );
+    }
+    served.sort();
+    assert_eq!(
+        served,
+        [
+            "model-a", "model-a", "model-b", "model-b", "model-c", "model-c"
+        ],
+        "six concurrent requests must split two per step"
+    );
+
+    assert_eq!(first.hits.count(), 2);
+    assert_eq!(second.hits.count(), 2);
+    assert_eq!(third.hits.count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn random_strategy_resolves_the_only_enabled_step() -> TestResult {
+    let state = test_state().await;
+    let off_a = spawn_upstream(openai_echo_router("off a reply")).await;
+    let off_b = spawn_upstream(openai_echo_router("off b reply")).await;
+    let on_c = spawn_upstream(openai_echo_router("on c reply")).await;
+
+    save_provider(
+        &state,
+        "prov-off-a",
+        &off_a.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-off-a",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-off-b",
+        &off_b.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-off-b",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-on-c",
+        &on_c.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-on-c",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-off-a", "model-off-a"),
+            ("prov-off-b", "model-off-b"),
+            ("prov-on-c", "model-on-c"),
+        ],
+        Strategy::Random,
+    )
+    .await?;
+
+    // Uniform selection over the enabled steps only: with a single enabled
+    // step the outcome is deterministic no matter where the random start
+    // lands.
+    assert_combo_reply(&state, "coding", "model-on-c").await?;
+    assert_combo_reply(&state, "coding", "model-on-c").await?;
+    assert_combo_reply(&state, "coding", "model-on-c").await?;
+
+    assert_eq!(off_a.hits.count(), 0);
+    assert_eq!(off_b.hits.count(), 0);
+    assert_eq!(on_c.hits.count(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn random_strategy_attempts_each_step_at_most_once() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(error_status_router(StatusCode::SERVICE_UNAVAILABLE)).await;
+    let second = spawn_upstream(error_status_router(StatusCode::BAD_GATEWAY)).await;
+
+    save_provider(
+        &state,
+        "prov-down-a",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-down-a",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-down-b",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-down-b",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-down-a", "model-down-a"),
+            ("prov-down-b", "model-down-b"),
+        ],
+        Strategy::Random,
+    )
+    .await?;
+
+    // Whichever step the random start picks, the other is tried once as the
+    // cyclic fallback and neither is ever retried: exactly one hit each.
+    let body = json!({"model": "combo/coding", "messages": [{"role": "user", "content": "hi"}]});
+    let response = send(&state, chat_request(&body)).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let payload = json_body(response).await;
+    assert_eq!(payload["error"]["code"], 502);
+
+    assert_eq!(first.hits.count(), 1);
+    assert_eq!(second.hits.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn random_strategy_sends_each_request_to_exactly_one_healthy_step() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(openai_echo_router("first reply")).await;
+    let second = spawn_upstream(openai_echo_router("second reply")).await;
+    let third = spawn_upstream(openai_echo_router("third reply")).await;
+
+    save_provider(
+        &state,
+        "prov-a",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-a",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-b",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-b",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-c",
+        &third.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-c",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-a", "model-a"),
+            ("prov-b", "model-b"),
+            ("prov-c", "model-c"),
+        ],
+        Strategy::Random,
+    )
+    .await?;
+
+    // Every response must come from a real configured upstream, and each
+    // request must result in exactly one upstream attempt (no duplicated
+    // successes). Whether all three upstreams receive traffic is
+    // probabilistic under uniform random selection, so it is deliberately
+    // not asserted.
+    const REQUESTS: usize = 60;
+    let body = json!({"model": "combo/coding", "messages": [{"role": "user", "content": "hi"}]});
+    let valid = ["model-a", "model-b", "model-c"];
+    for index in 0..REQUESTS {
+        let response = send(&state, chat_request(&body)).await;
+        assert_eq!(response.status(), StatusCode::OK, "random request {index}");
+        let payload = json_body(response).await;
+        let served = payload["model"].as_str().unwrap_or_default();
+        assert!(
+            valid.contains(&served),
+            "random request {index} was served by unknown model {served}"
+        );
+    }
+
+    assert_eq!(
+        first.hits.count() + second.hits.count() + third.hits.count(),
+        REQUESTS,
+        "each request must be a single successful upstream attempt"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_strategy_is_rejected_without_changing_routing() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(openai_echo_router("first reply")).await;
+    let second = spawn_upstream(openai_echo_router("second reply")).await;
+
+    save_provider(
+        &state,
+        "prov-first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-second",
+    )
+    .await?;
+    let combo = combo_with_strategy(
+        &state,
+        "coding",
+        &[
+            ("prov-first", "model-first"),
+            ("prov-second", "model-second"),
+        ],
+        Strategy::RoundRobin,
+    )
+    .await?;
+
+    // Unknown strategies are rejected, not silently treated as Priority.
+    assert!(
+        sqlx::query("UPDATE combos SET strategy = 'time-paradox' WHERE id = ?")
+            .bind(&combo.id)
+            .execute(&state.db)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sparkrouter::db::combos::get(&state.db, &combo.id)
+            .await?
+            .strategy,
+        Strategy::RoundRobin
+    );
+
+    assert_combo_reply(&state, "coding", "model-first").await?;
+    assert_eq!(first.hits.count(), 1);
+    assert_eq!(second.hits.count(), 0);
+    assert_combo_reply(&state, "coding", "model-second").await?;
+    assert_eq!(first.hits.count(), 1);
+    assert_eq!(second.hits.count(), 1);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Model listing and gateway authentication
 // ---------------------------------------------------------------------------
 
@@ -562,6 +1323,117 @@ async fn optional_api_key_protects_models_and_chat() -> TestResult {
     let payload = json_body(response).await;
     assert!(payload["data"].to_string().contains("combo/coding"));
     Ok(())
+}
+
+#[tokio::test]
+async fn generated_api_keys_are_unrestricted_and_close_the_open_gateway() -> TestResult {
+    let state = test_state().await;
+    combo_with_steps(&state, &[]).await?;
+    combos::create(&state.db, "writing").await?;
+
+    // No environment key and no generated key: the API stays open.
+    assert_eq!(
+        send(&state, models_request(None)).await.status(),
+        StatusCode::OK
+    );
+
+    let issued = sparkrouter::db::api_keys::create(&state.db, &state.crypto, "client").await?;
+    let secret = issued.secret.expose_secret();
+    assert_eq!(
+        send(&state, models_request(None)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&state, models_request(Some("not-the-key")))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let response = send(&state, models_request(Some(secret))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = json_body(response).await["data"].to_string();
+    assert!(listed.contains("combo/coding") && listed.contains("combo/writing"));
+
+    // Auth is not scoped to a combo: the same key is accepted for every name.
+    // Empty combos fail upstream after authentication, which is not a 401.
+    for name in ["coding", "writing"] {
+        let response = send(&state, authed_chat(secret, name)).await;
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+        let _ = body_bytes(response).await;
+    }
+
+    sparkrouter::db::api_keys::delete(&state.db, &issued.id).await?;
+    assert_eq!(
+        send(&state, models_request(None)).await.status(),
+        StatusCode::OK,
+        "revoking the last generated key reopens the gateway when no environment key is set"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
+    let state = test_state().await;
+    let upstream = spawn_upstream(Router::new().route(
+        "/models",
+        get(|| async { Json(json!({"data": [{"id": "alpha"}, {"id": " beta "}]})) }),
+    ))
+    .await;
+    save_provider(
+        &state,
+        "listed",
+        &upstream.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-listed",
+    )
+    .await?;
+    let response = send(
+        &state,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/providers/listed/models")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::ORIGIN, "http://127.0.0.1:8080")
+            .body(Body::from(form_urlencoded(&[(
+                "_csrf",
+                state.csrf_token.as_str(),
+            )])))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = String::from_utf8(body_bytes(response).await.to_vec())?;
+    assert!(page.contains("alpha") && page.contains("beta"));
+    let combo = combos::create(&state.db, "suggest").await?;
+    let editor = send(
+        &state,
+        Request::builder()
+            .uri(format!("/combos/{}", combo.id))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(editor.status(), StatusCode::OK);
+    let editor = String::from_utf8(body_bytes(editor).await.to_vec())?;
+    assert!(editor.contains("id=\"models-listed\""));
+    assert!(editor.contains("value=\"alpha\""));
+    assert!(editor.contains("value=\"beta\""));
+    Ok(())
+}
+
+fn authed_chat(secret: &str, combo: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+        .body(Body::from(
+            json!({"model": format!("combo/{combo}"), "messages": [{"role": "user", "content": "hi"}]}).to_string(),
+        ))
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +1510,19 @@ async fn streaming_falls_back_before_start_and_passes_sse_through() -> TestResul
 
 #[tokio::test]
 async fn mid_stream_upstream_failure_does_not_fall_back() -> TestResult {
+    // The committed-stream invariant must hold no matter how the starting
+    // step is chosen: it is asserted for the ordered default and for round
+    // robin, whose first request starts at the same first step via the
+    // rotation path. Random starts at an unpredictable step, so it cannot be
+    // checked deterministically here; the code path after the response is
+    // committed is shared by every strategy.
+    for strategy in [Strategy::Priority, Strategy::RoundRobin] {
+        mid_stream_upstream_failure_does_not_fall_back_for(strategy).await?;
+    }
+    Ok(())
+}
+
+async fn mid_stream_upstream_failure_does_not_fall_back_for(strategy: Strategy) -> TestResult {
     let state = test_state().await;
     let (router, disconnect) = sse_disconnect_router();
     let first = spawn_upstream(router).await;
@@ -666,6 +1551,8 @@ async fn mid_stream_upstream_failure_does_not_fall_back() -> TestResult {
         &[("prov-flaky", "model-a"), ("prov-backup", "model-b")],
     )
     .await?;
+    let combo = combos::by_name(&state.db, "coding").await?;
+    combos::set_strategy(&state.db, &combo.id, strategy).await?;
 
     let body = json!({
         "model": "combo/coding",
@@ -1198,5 +2085,152 @@ async fn disk_database_survives_restart() -> TestResult {
     assert_eq!(steps[1].provider_id, "prov-disk-b");
     assert_eq!(steps[1].model, "model-b");
     reopened.db.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn round_robin_strategy_persists_but_the_cursor_resets_after_restart() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let database_url = format!(
+        "sqlite://{}",
+        directory
+            .path()
+            .join("round-robin.db")
+            .to_str()
+            .unwrap()
+            .replace('\\', "/")
+    );
+    let first = spawn_upstream(openai_echo_router("first reply")).await;
+    let second = spawn_upstream(openai_echo_router("second reply")).await;
+    let state = AppState::from_config(test_config(&database_url)).await?;
+    save_provider(
+        &state,
+        "first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "fake-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "fake-second",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "restart",
+        &[("first", "model-first"), ("second", "model-second")],
+        Strategy::RoundRobin,
+    )
+    .await?;
+    assert_combo_reply(&state, "restart", "model-first").await?;
+    state.db.close().await;
+    drop(state);
+
+    let reopened = AppState::from_config(test_config(&database_url)).await?;
+    assert_eq!(
+        combos::by_name(&reopened.db, "restart").await?.strategy,
+        Strategy::RoundRobin
+    );
+    assert_combo_reply(&reopened, "restart", "model-first").await?;
+    assert_combo_reply(&reopened, "restart", "model-second").await?;
+    assert_eq!(first.hits.count(), 2);
+    assert_eq!(second.hits.count(), 1);
+    reopened.db.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn random_permanent_errors_stop_without_trying_other_steps() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(error_status_router(StatusCode::BAD_REQUEST)).await;
+    let second = spawn_upstream(error_status_router(StatusCode::BAD_REQUEST)).await;
+    save_provider(
+        &state,
+        "first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "fake-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "fake-second",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "random-stop",
+        &[("first", "model-first"), ("second", "model-second")],
+        Strategy::Random,
+    )
+    .await?;
+    let response = send(&state, chat_request(&json!({"model": "combo/random-stop", "messages": [{"role": "user", "content": "hello"}]}))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let _ = body_bytes(response).await;
+    assert_eq!(first.hits.count() + second.hits.count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn random_stream_interruption_never_attempts_a_second_step() -> TestResult {
+    let state = test_state().await;
+    let (first_router, first_disconnect) = sse_disconnect_router();
+    let (second_router, second_disconnect) = sse_disconnect_router();
+    let first = spawn_upstream(first_router).await;
+    let second = spawn_upstream(second_router).await;
+    save_provider(
+        &state,
+        "first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "fake-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "fake-second",
+    )
+    .await?;
+    combo_with_strategy(
+        &state,
+        "random-stream",
+        &[("first", "model-first"), ("second", "model-second")],
+        Strategy::Random,
+    )
+    .await?;
+    let response = send(&state, chat_request(&json!({"model": "combo/random-stream", "stream": true, "messages": [{"role": "user", "content": "hello"}]}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut frames = response.into_body().into_data_stream();
+    let frame = tokio::time::timeout(Duration::from_secs(10), frames.next())
+        .await?
+        .expect("first frame")?;
+    assert_eq!(frame, Bytes::from_static(b"data: {\"first\":true}\n\n"));
+    assert_eq!(first.hits.count() + second.hits.count(), 1);
+    // Either starting step may be selected. Signal only the committed upstream.
+    let disconnect = if first.hits.count() == 1 {
+        first_disconnect
+    } else {
+        second_disconnect
+    };
+    disconnect.send(()).await?;
+    let interrupted = tokio::time::timeout(Duration::from_secs(10), frames.next()).await?;
+    assert!(matches!(interrupted, Some(Err(_))));
+    assert_eq!(first.hits.count() + second.hits.count(), 1);
     Ok(())
 }

@@ -55,17 +55,21 @@ binary, and API `owned_by` value are separate identifiers.
 
 `AppState` clones share the SQLx pool and Reqwest client. Crypto state, optional
 gateway secret, and CSRF token are shared through `Arc`. There is no global
-provider cache: routing reads persisted configuration for each request.
+provider cache: routing reads persisted configuration for each request. Per-combo
+round-robin cursors are ephemeral shared runtime state, protected by a short
+mutex reservation with no lock held during database or upstream I/O. They reset
+on process restart and dashboard deletion removes the combo's cursor.
 
 ## Persistence model
 
 | Table | Important columns and constraints |
 | --- | --- |
 | `providers` | UUID string ID, name, base URL, protocol, encrypted key blob, enabled flag, creation/update timestamps |
-| `combos` | UUID string ID, unique name, creation/update timestamps |
+| `combos` | UUID string ID, unique name, strategy (`priority`/`round_robin`/`random`), creation/update timestamps |
 | `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
+| `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
 reference it. An index supports provider-reference lookups. There is no models
@@ -92,9 +96,12 @@ The public router is mounted at `/v1` separately from the dashboard:
 - `POST /v1/chat/completions`
 - `GET /v1/models`
 
-If `ROUTER_API_KEY` is configured, API middleware requires `Authorization:
-Bearer <key>` and compares it using `subtle`. Otherwise these endpoints permit
-unauthenticated requests. Model listing returns configured combos as
+If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
+exists, API middleware requires `Authorization: Bearer <key>`. The environment
+key is compared with `subtle`. Generated keys are matched by a master-key HMAC
+fingerprint and are unrestricted: any valid key can call every combo. If neither
+kind of key is configured, these endpoints permit unauthenticated requests.
+Model listing returns configured combos as
 `combo/<name>`, including empty combos and those with no enabled provider.
 
 For chat requests:
@@ -102,17 +109,22 @@ For chat requests:
 1. Parse the body into `serde_json::Value`, requiring an object, a model string
    prefixed with `combo/`, and a boolean `stream` if supplied.
 2. Look up the combo by name and load steps in ascending position order.
-3. Skip disabled or concurrently removed providers.
+3. Priority uses configured order. Round robin and Random snapshot enabled steps
+   before selecting a starting step; disabled or concurrently removed providers
+   are skipped and do not consume turns. Providers are rechecked before attempts.
 4. Clone the request for the attempt and replace `model` with the step's actual
    upstream model. Let the selected protocol adapter prepare and send it.
 5. Return the first successful response. Retryable failures advance to the next
-   step; permanent errors stop the chain immediately.
+   step; permanent errors stop the chain immediately. Round robin reserves one
+   starting turn per request, shared by all handlers; retries do not advance it
+   again. Random uses OS randomness with rejection sampling to avoid modulo bias.
+   Both visit remaining steps cyclically from the selected start, at most once.
 
 The explicit retryable HTTP statuses are **408, 429, 500, 502, 503, 504**.
 Transport failures, timeouts, and invalid/incomplete upstream success payloads
 can also fail over before commitment. Local credential/configuration failures
 are permanent. Most malformed-request and authorization statuses stop the chain.
-There are no repeated attempts, hedged requests, cooldowns, or load balancing.
+There are no repeated attempts, hedged requests, cooldowns, or adaptive routing.
 
 Unknown combos return `404`; exhausted, empty, or wholly disabled chains return
 `502`. Errors have an OpenAI-shaped `error` object without raw upstream bodies.
@@ -122,9 +134,11 @@ not forwarded to the client as redirect instructions.
 
 ## Protocols rather than vendors
 
-`Protocol::{OpenAi, Anthropic}` is the dispatch boundary. OpenRouter, Groq,
-DeepSeek, and similar vendors share OpenAI handling through configuration.
-No trait hierarchy or per-vendor implementation is necessary.
+`Protocol::{OpenAi, Anthropic}` is the dispatch boundary. The dashboard catalog
+is static public metadata for OmniRoute API-key chat presets whose endpoint and
+auth header match one of these adapters. OpenRouter, Groq, DeepSeek, and similar
+vendors share OpenAI handling through configuration. No trait hierarchy or
+per-vendor implementation is necessary.
 
 Base URLs retain their configured API prefix and lose trailing slashes. Only
 HTTP(S) URLs without embedded credentials, query strings, or fragments are
@@ -178,7 +192,7 @@ dropped on completion, cancellation, or error. Streams remain backpressured.
 | Upstream idle read timeout | 120 seconds |
 | Each attempt's response-preparation deadline | 120 seconds |
 | Whole pre-commit fallback deadline | 180 seconds |
-| Provider connection test | 15 seconds |
+| Provider connection test and model refresh | 15 seconds |
 | HTTP pool idle lifetime / idle connections per host | 90 seconds / 4 |
 
 Committed streams are not subject to the pre-commit deadlines; they can run
@@ -187,12 +201,20 @@ longer while data arrives. The individual read timeout still applies.
 ## Dashboard and trust boundaries
 
 Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matching
-combo pages. POST actions handle create/edit/delete, connection tests, and step
+combo pages. POST actions handle create/edit/delete, connection tests, model-list refresh, and step
 add/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
 forms generally use 303 redirects back to GET pages. There is no SPA state store.
+`POST /combos/{id}/duplicate` requires dashboard CSRF/origin checks and copies
+the combo and its ordered steps in one immediate transaction. A unique copy
+name and fresh combo/step IDs are allocated; provider connection IDs are reused.
+The list's clipboard control uses embedded JavaScript to copy `combo/<name>`;
+it is hidden when the browser's clipboard API is unavailable.
 
 The providers index is a preset/custom tile catalog. `/providers/catalog/{slug}`
-and `/providers/groups/{id}` show named connections and an add-connection form.
+and `/providers/groups/{id}` show named connections and an add-connection popup.
+The popup uses native HTML popover controls, retaining ordinary POST forms and
+CSRF fields without inline scripts or a JavaScript dependency. Browsers without
+popover support display the form inline.
 Custom providers are stored separately from their connections. `POST
 /providers/custom` creates a named, empty provider from its name, base URL, and
 protocol; its card remains after the last connection is deleted. Membership is
@@ -224,6 +246,10 @@ Askama escapes user-controlled HTML. Embedded scripts/styles are served from
 `/static/`; CSP permits self-hosted assets and blocks framing. HTMX evaluation,
 script injection, and inline indicator styles are disabled. Small local JavaScript
 reports HTMX failures using text, not injected server HTML.
+Dashboard navigation and action icons use a locally embedded Lucide SVG sprite;
+decorative icons are hidden from assistive technology and retain text labels.
+The icon license is embedded alongside the sprite. No external icon service or
+font is loaded.
 The embedded theme script applies a browser-local Light/Dark preference before
 the stylesheet loads. Without a saved choice, CSS follows `prefers-color-scheme`;
 the button displays the resolved mode and toggles directly to its opposite.

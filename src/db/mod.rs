@@ -1,7 +1,9 @@
 //! SQLite storage: connection pool setup, pragmas, migrations, and shared
 //! helpers used by the [`providers`] and [`combos`] persistence modules.
 
+pub mod api_keys;
 pub mod combos;
+pub mod connection_models;
 pub mod provider_groups;
 pub mod providers;
 
@@ -73,12 +75,13 @@ mod tests {
             "SELECT COUNT(*) FROM sqlite_master
              WHERE type = 'table'
                AND name IN ('providers', 'combos', 'combo_steps',
-                            'custom_provider_groups', 'provider_group_connections')",
+                            'custom_provider_groups', 'provider_group_connections',
+                            'api_keys', 'connection_model_lists', 'connection_models')",
         )
         .fetch_one(&pool)
         .await
         .expect("schema tables");
-        assert_eq!(tables, 5);
+        assert_eq!(tables, 8);
     }
 
     #[tokio::test]

@@ -1,0 +1,25 @@
+<div id="models-{{ provider.id }}" class="model-list">
+  {% if !provider.model_error.is_empty() %}
+  <p class="test fail">{{ provider.model_error }}</p>
+  {% endif %}
+  {% if provider.models_known %}
+  <details>
+    <summary>{{ provider.models.len() }} model{% if provider.models.len() != 1 %}s{% endif %}{% if provider.models_truncated %} (first 500){% endif %}</summary>
+    {% if provider.models.is_empty() %}
+    <p class="hint">This connection returned no models.</p>
+    {% else %}
+    <ul>
+      {% for model in provider.models %}
+      <li><code>{{ model }}</code></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </details>
+  {% else %}
+  <p class="hint">Refresh models to list this connection. Combo steps suggest those IDs.</p>
+  {% endif %}
+  <form class="inline" method="post" action="/providers/{{ provider.id }}/models" hx-post="/providers/{{ provider.id }}/models" hx-target="#models-{{ provider.id }}" hx-swap="outerHTML">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button class="btn small" type="submit">Refresh models</button>
+  </form>
+</div>

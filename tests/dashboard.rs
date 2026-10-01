@@ -371,7 +371,13 @@ async fn blank_key_provider_created_in_dashboard_routes_without_authorization() 
 async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
     let state = state().await;
     let router = app::router(state.clone());
-    for path in ["/providers", "/combos", "/providers/new", "/combos/new"] {
+    for path in [
+        "/providers",
+        "/combos",
+        "/api-keys",
+        "/providers/new",
+        "/combos/new",
+    ] {
         let response = router
             .clone()
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
@@ -434,8 +440,24 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
             "sidebar must hold the dashboard navigation"
         );
         assert!(
-            sidebar.contains("href=\"/providers\"") && sidebar.contains("href=\"/combos\""),
-            "sidebar nav must link exactly to /providers and /combos"
+            sidebar.contains("href=\"/providers\"")
+                && sidebar.contains("href=\"/combos\"")
+                && sidebar.contains("href=\"/api-keys\""),
+            "sidebar nav must link to providers, combos, and API keys"
+        );
+        // Nav links carry decorative sprite icons: hidden from assistive
+        // technology and referencing only the bundled local sprite.
+        assert!(
+            sidebar.contains("<svg")
+                && sidebar.contains("aria-hidden=\"true\"")
+                && sidebar.contains("focusable=\"false\""),
+            "sidebar icons must be decorative SVG, hidden and unfocusable"
+        );
+        assert!(
+            sidebar.contains("<use href=\"/static/icons.svg#server\"")
+                && sidebar.contains("<use href=\"/static/icons.svg#layers\"")
+                && sidebar.contains("<use href=\"/static/icons.svg#key\""),
+            "sidebar links the local sprite's server, layers, and key symbols"
         );
         let topbar_open = html
             .find("<header class=\"topbar\">")
@@ -454,9 +476,23 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
             "topbar must hold the theme toggle"
         );
         assert!(
+            topbar.contains("btn-label"),
+            "theme toggle keeps a visible .btn-label next to its icon"
+        );
+        assert!(
+            topbar.contains("<use href=\"/static/icons.svg#sun\"")
+                || topbar.contains("<use href=\"/static/icons.svg#moon\""),
+            "theme toggle pairs its label with a local sun or moon sprite icon"
+        );
+        assert!(
+            !html.contains("onclick"),
+            "toggle behavior is wired in theme.js, never inline onclick"
+        );
+        assert!(
             !topbar.contains("<nav")
                 && !topbar.contains("href=\"/providers\"")
-                && !topbar.contains("href=\"/combos\""),
+                && !topbar.contains("href=\"/combos\"")
+                && !topbar.contains("href=\"/api-keys\""),
             "topbar must not duplicate navigation links"
         );
         // Index pages move their page heading and subtitle into the topbar,
@@ -465,7 +501,17 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
         let main_open = html.find("<main").expect("main opening");
         let main_close = main_open + html[main_open..].find("</main>").expect("main closing");
         let main_section = &html[main_open..main_close];
-        if path == "/providers" || path == "/combos" {
+        if path == "/api-keys" {
+            assert!(topbar.contains("<h1>API keys</h1>"));
+            assert!(topbar.contains("Each key can call every combo."));
+            assert!(
+                main_section.contains("Generate key")
+                    && main_section.contains("name=\"name\"")
+                    && main_section.contains("name=\"_csrf\""),
+                "API keys page must include a generate form"
+            );
+            assert!(!main_section.contains("<h1>API keys</h1>"));
+        } else if path == "/providers" || path == "/combos" {
             let (heading, subtitle, action_label, action_href) = if path == "/providers" {
                 (
                     "<h1>Providers</h1>",
@@ -476,7 +522,7 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
             } else {
                 (
                     "<h1>Combos</h1>",
-                    "Route requests through ordered provider/model connections.",
+                    "Route requests through provider/model connections.",
                     "Add combo",
                     "/combos/new",
                 )
@@ -525,6 +571,8 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
     for (path, content_type) in [
         ("/static/theme.js", "text/javascript"),
         ("/static/app.css", "text/css"),
+        ("/static/icons.svg", "image/svg+xml"),
+        ("/static/icons-LICENSE.txt", "text/plain"),
     ] {
         let response = router
             .clone()
@@ -555,6 +603,35 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
                 "theme.js must not be empty"
             );
         }
+        if path == "/static/icons.svg" {
+            let sprite = String::from_utf8_lossy(&bytes);
+            for id in ["copy", "server", "sun", "moon", "key"] {
+                assert!(
+                    sprite.contains(&format!("id=\"{id}\"")),
+                    "the sprite must define the {id} symbol"
+                );
+            }
+            assert!(
+                !sprite.contains("<script"),
+                "the icon sprite must not embed scripts"
+            );
+            // Only the xmlns namespace declaration and the provenance comment
+            // may carry a URL, so a blanket http ban would fail on both;
+            // strip them and require every remaining reference to stay local.
+            let references = sprite
+                .replace("http://www.w3.org/2000/svg", "")
+                .replace("https://lucide.dev", "");
+            assert!(
+                !references.contains("http"),
+                "no external URL references beyond the namespace and provenance comment"
+            );
+        }
+        if path == "/static/icons-LICENSE.txt" {
+            let license = String::from_utf8_lossy(&bytes);
+            for phrase in ["Lucide", "ISC License", "MIT License", "Cole Bemis"] {
+                assert!(license.contains(phrase), "the license must credit {phrase}");
+            }
+        }
     }
 }
 
@@ -564,6 +641,24 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
     let router = app::router(state.clone());
     let index = get_page(&router, "/providers").await;
     assert!(index.contains("<main class=\"provider-page\">"));
+    assert!(
+        index.contains("id=\"provider-search\"")
+            && index.contains("type=\"search\"")
+            && index.contains("id=\"provider-grid\"")
+            && index.contains("id=\"provider-search-empty\""),
+        "providers index must include a live title filter"
+    );
+    assert!(
+        !index.contains("<form"),
+        "the providers index filter must not be a submitting form"
+    );
+    let script = get_page(&router, "/static/app.js").await;
+    assert!(
+        script.contains("getElementById(\"provider-search\")")
+            && script.contains("addEventListener(\"input\"")
+            && script.contains("provider-tile-title"),
+        "provider search must filter titles on each input event"
+    );
     assert!(index.contains("class=\"provider-tile-heading\""));
     assert!(index.contains("class=\"provider-tile-status\""));
     assert!(index.contains("<span class=\"badge\">OpenAI</span>"));
@@ -580,6 +675,9 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
         ("deepseek", "DeepSeek"),
         ("together", "Together"),
         ("fireworks", "Fireworks"),
+        ("xai", "xAI (Grok)"),
+        ("poe", "Poe"),
+        ("mistral", "Mistral"),
     ] {
         assert!(
             index.contains(&format!("href=\"/providers/catalog/{slug}\"")),
@@ -595,7 +693,10 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
         "no custom tiles exist before any provider is stored"
     );
     let catalog = get_page(&router, "/providers/catalog/openai").await;
-    assert!(!catalog.contains("<main class=\"provider-page\">"));
+    assert!(
+        catalog.contains("<main class=\"provider-page\">"),
+        "catalog preset pages share the provider-page group layout"
+    );
     assert!(catalog.contains("OpenAI"));
     assert!(
         catalog.contains("https://api.openai.com/v1"),
@@ -608,6 +709,63 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
             "add-connection form must include the {field} field"
         );
     }
+
+    // Catalog preset pages share the group layout: the heading and endpoint
+    // subtitle live in the topbar, metadata appears in a details card, and
+    // the add-connection form opens in a native popover dialog.
+    let topbar_open = catalog
+        .find("<header class=\"topbar\">")
+        .expect("catalog topbar opening");
+    let topbar_close = topbar_open
+        + catalog[topbar_open..]
+            .find("</header>")
+            .expect("catalog topbar closing");
+    let topbar = &catalog[topbar_open..topbar_close];
+    assert!(
+        topbar.contains("<h1>OpenAI</h1>"),
+        "the catalog topbar carries the preset name heading"
+    );
+    assert!(
+        topbar.contains(
+            "Every connection on this page uses this endpoint and stores its own API key."
+        ),
+        "the catalog topbar carries the endpoint explanatory subtitle"
+    );
+    assert!(
+        !topbar.contains("<span class=\"badge\">Custom</span>"),
+        "preset topbars carry no Custom badge"
+    );
+    assert!(
+        catalog.contains("<section class=\"card provider-details\""),
+        "endpoint metadata appears in a provider-details card"
+    );
+    assert!(
+        catalog.contains("<dl class=\"provider-details-grid\""),
+        "endpoint metadata renders in a provider-details grid"
+    );
+    assert!(
+        catalog.contains("popovertarget=\"add-connection\""),
+        "an opener control toggles the add-connection popover"
+    );
+    let popup_start = catalog
+        .find("<div id=\"add-connection\" class=\"connection-popup\" popover role=\"dialog\" aria-labelledby=\"add-connection-title\">")
+        .expect("add-connection popover dialog");
+    let main_close = catalog.find("</main>").expect("catalog main closing");
+    let popup = &catalog[popup_start..main_close];
+    assert!(
+        popup.contains("action=\"/providers/catalog/openai\""),
+        "the add-connection form action lives inside the popup"
+    );
+    for field in ["_csrf", "name", "api_key", "enabled"] {
+        assert!(
+            popup.contains(&format!("name=\"{field}\"")),
+            "the popup add-connection form includes the {field} field"
+        );
+    }
+    assert!(
+        popup.contains("popovertargetaction=\"hide\""),
+        "the popup closes through the native popover hide action"
+    );
 }
 
 #[tokio::test]
@@ -1075,6 +1233,72 @@ async fn custom_provider_post_creates_empty_named_group_card() {
     assert!(group.contains("https://acme.invalid/v1"));
     assert!(group.contains("<code>openai</code>"));
     assert!(group.contains("No connections for this endpoint yet"));
+
+    // Group-page layout: the heading and endpoint subtitle live in the
+    // topbar, the Custom badge renders in the body after the header, the
+    // endpoint metadata folds into a details card, and the add-connection
+    // form opens in a native popover dialog.
+    let topbar_open = group
+        .find("<header class=\"topbar\">")
+        .expect("group topbar opening");
+    let topbar_close = topbar_open
+        + group[topbar_open..]
+            .find("</header>")
+            .expect("group topbar closing");
+    let topbar = &group[topbar_open..topbar_close];
+    assert!(
+        topbar.contains("<h1>Acme &#60;LLM&#62; &#38; Co</h1>"),
+        "the group topbar carries the escaped group name heading"
+    );
+    assert!(
+        topbar.contains(
+            "Every connection on this page uses this endpoint and stores its own API key."
+        ),
+        "the group topbar carries the endpoint explanatory subtitle"
+    );
+    assert!(
+        !topbar.contains("<span class=\"badge\">Custom</span>"),
+        "the Custom badge moved out of the topbar"
+    );
+    assert!(
+        group[topbar_close..].contains("<span class=\"badge\">Custom</span>"),
+        "the group Custom badge renders in the body after the header"
+    );
+    assert!(
+        group.contains("<main class=\"provider-page\">"),
+        "the group page uses the provider-page main layout"
+    );
+    assert!(
+        group.contains("<section class=\"card provider-details\""),
+        "endpoint metadata appears in a provider-details card"
+    );
+    assert!(
+        group.contains("<dl class=\"provider-details-grid\""),
+        "endpoint metadata renders in a provider-details grid"
+    );
+    assert!(
+        group.contains("popovertarget=\"add-connection\""),
+        "an opener control toggles the add-connection popover"
+    );
+    let popup_start = group
+        .find("<div id=\"add-connection\" class=\"connection-popup\" popover role=\"dialog\" aria-labelledby=\"add-connection-title\">")
+        .expect("add-connection popover dialog");
+    let main_close = group.find("</main>").expect("group main closing");
+    let popup = &group[popup_start..main_close];
+    assert!(
+        popup.contains(&format!("action=\"/providers/groups/{group_id}\"")),
+        "the add-connection form action lives inside the popup"
+    );
+    for field in ["_csrf", "name", "api_key", "enabled"] {
+        assert!(
+            popup.contains(&format!("name=\"{field}\"")),
+            "the popup add-connection form includes the {field} field"
+        );
+    }
+    assert!(
+        popup.contains("popovertargetaction=\"hide\""),
+        "the popup closes through the native popover hide action"
+    );
 }
 
 #[tokio::test]
@@ -1769,4 +1993,463 @@ async fn custom_group_delete_blocked_by_combo_then_removes_group_and_members() {
     assert!(!index.contains(&format!("href=\"/providers/groups/{group_id}\"")));
     assert!(index.contains(&format!("href=\"/providers/groups/{kept_id}\"")));
     assert!(index.contains("href=\"/providers/catalog/openai\""));
+}
+
+#[tokio::test]
+async fn combo_duplicate_clones_steps_with_fresh_ids_and_guards_csrf_and_origin() {
+    let state = state().await;
+    let router = app::router(state.clone());
+
+    // One upstream connection through the dashboard form; the source combo and
+    // its two ordered steps are seeded through the db helpers.
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            "/providers",
+            &[
+                ("name", "Dup upstream"),
+                ("base_url", "https://dup.invalid/v1"),
+                ("protocol", "openai"),
+                ("api_key", "sk-dup-seed-key-5"),
+                ("enabled", "on"),
+            ],
+            false,
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    let provider = db::providers::list(&state.db).await.unwrap().remove(0);
+    let source = db::combos::create(&state.db, "source").await.unwrap();
+    for model in ["first-model", "second-model"] {
+        db::combos::add_step(&state.db, &source.id, &provider.id, model)
+            .await
+            .unwrap();
+    }
+    let duplicate_path = format!("/combos/{}/duplicate", source.id);
+    fn redirected_combo_id(response: &Response) -> String {
+        response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .expect("duplicate redirects to the new combo's editor")
+            .strip_prefix("/combos/")
+            .expect("redirect targets a combo editor")
+            .to_owned()
+    }
+
+    // An invalid CSRF token is a 400 that duplicates nothing.
+    assert_eq!(
+        submit_token(
+            &router,
+            &duplicate_path,
+            &[],
+            false,
+            "definitely-not-the-token",
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST,
+        "POST {duplicate_path} must reject an invalid CSRF token"
+    );
+    assert_eq!(db::combos::list(&state.db).await.unwrap().len(), 1);
+
+    // Cross-origin submissions are rejected before storage even with a valid
+    // CSRF token: a foreign Origin or a cross-site fetch annotation.
+    let mut url = reqwest::Url::parse("http://localhost/").unwrap();
+    url.query_pairs_mut()
+        .append_pair("_csrf", state.csrf_token.as_str());
+    let csrf_body = url.query().unwrap().to_owned();
+    for (origin, fetch_site) in [
+        (Some("https://attacker.example"), None),
+        (None, Some("cross-site")),
+    ] {
+        let mut request = Request::post(duplicate_path.as_str())
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("host", "localhost");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        if let Some(fetch_site) = fetch_site {
+            request = request.header("sec-fetch-site", fetch_site);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(csrf_body.clone())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "cross-origin combo duplicate must be rejected"
+        );
+    }
+    assert_eq!(
+        db::combos::list(&state.db).await.unwrap().len(),
+        1,
+        "rejected posts must not create combos"
+    );
+
+    // First duplicate redirects to the new combo's editor (303) and clones the
+    // steps with fresh ids in the same provider/model order.
+    let first = submit(&router, &state, &duplicate_path, &[], false).await;
+    assert_eq!(first.status(), StatusCode::SEE_OTHER);
+    let first_id = redirected_combo_id(&first);
+    assert_ne!(first_id, source.id);
+    assert_eq!(
+        db::combos::get(&state.db, &first_id).await.unwrap().name,
+        "source-copy"
+    );
+    let source_steps = db::combos::steps(&state.db, &source.id).await.unwrap();
+    let cloned_steps = db::combos::steps(&state.db, &first_id).await.unwrap();
+    assert_eq!(
+        cloned_steps.len(),
+        source_steps.len(),
+        "every source step is cloned"
+    );
+    for (index, (source_step, cloned_step)) in source_steps.iter().zip(&cloned_steps).enumerate() {
+        assert_ne!(cloned_step.id, source_step.id, "cloned steps get fresh ids");
+        assert_eq!(cloned_step.combo_id, first_id);
+        assert_eq!(cloned_step.position, index as i64);
+        assert_eq!(cloned_step.provider_id, provider.id);
+        assert_eq!(cloned_step.model, source_step.model);
+    }
+
+    // A second duplicate of the same source lands on source-copy-2.
+    let second = submit(&router, &state, &duplicate_path, &[], false).await;
+    assert_eq!(second.status(), StatusCode::SEE_OTHER);
+    let second_id = redirected_combo_id(&second);
+    assert_ne!(second_id, source.id);
+    assert_ne!(second_id, first_id);
+    assert_eq!(
+        db::combos::get(&state.db, &second_id).await.unwrap().name,
+        "source-copy-2"
+    );
+
+    // The source combo is untouched: same name, same steps, same step ids.
+    assert_eq!(
+        db::combos::get(&state.db, &source.id).await.unwrap().name,
+        "source"
+    );
+    let after = db::combos::steps(&state.db, &source.id).await.unwrap();
+    let models: Vec<&str> = after.iter().map(|step| step.model.as_str()).collect();
+    assert_eq!(models, ["first-model", "second-model"]);
+    let source_ids: Vec<&str> = source_steps.iter().map(|step| step.id.as_str()).collect();
+    assert!(
+        after
+            .iter()
+            .all(|step| source_ids.contains(&step.id.as_str()))
+    );
+    assert_eq!(
+        db::combos::list(&state.db).await.unwrap().len(),
+        3,
+        "source plus two duplicates"
+    );
+
+    // Unknown sources are 404s, never empty duplicates.
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            "/combos/00000000-0000-0000-0000-000000000000/duplicate",
+            &[],
+            false,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // The index row carries the copy-model affordance, the title link, and the
+    // duplicate/edit/delete actions.
+    let index = get_page(&router, "/combos").await;
+    assert!(index.contains(&format!("action=\"/combos/{}/duplicate\"", source.id)));
+    assert!(index.contains(&format!("href=\"/combos/{}\"", source.id)));
+    assert!(index.contains(&format!("action=\"/combos/{}/delete\"", source.id)));
+    assert!(index.contains("data-copy-model=\"combo/source\""));
+    assert!(index.contains(">source</a>"));
+
+    // Editing or deleting copies must not mutate the original chain.
+    db::combos::remove_step(&state.db, &first_id, &cloned_steps[0].id)
+        .await
+        .unwrap();
+    db::combos::delete(&state.db, &second_id).await.unwrap();
+    assert_eq!(
+        db::combos::steps(&state.db, &first_id).await.unwrap().len(),
+        1
+    );
+    let unchanged = db::combos::steps(&state.db, &source.id).await.unwrap();
+    assert_eq!(unchanged.len(), 2);
+    for (before, after) in source_steps.iter().zip(unchanged) {
+        assert_eq!(before.id, after.id);
+        assert_eq!(before.position, after.position);
+        assert_eq!(before.model, after.model);
+    }
+}
+
+#[tokio::test]
+async fn combo_strategy_defaults_edits_and_validation() {
+    let state = state().await;
+    let router = app::router(state.clone());
+
+    // The create form offers the three strategies with priority preselected.
+    let form = get_page(&router, "/combos/new").await;
+    assert!(form.contains("<select id=\"strategy\" name=\"strategy\""));
+    assert!(form.contains("<option value=\"priority\" selected>Priority</option>"));
+    assert!(form.contains("<option value=\"round_robin\">Round robin</option>"));
+    assert!(form.contains("<option value=\"random\">Random</option>"));
+
+    // Creating without (or with a blank) strategy defaults to priority.
+    assert_eq!(
+        submit(&router, &state, "/combos", &[("name", "plain")], false)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        db::combos::by_name(&state.db, "plain")
+            .await
+            .unwrap()
+            .strategy
+            .as_str(),
+        "priority",
+        "legacy name-only creation defaults to priority"
+    );
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            "/combos",
+            &[("name", "blank"), ("strategy", "")],
+            false
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        db::combos::by_name(&state.db, "blank")
+            .await
+            .unwrap()
+            .strategy
+            .as_str(),
+        "priority"
+    );
+
+    // Each explicit strategy persists through creation.
+    for (name, strategy) in [("robin", "round_robin"), ("dice", "random")] {
+        assert_eq!(
+            submit(
+                &router,
+                &state,
+                "/combos",
+                &[("name", name), ("strategy", strategy)],
+                false
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            db::combos::by_name(&state.db, name)
+                .await
+                .unwrap()
+                .strategy
+                .as_str(),
+            strategy
+        );
+    }
+
+    // An unknown strategy is a 400 that writes no row.
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            "/combos",
+            &[("name", "bogus"), ("strategy", "shuffle")],
+            false
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST,
+        "unknown create strategy must be rejected"
+    );
+    assert!(
+        db::combos::by_name(&state.db, "bogus").await.is_err(),
+        "the rejected create must not write a combo row"
+    );
+
+    // The index rows keep their step summary and show a strategy badge each.
+    let index = get_page(&router, "/combos").await;
+    assert!(index.contains(">no steps</span>"));
+    assert!(index.contains("<span class=\"badge\">Priority</span>"));
+    assert!(index.contains("<span class=\"badge\">Round robin</span>"));
+    assert!(index.contains("<span class=\"badge\">Random</span>"));
+
+    // Editing persists the selected strategy and marks it selected on reload.
+    let plain = db::combos::by_name(&state.db, "plain").await.unwrap();
+    let edit_path = format!("/combos/{}", plain.id);
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            &edit_path,
+            &[("name", "plain"), ("strategy", "random")],
+            false,
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        db::combos::by_name(&state.db, "plain")
+            .await
+            .unwrap()
+            .strategy
+            .as_str(),
+        "random"
+    );
+    let edit = get_page(&router, &edit_path).await;
+    assert!(edit.contains("<option value=\"random\" selected>Random</option>"));
+    assert!(
+        !edit.contains("value=\"priority\" selected")
+            && !edit.contains("value=\"round_robin\" selected"),
+        "only the stored strategy may be selected"
+    );
+    assert!(edit.contains("Save changes"));
+
+    // An invalid edit strategy is a 400 that applies no partial rename.
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            &edit_path,
+            &[("name", "plain-renamed"), ("strategy", "shuffle")],
+            false,
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST,
+        "unknown edit strategy must be rejected before any write"
+    );
+    let stored = db::combos::by_name(&state.db, "plain").await.unwrap();
+    assert_eq!(stored.strategy.as_str(), "random");
+    assert!(
+        db::combos::by_name(&state.db, "plain-renamed")
+            .await
+            .is_err(),
+        "the rejected edit must not rename the combo either"
+    );
+
+    // A legacy name-only rename still works and preserves the strategy.
+    assert_eq!(
+        submit(&router, &state, &edit_path, &[("name", "plain2")], false)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        db::combos::by_name(&state.db, "plain2")
+            .await
+            .unwrap()
+            .strategy
+            .as_str(),
+        "random",
+        "name-only edits preserve the stored strategy"
+    );
+
+    // Duplicating a combo copies its strategy along with its steps.
+    let robin = db::combos::by_name(&state.db, "robin").await.unwrap();
+    let duplicated = submit(
+        &router,
+        &state,
+        &format!("/combos/{}/duplicate", robin.id),
+        &[],
+        false,
+    )
+    .await;
+    assert_eq!(duplicated.status(), StatusCode::SEE_OTHER);
+    let copy_id = duplicated
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|location| location.strip_prefix("/combos/"))
+        .expect("duplicate redirects to the new combo's editor")
+        .to_owned();
+    assert_eq!(
+        db::combos::get(&state.db, &copy_id)
+            .await
+            .unwrap()
+            .strategy
+            .as_str(),
+        "round_robin",
+        "duplicates keep the source strategy"
+    );
+}
+
+#[tokio::test]
+async fn generated_api_key_is_shown_once_and_revoked_without_leaking() {
+    let state = state().await;
+    let router = app::router(state.clone());
+    assert_eq!(
+        submit(&router, &state, "/api-keys", &[("name", " ")], false)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(db::api_keys::list(&state.db).await.unwrap().is_empty());
+
+    let created = submit(&router, &state, "/api-keys", &[("name", " laptop ")], false).await;
+    assert_eq!(created.status(), StatusCode::SEE_OTHER);
+    let location = created
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("create redirects to the one-time reveal page")
+        .to_owned();
+    let reveal = get_page(&router, &location).await;
+    let secret = reveal
+        .split("class=\"key-secret\">")
+        .nth(1)
+        .and_then(|rest| rest.split("</code>").next())
+        .expect("reveal page shows the secret once");
+    assert!(
+        secret.starts_with("sk-"),
+        "generated keys use the sk- prefix"
+    );
+    assert!(reveal.contains("laptop"));
+    let again = get_page(&router, &location).await;
+    assert!(
+        !again.contains(secret),
+        "a second visit must not show the secret"
+    );
+    assert!(again.contains("cannot be displayed again"));
+
+    let index = get_page(&router, "/api-keys").await;
+    assert!(index.contains("laptop"));
+    assert!(
+        !index.contains(secret),
+        "the key list must not contain the secret"
+    );
+    let stored: String = sqlx::query_scalar("SELECT key_hash FROM api_keys")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert!(!stored.contains(secret));
+
+    let id = location.trim_start_matches("/api-keys/");
+    assert_eq!(
+        submit(
+            &router,
+            &state,
+            &format!("/api-keys/{id}/delete"),
+            &[],
+            false
+        )
+        .await
+        .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert!(db::api_keys::list(&state.db).await.unwrap().is_empty());
 }

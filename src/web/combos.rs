@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
+use crate::db::combos::Strategy;
 use crate::error::AppError;
 
 const NAME_MAX_CHARS: usize = 64;
@@ -29,6 +30,7 @@ pub(crate) struct ComboRow {
     id: String,
     name: String,
     step_summary: String,
+    strategy_label: String,
 }
 
 #[derive(Template)]
@@ -45,6 +47,9 @@ pub(crate) struct ComboEditPage {
     csrf_token: String,
     combo_id: String,
     combo_name: String,
+    /// Stored strategy as its form value (`as_str`) so the select can mark
+    /// the matching option selected.
+    strategy: String,
     steps: Vec<StepRow>,
     providers: Vec<ProviderOption>,
 }
@@ -71,12 +76,18 @@ pub(crate) struct ProviderOption {
     name: String,
     /// Appended as "(disabled)" in the picker so skipped upstreams are visible.
     disabled: bool,
+    /// Last refreshed model IDs for this connection. Empty when never refreshed.
+    models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ComboForm {
     _csrf: String,
     name: String,
+    /// Absent for legacy name-only posts: creation then defaults to
+    /// `priority`, while edits preserve the stored strategy.
+    #[serde(default)]
+    strategy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +108,7 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
                 1 => "1 step".to_string(),
                 n => format!("{n} steps"),
             },
+            strategy_label: combo.strategy.label().to_owned(),
             id: combo.id,
             name: combo.name,
         });
@@ -121,7 +133,9 @@ pub(crate) async fn create(
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
     let name = validate_combo_name(&form.name)?;
-    let combo = crate::db::combos::create(&state.db, &name).await?;
+    // Parse before the insert so an unknown value is a 400, never a row.
+    let strategy = parse_strategy(form.strategy.as_deref())?.unwrap_or(Strategy::Priority);
+    let combo = crate::db::combos::create_with_strategy(&state.db, &name, strategy).await?;
     Ok(see_other(&format!("/combos/{}", combo.id)))
 }
 
@@ -137,6 +151,7 @@ pub(crate) async fn edit(
         csrf_token: state.csrf_token.as_str().to_owned(),
         combo_id: combo.id,
         combo_name: combo.name,
+        strategy: combo.strategy.as_str().to_owned(),
         steps,
         providers,
     })
@@ -149,7 +164,10 @@ pub(crate) async fn rename(
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
     let name = validate_combo_name(&form.name)?;
-    crate::db::combos::rename(&state.db, &id, &name).await?;
+    // Parse before the write so an unknown value is a 400 without applying
+    // a partial rename; `None` preserves the stored strategy.
+    let strategy = parse_strategy(form.strategy.as_deref())?;
+    crate::db::combos::update(&state.db, &id, &name, strategy).await?;
     Ok(see_other(&format!("/combos/{id}")))
 }
 
@@ -160,7 +178,22 @@ pub(crate) async fn delete(
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
     crate::db::combos::delete(&state.db, &id).await?;
+    // The combo's rotation cursor can no longer be reused; drop it so a
+    // future combo with the same id starts fresh.
+    state.round_robin.forget(&id);
     Ok(see_other("/combos"))
+}
+
+/// Duplicates a combo (unique `source-copy` name, cloned steps) and redirects
+/// to the new combo's editor so the copy can be adjusted right away.
+pub(crate) async fn duplicate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    let combo = crate::db::combos::duplicate(&state.db, &id).await?;
+    Ok(see_other(&format!("/combos/{}", combo.id)))
 }
 
 /// Adds a step. HTMX requests (hx-request: true) get the re-rendered steps
@@ -295,15 +328,22 @@ async fn step_rows(state: &AppState, combo_id: &str) -> Result<Vec<StepRow>, App
 
 async fn provider_options(state: &AppState) -> Result<Vec<ProviderOption>, AppError> {
     let group_names = crate::db::provider_groups::connection_group_names(&state.db).await?;
-    let mut options: Vec<ProviderOption> = crate::db::providers::list(&state.db)
-        .await?
+    let stored = crate::db::providers::list(&state.db).await?;
+    let ids: Vec<String> = stored.iter().map(|provider| provider.id.clone()).collect();
+    let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
+    let mut options: Vec<ProviderOption> = stored
         .into_iter()
         .map(|p| {
+            let models = lists
+                .get(&p.id)
+                .map(|list| list.ids.clone())
+                .unwrap_or_default();
             let name = connection_label(&p, &group_names);
             ProviderOption {
                 id: p.id,
                 name,
                 disabled: !p.enabled,
+                models,
             }
         })
         .collect();
@@ -319,6 +359,16 @@ fn connection_label(
         super::provider_catalog::display_name(&provider.base_url, &provider.protocol)
     });
     format!("{} / {}", group_name, provider.name)
+}
+
+/// Parses the optional strategy form field, rejecting unknown values before
+/// any database write. A missing or blank value yields `None`: creation then
+/// defaults to `priority`, while updates preserve the stored strategy.
+fn parse_strategy(raw: Option<&str>) -> Result<Option<Strategy>, AppError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => Strategy::parse(value).map(Some),
+    }
 }
 
 /// Mirrors the DB constraint so obvious mistakes fail fast with a clear message.
@@ -359,6 +409,37 @@ mod tests {
     }
 
     #[test]
+    fn strategy_parsing_defaults_only_when_blank() {
+        // Absent and blank mean "not supplied": creation defaults, edits keep
+        // the stored value. Anything else must parse exactly.
+        assert!(parse_strategy(None).unwrap().is_none());
+        assert!(parse_strategy(Some("")).unwrap().is_none());
+        assert!(parse_strategy(Some("   ")).unwrap().is_none());
+        assert_eq!(
+            parse_strategy(Some("priority"))
+                .unwrap()
+                .map(|s| s.as_str()),
+            Some("priority")
+        );
+        assert_eq!(
+            parse_strategy(Some(" round_robin "))
+                .unwrap()
+                .map(|s| s.as_str()),
+            Some("round_robin")
+        );
+        assert_eq!(
+            parse_strategy(Some("random")).unwrap().map(|s| s.as_str()),
+            Some("random")
+        );
+        for bad in ["bogus", "roundrobin", "round-robin", "random!"] {
+            assert!(
+                parse_strategy(Some(bad)).is_err(),
+                "strategy {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn hx_request_header_detection() {
         let mut headers = http::HeaderMap::new();
         assert!(!is_htmx_request(&headers));
@@ -381,6 +462,7 @@ mod tests {
                 id: "default".to_string(),
                 name: "default".to_string(),
                 step_summary: "2 steps".to_string(),
+                strategy_label: "Round robin".to_string(),
             }],
         }
         .render()
@@ -388,6 +470,36 @@ mod tests {
         assert!(page.contains("<title>SparkRouter :: Combos</title>"));
         assert!(page.contains("action=\"/combos/default/delete\""));
         assert!(page.contains("name=\"_csrf\""));
+        // Rows carry the step summary plus a strategy badge.
+        assert!(page.contains(">2 steps</span>"));
+        assert!(page.contains("<span class=\"badge\">Round robin</span>"));
+        // Duplicate posts separately; Copy exposes the routing alias to the
+        // embedded script without submitting a mutation or inline JavaScript.
+        assert!(page.contains("action=\"/combos/default/duplicate\""));
+        assert!(page.contains("data-copy-model=\"combo/default\""));
+        let copy_label = page
+            .find("<span class=\"btn-label\">Copy</span>")
+            .expect("Copy label renders");
+        let copy_start = page[..copy_label]
+            .rfind("<button")
+            .expect("Copy button element start");
+        let copy_end = copy_label
+            + page[copy_label..]
+                .find("</button>")
+                .expect("Copy button closes")
+            + "</button>".len();
+        let copy_button = &page[copy_start..copy_end];
+        assert!(copy_button.contains("href=\"/static/icons.svg#copy\""));
+        assert!(
+            copy_button.contains("type=\"button\""),
+            "Copy must not submit a mutation form"
+        );
+        assert!(
+            !copy_button.contains("onclick") && !page.contains("onclick"),
+            "the Copy button must not use inline JavaScript"
+        );
+        // One row carries two mutation forms (duplicate/delete), each with CSRF.
+        assert_eq!(page.matches("name=\"_csrf\"").count(), 2);
 
         let new = ComboNewPage {
             app_name: crate::APP_NAME,
@@ -397,12 +509,18 @@ mod tests {
         .unwrap();
         assert!(new.contains("action=\"/combos\""));
         assert!(new.contains("name=\"_csrf\""));
+        // The strategy select defaults to priority and offers all three.
+        assert!(new.contains("<select id=\"strategy\" name=\"strategy\""));
+        assert!(new.contains("<option value=\"priority\" selected>Priority</option>"));
+        assert!(new.contains("<option value=\"round_robin\">Round robin</option>"));
+        assert!(new.contains("<option value=\"random\">Random</option>"));
 
         let edit = ComboEditPage {
             app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
             combo_id: "default".to_string(),
             combo_name: "default".to_string(),
+            strategy: "round_robin".to_string(),
             steps: vec![StepRow {
                 id: "s1".to_string(),
                 provider_name: "Local".to_string(),
@@ -413,6 +531,7 @@ mod tests {
                 id: "p1".to_string(),
                 name: "Local".to_string(),
                 disabled: true,
+                models: vec!["local-model".to_string()],
             }],
         }
         .render()
@@ -420,6 +539,14 @@ mod tests {
         assert!(edit.contains("action=\"/combos/default\""));
         assert!(edit.contains("hx-post=\"/combos/default/steps\""));
         assert!(edit.contains("qwen3 &#60;chat&#62;"));
+        // The stored strategy marks exactly one option selected.
+        assert!(edit.contains("<option value=\"round_robin\" selected>Round robin</option>"));
+        assert!(
+            !edit.contains("value=\"priority\" selected")
+                && !edit.contains("value=\"random\" selected"),
+            "only the stored strategy may be selected"
+        );
+        assert!(edit.contains("Save changes"));
         // Disabled providers are labeled as skipped in the add-step picker.
         assert!(edit.contains("<option value=\"p1\">Local (disabled)</option>"));
         // One step carries three mutation forms (up/down/remove), each with CSRF,

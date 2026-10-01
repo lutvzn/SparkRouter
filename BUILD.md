@@ -51,7 +51,7 @@ The deployed executable does not need the source directories alongside it.
 | --- | --- | --- |
 | `ROUTER_MASTER_KEY` | Required | Base64 encoding of exactly 32 random bytes |
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite storage location |
-| `ROUTER_API_KEY` | Unset | Optional bearer key for `/v1/*`; empty is invalid |
+| `ROUTER_API_KEY` | Unset | Optional bearer key for `/v1/*`; empty is invalid. Generated dashboard keys also authorize `/v1/*` |
 | `ROUTER_BIND` | `127.0.0.1:8080` | IP address and port, not a hostname |
 | `RUST_LOG` | `info` | `tracing-subscriber` logging filter |
 

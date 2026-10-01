@@ -69,6 +69,10 @@ pub(crate) struct ProviderRow {
     name: String,
     enabled: bool,
     has_key: bool,
+    models: Vec<String>,
+    models_known: bool,
+    models_truncated: bool,
+    model_error: String,
 }
 
 impl ProviderRow {
@@ -78,6 +82,10 @@ impl ProviderRow {
             id: provider.id,
             name: provider.name,
             enabled: provider.enabled,
+            models: Vec::new(),
+            models_known: false,
+            models_truncated: false,
+            model_error: String::new(),
         }
     }
 }
@@ -193,7 +201,11 @@ pub(crate) async fn catalog(
         .ok_or_else(|| AppError::NotFound(format!("provider preset '{slug}' was not found")))?;
     let stored = crate::db::providers::list(&state.db).await?;
     let memberships = provider_groups::connection_group_names(&state.db).await?;
-    let providers = group_rows(stored, &memberships, preset.base_url, &preset.protocol);
+    let providers = attach_models(
+        &state,
+        group_rows(stored, &memberships, preset.base_url, &preset.protocol),
+    )
+    .await?;
     render(ProviderGroupPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
@@ -213,11 +225,15 @@ pub(crate) async fn group(
     Path(id): Path<String>,
 ) -> Result<Html<String>, AppError> {
     let group = resolve_group(&state, &id).await?;
-    let providers = provider_groups::members(&state.db, &group.id)
-        .await?
-        .into_iter()
-        .map(ProviderRow::from_stored)
-        .collect();
+    let providers = attach_models(
+        &state,
+        provider_groups::members(&state.db, &group.id)
+            .await?
+            .into_iter()
+            .map(ProviderRow::from_stored)
+            .collect(),
+    )
+    .await?;
     render(ProviderGroupPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
@@ -390,6 +406,72 @@ pub(crate) async fn delete_group(
     check_csrf(&state, &form._csrf)?;
     provider_groups::delete(&state.db, &id).await?;
     Ok(see_other("/providers"))
+}
+
+async fn attach_models(
+    state: &AppState,
+    mut rows: Vec<ProviderRow>,
+) -> Result<Vec<ProviderRow>, AppError> {
+    let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+    let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
+    for row in &mut rows {
+        if let Some(list) = lists.get(&row.id) {
+            row.models.clone_from(&list.ids);
+            row.models_known = true;
+            row.models_truncated = list.truncated;
+        }
+    }
+    Ok(rows)
+}
+
+/// Fetches the connection's `/models` list, replaces the stored snapshot, and
+/// returns the card fragment used by both HTMX and a normal form post.
+pub(crate) async fn refresh_models(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Html<String>, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    let provider = crate::db::providers::get(&state.db, &id).await?;
+    let fragment = match crate::providers::list_models(&state.client, &state.crypto, &provider)
+        .await
+    {
+        Ok(listed) => {
+            crate::db::connection_models::replace(
+                &state.db,
+                &provider.id,
+                &listed.ids,
+                listed.truncated,
+            )
+            .await?;
+            let mut row = ProviderRow::from_stored(provider);
+            row.models = listed.ids;
+            row.models_known = true;
+            row.models_truncated = listed.truncated;
+            row.model_error.clear();
+            ModelsFragment {
+                csrf_token: state.csrf_token.as_str().to_owned(),
+                provider: row,
+            }
+        }
+        Err(error) => {
+            let mut rows = attach_models(&state, vec![ProviderRow::from_stored(provider)]).await?;
+            let mut row = rows.pop().expect("the refreshed connection is present");
+            row.model_error = error.to_string();
+            ModelsFragment {
+                csrf_token: state.csrf_token.as_str().to_owned(),
+                provider: row,
+            }
+        }
+    };
+    render(fragment)
+}
+
+#[derive(Template)]
+#[template(path = "providers/_models.html")]
+struct ModelsFragment {
+    csrf_token: String,
+    provider: ProviderRow,
 }
 
 /// Runs a connection test against the provider and returns a small HTML
@@ -868,6 +950,10 @@ mod tests {
                 name: "Local <LLM> & Friends".to_string(),
                 enabled: true,
                 has_key: false,
+                models: vec!["gpt-4o-mini".to_string()],
+                models_known: true,
+                models_truncated: false,
+                model_error: String::new(),
             }],
             is_custom: true,
         }
@@ -887,7 +973,9 @@ mod tests {
         ));
         // Test + delete buttons, the Add connection form, and the group
         // delete form each carry CSRF.
-        assert_eq!(group.matches("name=\"_csrf\"").count(), 4);
+        assert!(group.contains("gpt-4o-mini"));
+        assert!(group.contains("action=\"/providers/p1/models\""));
+        assert_eq!(group.matches("name=\"_csrf\"").count(), 5);
         // The add form posts back to the group and pins the endpoint.
         assert!(group.contains("action=\"/providers/groups/custom-g1\""));
         assert!(
@@ -907,6 +995,10 @@ mod tests {
                 name: "Preset <A> & Co".to_string(),
                 enabled: true,
                 has_key: true,
+                models: Vec::new(),
+                models_known: false,
+                models_truncated: false,
+                model_error: String::new(),
             }],
             is_custom: false,
         }
@@ -918,7 +1010,7 @@ mod tests {
         assert!(!catalog_page.contains("Delete provider"));
         assert!(!catalog_page.contains("/providers/catalog/preset-a/delete"));
         assert!(!catalog_page.contains("Deleting this provider also deletes its connections."));
-        assert_eq!(catalog_page.matches("name=\"_csrf\"").count(), 3);
+        assert_eq!(catalog_page.matches("name=\"_csrf\"").count(), 4);
 
         let form = ProviderFormPage {
             app_name: crate::APP_NAME,
