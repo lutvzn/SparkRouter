@@ -1377,7 +1377,12 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     let state = test_state().await;
     let upstream = spawn_upstream(Router::new().route(
         "/models",
-        get(|| async { Json(json!({"data": [{"id": "alpha"}, {"id": " beta "}]})) }),
+        get(|| async {
+            Json(json!({"data": [
+                {"id": "alpha", "display_name": "Alpha", "owned_by": "lab"},
+                {"id": " beta "}
+            ]}))
+        }),
     ))
     .await;
     save_provider(
@@ -1407,6 +1412,9 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     assert_eq!(response.status(), StatusCode::OK);
     let page = String::from_utf8(body_bytes(response).await.to_vec())?;
     assert!(page.contains("alpha") && page.contains("beta"));
+    assert!(page.contains("Alpha"));
+    assert!(page.contains("Owned by"));
+    assert!(page.contains("data-model-search"));
     let combo = combos::create(&state.db, "suggest").await?;
     let editor = send(
         &state,

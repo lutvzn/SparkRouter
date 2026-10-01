@@ -113,3 +113,30 @@ function bindModelSuggestions() {
 }
 
 bindModelSuggestions();
+
+// Model dropdowns filter their cards as the user types. Delegation keeps this
+// working after HTMX replaces a refreshed list.
+document.addEventListener("input", (event) => {
+  const input = event.target.closest("[data-model-search]");
+  if (!input) return;
+  const panel = input.closest(".model-panel");
+  if (!panel) return;
+  const query = input.value.trim().toLowerCase();
+  let visible = 0;
+  panel.querySelectorAll(".model-card").forEach((card) => {
+    const text = (card.getAttribute("data-model-text") || "").toLowerCase();
+    const match = query === "" || text.includes(query);
+    card.hidden = !match;
+    if (match) visible += 1;
+  });
+  const empty = panel.querySelector(".model-search-empty");
+  if (empty) {
+    empty.textContent = query ? "No models match \u201c" + query + "\u201d." : "No models match.";
+    empty.hidden = visible !== 0;
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  const input = event.target.closest?.("[data-model-search]");
+  if (input && event.key === "Enter") event.preventDefault();
+});

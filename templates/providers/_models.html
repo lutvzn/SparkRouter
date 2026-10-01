@@ -3,17 +3,39 @@
   <p class="test fail">{{ provider.model_error }}</p>
   {% endif %}
   {% if provider.models_known %}
-  <details>
-    <summary>{{ provider.models.len() }} model{% if provider.models.len() != 1 %}s{% endif %}{% if provider.models_truncated %} (first 500){% endif %}</summary>
-    {% if provider.models.is_empty() %}
-    <p class="hint">This connection returned no models.</p>
-    {% else %}
-    <ul>
-      {% for model in provider.models %}
-      <li><code>{{ model }}</code></li>
-      {% endfor %}
-    </ul>
-    {% endif %}
+  <details class="model-dropdown">
+    <summary class="btn small">
+      {{ provider.models.len() }} model{% if provider.models.len() != 1 %}s{% endif %}{% if provider.models_truncated %} (first 500){% endif %}
+    </summary>
+    <div class="model-panel">
+      {% if provider.models.is_empty() %}
+      <p class="hint">This connection returned no models.</p>
+      {% else %}
+      <label class="model-search" for="model-search-{{ provider.id }}">
+        <span class="visually-hidden">Filter models</span>
+        <span class="model-search-field">
+          <svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#search"></use></svg>
+          <input id="model-search-{{ provider.id }}" type="search" placeholder="Filter models" autocomplete="off" enterkeyhint="search" data-model-search aria-controls="model-cards-{{ provider.id }}">
+        </span>
+      </label>
+      <p class="model-search-empty" hidden>No models match.</p>
+      <div id="model-cards-{{ provider.id }}" class="model-cards">
+        {% for model in provider.models %}
+        <article class="model-card" data-model-text="{{ model.search_text() }}">
+          <h3>{{ model.name }}</h3>
+          {% if model.name != model.id %}<code>{{ model.id }}</code>{% endif %}
+          {% if !model.fields.is_empty() %}
+          <dl>
+            {% for field in model.fields %}
+            <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
+            {% endfor %}
+          </dl>
+          {% endif %}
+        </article>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
   </details>
   {% else %}
   <p class="hint">Refresh models to list this connection. Combo steps suggest those IDs.</p>

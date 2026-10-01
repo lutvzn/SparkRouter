@@ -45,15 +45,16 @@
 {% if providers.is_empty() %}
 <p class="empty">No connections for this endpoint yet. Use Add connection to get started.</p>
 {% else %}
-<div class="connection-grid">
+<div class="connection-list">
   {% for provider in providers %}
-  <div class="card connection-card">
-    <div class="connection-head">
-      <span class="provider-tile-title">{{ provider.name }}</span>
-      {% if provider.has_key %}<span class="badge ok">stored</span>{% else %}<span class="badge">none</span>{% endif %}
-      {% if provider.enabled %}<span class="badge ok">enabled</span>{% else %}<span class="badge off">disabled</span>{% endif %}
-    </div>
-    <div class="connection-actions">
+  <article class="card connection-row">
+    <div class="connection-row-bar">
+      <div class="connection-identity">
+        <span class="provider-tile-title">{{ provider.name }}</span>
+        {% if provider.has_key %}<span class="badge ok">stored</span>{% else %}<span class="badge">none</span>{% endif %}
+        {% if provider.enabled %}<span class="badge ok">enabled</span>{% else %}<span class="badge off">disabled</span>{% endif %}
+      </div>
+      <div class="connection-actions">
       <a class="btn small" href="/providers/{{ provider.id }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#pencil"></use></svg>Edit</a>
       <form class="inline" method="post" action="/providers/{{ provider.id }}/test" hx-post="/providers/{{ provider.id }}/test" hx-target="#test-{{ provider.id }}" hx-swap="innerHTML">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -64,9 +65,10 @@
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Delete</button>
       </form>
+      </div>
     </div>
     {% include "providers/_models.html" %}
-  </div>
+  </article>
   {% endfor %}
 </div>
 {% endif %}

@@ -129,7 +129,7 @@ existing installation's database.
    named custom providers may share URLs without merging their connections.
    Check the Custom badge and Delete provider action. Deletion removes the
    provider and all its connections, but a connection used by a combo must block
-   the entire deletion without losing any keys. Presets have no provider-delete action. The providers search box filters tile titles as you type, without Enter, and does not match the protocol badge alone. Refresh models on a connection and confirm those IDs appear as combo-step suggestions; a typed ID must still be accepted.
+   the entire deletion without losing any keys. Presets have no provider-delete action. The providers search box filters tile titles as you type, without Enter, and does not match the protocol badge alone. Refresh models on a connection, open the model dropdown, and confirm the search box filters cards as you type. Those IDs should also appear as combo-step suggestions; a typed ID must still be accepted.
    Check preset tiles and Custom provider. Add two named connections to one
    preset and verify both appear on its page without exposing keys. Connections
    in separate custom providers must remain separate. Confirm the combo

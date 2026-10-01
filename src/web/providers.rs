@@ -69,7 +69,7 @@ pub(crate) struct ProviderRow {
     name: String,
     enabled: bool,
     has_key: bool,
-    models: Vec<String>,
+    models: Vec<crate::db::connection_models::StoredModel>,
     models_known: bool,
     models_truncated: bool,
     model_error: String,
@@ -416,7 +416,7 @@ async fn attach_models(
     let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
     for row in &mut rows {
         if let Some(list) = lists.get(&row.id) {
-            row.models.clone_from(&list.ids);
+            row.models.clone_from(&list.models);
             row.models_known = true;
             row.models_truncated = list.truncated;
         }
@@ -440,12 +440,12 @@ pub(crate) async fn refresh_models(
             crate::db::connection_models::replace(
                 &state.db,
                 &provider.id,
-                &listed.ids,
+                &listed.models,
                 listed.truncated,
             )
             .await?;
             let mut row = ProviderRow::from_stored(provider);
-            row.models = listed.ids;
+            row.models = listed.models;
             row.models_known = true;
             row.models_truncated = listed.truncated;
             row.model_error.clear();
@@ -950,7 +950,14 @@ mod tests {
                 name: "Local <LLM> & Friends".to_string(),
                 enabled: true,
                 has_key: false,
-                models: vec!["gpt-4o-mini".to_string()],
+                models: vec![crate::db::connection_models::StoredModel {
+                    id: "gpt-4o-mini".to_string(),
+                    name: "GPT-4o mini".to_string(),
+                    fields: vec![crate::db::connection_models::ModelField {
+                        label: "Owned by".to_string(),
+                        value: "openai".to_string(),
+                    }],
+                }],
                 models_known: true,
                 models_truncated: false,
                 model_error: String::new(),
@@ -974,6 +981,9 @@ mod tests {
         // Test + delete buttons, the Add connection form, and the group
         // delete form each carry CSRF.
         assert!(group.contains("gpt-4o-mini"));
+        assert!(group.contains("GPT-4o mini"));
+        assert!(group.contains("data-model-search"));
+        assert!(group.contains("class=\"connection-list\""));
         assert!(group.contains("action=\"/providers/p1/models\""));
         assert_eq!(group.matches("name=\"_csrf\"").count(), 5);
         // The add form posts back to the group and pins the endpoint.
