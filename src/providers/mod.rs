@@ -144,9 +144,6 @@ const MAX_LISTED_MODELS: usize = 500;
 const MAX_MODEL_PAGES: usize = 5;
 const MAX_MODEL_LIST_BYTES: usize = 1024 * 1024;
 
-const MAX_MODEL_FIELDS: usize = 6;
-const MAX_FIELD_CHARS: usize = 120;
-
 /// Model cards returned by a provider's `/models` endpoint, in upstream order.
 pub struct ListedModels {
     pub models: Vec<StoredModel>,
@@ -233,50 +230,160 @@ pub fn parse_model_page(body: &Value) -> Result<(Vec<StoredModel>, Option<String
     Ok((models, next))
 }
 
-/// Card title plus a few short scalar fields. Nested objects are flattened one
-/// level. Credential-like keys and long values are omitted.
+/// Card title plus at most two useful facts: context size and output limit.
+/// Modality strings, dates, owners, pricing, and descriptions stay off the card.
 fn model_card(item: &Value, id: &str) -> StoredModel {
     let name = ["display_name", "name", "title"]
         .iter()
-        .find_map(|key| clean_text(item.get(*key).and_then(Value::as_str).unwrap_or(""), 256))
+        .find_map(|key| clean_text(item.get(*key).and_then(Value::as_str).unwrap_or(""), 80))
         .unwrap_or_else(|| id.to_owned());
     let mut fields = Vec::new();
-    collect_fields(item, "", 0, &mut fields);
-    fields.sort_by_key(|field| field.0);
+    collect_useful(item, &mut fields);
+    collect_details(item, "", 0, &mut fields);
     StoredModel {
         id: id.to_owned(),
         name,
-        fields: fields
-            .into_iter()
-            .take(MAX_MODEL_FIELDS)
-            .map(|(_, label, value)| ModelField { label, value })
-            .collect(),
+        fields,
+        free: model_is_free(item, id),
     }
 }
 
-fn collect_fields(value: &Value, prefix: &str, depth: usize, out: &mut Vec<(u8, String, String)>) {
+/// A model is free only when the provider says so: a free flag, an id ending
+/// in `:free`, or a pricing object whose prices are all zero. Missing prices
+/// are not treated as free.
+fn model_is_free(item: &Value, id: &str) -> bool {
+    if ["free", "is_free", "isFree"]
+        .iter()
+        .any(|key| item.get(*key).is_some_and(flag_is_true))
+    {
+        return true;
+    }
+    if id
+        .rsplit([':', '/'])
+        .next()
+        .is_some_and(|part| part.eq_ignore_ascii_case("free"))
+    {
+        return true;
+    }
+    let Some(prices) = item.get("pricing").and_then(Value::as_object) else {
+        return false;
+    };
+    let mut saw_price = false;
+    for value in prices.values() {
+        let Some(amount) = price_amount(value) else {
+            continue;
+        };
+        saw_price = true;
+        if amount != 0.0 {
+            return false;
+        }
+    }
+    saw_price
+}
+
+fn flag_is_true(value: &Value) -> bool {
+    match value {
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_i64() == Some(1),
+        Value::String(text) => matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "1" | "free"
+        ),
+        _ => false,
+    }
+}
+
+fn price_amount(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn collect_useful(value: &Value, out: &mut Vec<ModelField>) {
+    for key in [
+        "context_length",
+        "context_window",
+        "max_context_length",
+        "max_completion_tokens",
+        "max_output_tokens",
+    ] {
+        if out.len() == 2 {
+            return;
+        }
+        let Some(child) = value.get(key) else {
+            continue;
+        };
+        let Some(field) = useful_field(key, child) else {
+            continue;
+        };
+        if out.iter().any(|existing| existing.label == field.label) {
+            continue;
+        }
+        out.push(field);
+    }
+}
+
+fn useful_field(key: &str, value: &Value) -> Option<ModelField> {
+    match key {
+        "context_length" | "context_window" | "max_context_length" => Some(ModelField {
+            label: "Context".into(),
+            value: format!("{} ctx", compact_count(value)?),
+        }),
+        "max_completion_tokens" | "max_output_tokens" => Some(ModelField {
+            label: "Output".into(),
+            value: format!("{} output", compact_count(value)?),
+        }),
+        _ => None,
+    }
+}
+
+const MAX_INFO_FIELDS: usize = 80;
+const MAX_INFO_CHARS: usize = 500;
+
+/// Extra endpoint fields for the details popup. Secrets and the id/name keys
+/// already shown in the header are omitted. Nested objects are flattened once.
+fn collect_details(value: &Value, prefix: &str, depth: usize, out: &mut Vec<ModelField>) {
     let Some(object) = value.as_object() else {
         return;
     };
     for (key, child) in object {
-        if skipped_key(key) || sensitive_key(key) {
+        if out.len() >= MAX_INFO_FIELDS {
+            return;
+        }
+        if skipped_detail_key(key) || sensitive_key(key) {
             continue;
         }
-        let label = field_label(prefix, key);
-        if let Some(text) = scalar_text(key, child) {
-            out.push((field_rank(key, depth), label, text));
+        let label = detail_label(prefix, key);
+        if out.iter().any(|field| field.label == label) {
             continue;
         }
-        if depth == 0 && child.is_object() {
-            collect_fields(child, &label, 1, out);
+        match child {
+            Value::Object(_) if depth < 2 => collect_details(child, &label, depth + 1, out),
+            Value::Array(items) => {
+                if let Some(text) = detail_list(items) {
+                    out.push(ModelField { label, value: text });
+                }
+            }
+            other => {
+                if let Some(text) = detail_scalar(other) {
+                    out.push(ModelField { label, value: text });
+                }
+            }
         }
     }
 }
 
-fn skipped_key(key: &str) -> bool {
+fn skipped_detail_key(key: &str) -> bool {
     matches!(
         key,
-        "id" | "object" | "type" | "display_name" | "name" | "title"
+        "id" | "object" | "display_name" | "name" | "title"
+            | "context_length"
+            | "context_window"
+            | "max_context_length"
+            | "max_completion_tokens"
+            | "max_output_tokens"
     )
 }
 
@@ -284,8 +391,7 @@ fn sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     matches!(
         key.as_str(),
-        "key"
-            | "token"
+        "key" | "token"
             | "secret"
             | "password"
             | "authorization"
@@ -294,22 +400,12 @@ fn sensitive_key(key: &str) -> bool {
             | "apikey"
             | "access_token"
     ) || key.contains("secret")
-        || key.contains("token")
         || key.contains("password")
+        || key.ends_with("_token")
+        || key.ends_with("_key")
 }
 
-fn field_rank(key: &str, depth: usize) -> u8 {
-    let preferred = match key {
-        "owned_by" => 0,
-        "created" | "created_at" => 1,
-        "context_length" | "context_window" | "max_tokens" | "max_completion_tokens" => 2,
-        "description" => 3,
-        _ => 4,
-    };
-    preferred + u8::from(depth > 0) * 5
-}
-
-fn field_label(prefix: &str, key: &str) -> String {
+fn detail_label(prefix: &str, key: &str) -> String {
     let part = humanize(key);
     if prefix.is_empty() {
         part
@@ -339,62 +435,59 @@ fn capitalize(word: &str) -> String {
     }
 }
 
-fn scalar_text(key: &str, value: &Value) -> Option<String> {
+fn detail_scalar(value: &Value) -> Option<String> {
     match value {
-        Value::String(text) => clean_text(text, MAX_FIELD_CHARS).map(|text| format_time(key, text)),
-        Value::Number(number) => number_text(key, number),
+        Value::String(text) => clean_text(text, MAX_INFO_CHARS),
         Value::Bool(flag) => Some(if *flag { "yes" } else { "no" }.to_owned()),
-        Value::Array(items) => string_list(items),
+        Value::Number(number) => {
+            if let Some(whole) = number.as_i64() {
+                Some(crate::db::connection_models::group_plain_number(
+                    &whole.to_string(),
+                ))
+            } else {
+                number.as_f64().map(format_decimal)
+            }
+        }
         _ => None,
     }
 }
 
-fn number_text(key: &str, number: &serde_json::Number) -> Option<String> {
-    if let Some(whole) = number.as_i64() {
-        if timestamp_key(key) && (1_000_000_000..4_000_000_000).contains(&whole) {
-            return Some(format_unix_date(whole));
+fn detail_list(items: &[Value]) -> Option<String> {
+    let mut values = Vec::new();
+    for item in items.iter().take(16) {
+        if let Some(text) = item.as_str().and_then(|text| clean_text(text, 80)) {
+            values.push(text);
+        } else if let Some(text) = item
+            .get("id")
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .and_then(|text| clean_text(text, 80))
+        {
+            values.push(text);
         }
-        return Some(whole.to_string());
     }
-    let value = number.as_f64()?;
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        Some((value as i64).to_string())
-    } else {
-        Some(
-            format!("{value:.4}")
-                .trim_end_matches('0')
-                .trim_end_matches('.')
-                .to_owned(),
-        )
-    }
-}
-
-fn string_list(items: &[Value]) -> Option<String> {
-    let values: Vec<&str> = items.iter().filter_map(Value::as_str).take(4).collect();
-    if values.is_empty() || values.len() != items.len().min(4) {
+    if values.is_empty() {
         return None;
     }
-    let mut text = values[..values.len().min(3)].join(", ");
-    if items.len() > 3 {
+    let mut text = values.join(", ");
+    if items.len() > values.len() {
         text.push('…');
     }
-    clean_text(&text, MAX_FIELD_CHARS)
+    clean_text(&text, MAX_INFO_CHARS)
 }
 
-fn format_time(key: &str, text: String) -> String {
-    if timestamp_key(key)
-        && text.len() >= 10
-        && text.as_bytes().get(4) == Some(&b'-')
-        && text.as_bytes().get(7) == Some(&b'-')
-    {
-        text[..10].to_owned()
-    } else {
-        text
-    }
+fn format_decimal(value: f64) -> String {
+    let text = format!("{value:.6}");
+    text.trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
 }
 
-fn timestamp_key(key: &str) -> bool {
-    key == "created" || key.ends_with("_at") || key.ends_with("_time")
+fn compact_count(value: &Value) -> Option<String> {
+    let whole = value.as_i64().filter(|n| *n > 0)?;
+    Some(crate::db::connection_models::group_plain_number(
+        &whole.to_string(),
+    ))
 }
 
 fn clean_text(text: &str, max_chars: usize) -> Option<String> {
@@ -411,21 +504,6 @@ fn clean_text(text: &str, max_chars: usize) -> Option<String> {
         out.push(ch);
     }
     Some(out)
-}
-
-fn format_unix_date(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
-    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn query_component(value: &str) -> String {
@@ -624,8 +702,18 @@ mod tests {
                     "display_name": "GPT-4o",
                     "owned_by": "openai",
                     "created": 1704067200,
+                    "context_length": 1050000,
+                    "max_output_tokens": 16384,
+                    "description": "A long description that should not appear on the card.",
                     "api_key": "sk-should-not-appear",
-                    "pricing": {"prompt": "0.005", "secret": "nope"}
+                    "pricing": {
+                        "prompt": "0.005",
+                        "input_per_million": 1.25,
+                        "above_threshold": {"output_per_million": "12"},
+                        "secret": "nope"
+                    },
+                    "aliases": ["anthropic/claude", "vendor/claude"],
+                    "type": "text"
                 },
                 {"id": ""},
                 {"id": "gpt-4o-mini"},
@@ -636,25 +724,45 @@ mod tests {
         assert_eq!(models[0].id, "gpt-4o");
         assert_eq!(models[0].name, "GPT-4o");
         assert_eq!(models[1].id, "gpt-4o-mini");
-        assert!(
-            models[0]
-                .fields
-                .iter()
-                .any(|field| field.label == "Owned by" && field.value == "openai")
+        assert_eq!(
+            models[0].display_fields(),
+            vec![
+                ModelField {
+                    label: "Context".into(),
+                    value: "1.050.000 ctx".into(),
+                },
+                ModelField {
+                    label: "Output".into(),
+                    value: "16.384 output".into(),
+                },
+            ]
         );
-        assert!(
-            models[0]
-                .fields
-                .iter()
-                .any(|field| field.label == "Created" && field.value == "2024-01-01")
-        );
-        assert!(
-            models[0]
-                .fields
-                .iter()
-                .any(|field| field.label == "Pricing · Prompt")
-        );
-        assert!(models[0].search_text().contains("openai"));
+        assert!(!models[0].free);
+        assert!(models[0].search_text().contains("1.050.000"));
+        assert!(!models[0].search_text().contains("openai"));
+        let info = models[0].info_fields();
+        assert!(info.iter().any(|field| field.label == "Type" && field.value == "text"));
+        assert!(info.iter().any(|field| {
+            field.label == "Pricing · Input per million" && field.value == "$1.25 / 1M tokens"
+        }));
+        assert!(info.iter().any(|field| field.label == "Pricing · Above threshold · Output per million"));
+        assert!(info.iter().any(|field| field.label == "Aliases" && field.value.contains("anthropic/claude")));
+        let (free_models, _) = parse_model_page(&json!({
+            "data": [
+                {"id": "llama:free", "context_length": 8192},
+                {"id": "paid", "pricing": {"prompt": "0", "completion": "0.0001"}},
+                {"id": "gratis", "pricing": {"prompt": "0", "completion": "0"}}
+            ]
+        }))
+        .unwrap();
+        assert!(free_models[0].free && free_models[2].free);
+        assert!(!free_models[1].free);
+        let (flagged, _) = parse_model_page(&json!({
+            "data": [{"id": "promo", "is_free": true, "context_length": 1000000}]
+        }))
+        .unwrap();
+        assert!(flagged[0].is_free());
+        assert_eq!(flagged[0].display_fields()[0].value, "1.000.000 ctx");
         let rendered = serde_json::to_string(&models[0].fields).unwrap();
         assert!(!rendered.contains("sk-should-not-appear"));
         assert!(!rendered.contains("nope"));

@@ -96,7 +96,7 @@ Providers are configuration, not vendor-specific implementations. The dashboard 
 
 The **Anthropic** protocol uses `https://api.anthropic.com/v1` and translates Chat Completions to `/messages`, including text, system instructions, tools, and streaming. Vendor-specific protocol limitations are described below.
 
-The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** on a connection stores that list. Open the model dropdown on the connection to search the returned names and fields; the combo editor suggests those IDs, and you can still type any model. Some compatible servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
+The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** on a connection stores that list. Open the model dropdown on the connection to search names and IDs. Cards also show a grouped context size as `ctx` when the provider returns one, a green free tag when that model is free, and a button to copy the model ID. The combo editor suggests those IDs, and you can still type any model. Some compatible servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
 
 Saved API keys are never rendered back into HTML. Leaving the key field blank
 when editing a connection preserves the existing encrypted value. To clear a

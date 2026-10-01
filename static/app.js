@@ -46,6 +46,8 @@ async function copyModelId(button) {
   try {
     await navigator.clipboard.writeText(modelId);
     setCopyLabel(button, "Copied");
+    button.classList.add("is-copied");
+    window.setTimeout(() => button.classList.remove("is-copied"), 1200);
     if (status) status.textContent = "Copied " + modelId;
   } catch (_) {
     // Never surface the raw rejection; the visible model ID is the recovery path.
@@ -59,9 +61,29 @@ async function copyModelId(button) {
 document.body.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy-model]");
   if (button) copyModelId(button);
+  const info = event.target.closest("[data-model-info]");
+  if (info) openModelInfo(info);
+});
+
+function openModelInfo(button) {
+  const source = button.closest(".model-card")?.querySelector(".model-info-source");
+  const dialog = document.getElementById("model-info-dialog");
+  const body = dialog?.querySelector(".model-info-body");
+  if (!source || !dialog || !body || typeof dialog.showModal !== "function") return;
+  const details = source.cloneNode(true);
+  details.hidden = false;
+  const heading = details.querySelector("h2");
+  if (heading) heading.id = "model-info-heading";
+  body.replaceChildren(details);
+  if (!dialog.open) dialog.showModal();
+}
+
+document.getElementById("model-info-dialog")?.addEventListener("click", (event) => {
+  if (event.target.id === "model-info-dialog") event.target.close();
 });
 
 revealCopyButtons();
+document.body.addEventListener("htmx:afterSwap", revealCopyButtons);
 
 // Provider search filters tile titles as the user types. It never submits, and
 // it ignores protocol badges so "open" does not keep every OpenAI-compatible card.

@@ -1,6 +1,6 @@
 <div id="models-{{ provider.id }}" class="model-list">
   {% if !provider.model_error.is_empty() %}
-  <p class="test fail">{{ provider.model_error }}</p>
+  <span class="test fail model-error" title="{{ provider.model_error }}">{{ provider.model_error }}</span>
   {% endif %}
   {% if provider.models_known %}
   <details class="model-dropdown">
@@ -22,15 +22,35 @@
       <div id="model-cards-{{ provider.id }}" class="model-cards">
         {% for model in provider.models %}
         <article class="model-card" data-model-text="{{ model.search_text() }}">
-          <h3>{{ model.name }}</h3>
-          {% if model.name != model.id %}<code>{{ model.id }}</code>{% endif %}
-          {% if !model.fields.is_empty() %}
-          <dl>
-            {% for field in model.fields %}
-            <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
-            {% endfor %}
-          </dl>
-          {% endif %}
+          <div class="model-card-tools">
+            <button type="button" class="model-card-copy" data-copy-model="{{ model.id }}" aria-label="Copy {{ model.id }}" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label visually-hidden">Copy</span></button>
+            <button type="button" class="model-card-info" data-model-info aria-haspopup="dialog" aria-controls="model-info-dialog" aria-label="Details for {{ model.name }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#info"></use></svg></button>
+          </div>
+          <div class="model-card-line">
+            <span class="model-card-name">{{ model.name }}</span>
+            {% if model.is_free() %}<span class="model-card-free">free</span>{% endif %}
+          </div>
+          <div class="model-card-line">
+            <span class="model-card-id">{{ model.id }}</span>
+            <span class="model-card-side">
+              {% for field in model.display_fields() %}
+              <span class="model-card-chip" title="{{ field.label }}">{{ field.value }}</span>
+              {% endfor %}
+            </span>
+          </div>
+          <div class="model-info-source" hidden>
+            <h2>{{ model.name }}</h2>
+            <p><code>{{ model.id }}</code></p>
+            {% if model.info_fields().is_empty() %}
+            <p class="hint">This model did not include any extra fields.</p>
+            {% else %}
+            <dl>
+              {% for field in model.info_fields() %}
+              <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
+              {% endfor %}
+            </dl>
+            {% endif %}
+          </div>
         </article>
         {% endfor %}
       </div>
@@ -38,7 +58,7 @@
     </div>
   </details>
   {% else %}
-  <p class="hint">Refresh models to list this connection. Combo steps suggest those IDs.</p>
+  <span class="visually-hidden">Refresh models to list this connection. Combo steps suggest those IDs.</span>
   {% endif %}
   <form class="inline" method="post" action="/providers/{{ provider.id }}/models" hx-post="/providers/{{ provider.id }}/models" hx-target="#models-{{ provider.id }}" hx-swap="outerHTML">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">

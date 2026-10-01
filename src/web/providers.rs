@@ -957,6 +957,7 @@ mod tests {
                         label: "Owned by".to_string(),
                         value: "openai".to_string(),
                     }],
+                    free: true,
                 }],
                 models_known: true,
                 models_truncated: false,
@@ -982,6 +983,7 @@ mod tests {
         // delete form each carry CSRF.
         assert!(group.contains("gpt-4o-mini"));
         assert!(group.contains("GPT-4o mini"));
+        assert!(group.contains("model-card-free"));
         assert!(group.contains("data-model-search"));
         assert!(group.contains("class=\"connection-list\""));
         assert!(group.contains("action=\"/providers/p1/models\""));

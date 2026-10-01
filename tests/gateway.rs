@@ -1379,7 +1379,7 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
         "/models",
         get(|| async {
             Json(json!({"data": [
-                {"id": "alpha", "display_name": "Alpha", "owned_by": "lab"},
+                {"id": "alpha", "display_name": "Alpha", "context_length": 1050000, "pricing": {"prompt": "0", "completion": "0"}},
                 {"id": " beta "}
             ]}))
         }),
@@ -1413,7 +1413,10 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     let page = String::from_utf8(body_bytes(response).await.to_vec())?;
     assert!(page.contains("alpha") && page.contains("beta"));
     assert!(page.contains("Alpha"));
-    assert!(page.contains("Owned by"));
+    assert!(page.contains("1.050.000 ctx"));
+    assert!(page.contains("data-copy-model=\"alpha\""));
+    assert!(page.contains("model-card-free"));
+    assert!(!page.contains("Owned by"));
     assert!(page.contains("data-model-search"));
     let combo = combos::create(&state.db, "suggest").await?;
     let editor = send(
