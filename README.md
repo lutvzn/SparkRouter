@@ -52,7 +52,7 @@ font dependency. Their license is included at `/static/icons-LICENSE.txt`.
    separate even when their URLs match. Existing custom connections are
    imported into provider groups without changing keys or combo references.
 3. Open **Combos**, create `coding`, and add provider/model steps in preference order.
-4. Choose a specific **provider / connection** for each step and use the up/down
+4. Choose a **provider**, then one of its **connections**, for each step and use the up/down
    buttons to change fallback order. Enter model IDs exactly as your upstream
    accepts them. Keys within a provider are not automatically rotated or retried.
 
@@ -76,7 +76,16 @@ curl http://127.0.0.1:8080/v1/models \
   -H "Authorization: Bearer $ROUTER_API_KEY"
 ```
 
-Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. Either key can call every combo. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
+Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. Either key can call every combo and every directly routed model. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
+
+A refreshed connection model can also be called by its upstream ID, with no combo:
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $ROUTER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gpt-6-luna","messages":[{"role":"user","content":"Hello"}]}'
+```
 
 ## Configuration
 
@@ -115,6 +124,7 @@ any connection is referenced by a combo; preset provider tiles are not removable
 - Connect/read/request failures and HTTP **408, 429, 500, 502, 503, 504** try the next step. The status policy lives in `src/routing/combo.rs`.
 - Other HTTP failures, including **400, 401, 403, 404, 422**, stop the chain. No repeated attempts, cooldown state, or background work.
 - Empty combos, entirely disabled combos, or exhausted chains return a sanitized OpenAI-shaped `502` error. Unknown combo names return `404`.
+- A model that does not start with `combo/` is routed directly. SparkRouter sends that exact ID to each enabled connection whose last **Refresh models** listed it, oldest connection first. Retryable failures try the next matching connection; permanent errors stop. A model that no connection lists returns `404`. A model listed only by disabled connections, or whose attempts are exhausted, returns `502`. Connections that have never been refreshed are not direct targets. Combo steps are unchanged and still accept any model string. IDs beginning with `combo/` are always combo names, not direct models.
 - OpenAI requests remain `serde_json::Value`; only the model is replaced for each target. Unknown fields are preserved by the OpenAI adapter.
 - **Failover is possible only before a streaming response is committed.** The adapter obtains initial upstream data before returning the response. After that, the selected upstream owns the request. A mid-stream failure terminates the HTTP body with an error; it never switches to another provider or restarts generated text. Clients must handle incomplete streams.
 - One shared pooled HTTP client uses a 10-second connect timeout, 120-second idle read timeout, and 90-second idle pool lifetime. Each attempt has 120 seconds to prepare its response; the entire pre-commit fallback phase has a 180-second ceiling. Committed streams can run longer while data continues to arrive. Redirects are rejected to protect credentials.
@@ -159,6 +169,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-Only `/v1/chat/completions` and `/v1/models` are implemented; requests route via combo names. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. No embeddings, Responses API, Gemini, OAuth, routing optimization, price optimization, queues, caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. To change a combo step's provider/model, remove it and add the replacement. Model listing includes configured combos even if empty or disabled.
+Only `/v1/chat/completions` and `/v1/models` are implemented. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. No embeddings, Responses API, Gemini, OAuth, routing optimization, price optimization, queues, caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. To change a combo step's provider/model, remove it and add the replacement. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections.
 
 Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 1024 if unspecified. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow or dashboard authentication in this version.

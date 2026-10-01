@@ -1,7 +1,8 @@
 //! Last refreshed model list for a provider connection.
 //!
-//! The combo editor reads the IDs for suggestions. Routing still accepts any
-//! model string; a missing or stale list never blocks a request.
+//! Combo steps still accept any model string; a missing list never blocks a
+//! combo. Direct requests use this snapshot as the routing table: an ID is
+//! reachable only when an enabled connection's last refresh listed it.
 
 use std::collections::HashMap;
 
@@ -50,8 +51,8 @@ impl StoredModel {
             .iter()
             .filter(|field| useful_card_label(&field.label))
             .take(2)
-            .cloned()
             .filter(|field| !field.value.contains("->"))
+            .cloned()
             .map(|mut field| {
                 field.value = group_plain_number(&field.value);
                 if field.label.to_ascii_lowercase().contains("context") {
@@ -98,10 +99,10 @@ fn format_info_value(label: &str, value: &str) -> String {
     if label.contains("web search") || label.contains("web_search") {
         return format_currency(value).unwrap_or_else(|| value.to_owned());
     }
-    if label.contains("pricing") || label.contains("price") {
-        if let Some(formatted) = format_per_million(&label, value) {
-            return formatted;
-        }
+    if (label.contains("pricing") || label.contains("price"))
+        && let Some(formatted) = format_per_million(&label, value)
+    {
+        return formatted;
     }
     group_plain_number(value)
 }
@@ -227,6 +228,48 @@ pub async fn replace(
     }
     transaction.commit().await?;
     Ok(())
+}
+
+/// Connections whose last refresh listed `model_id`, oldest connection first.
+/// Disabled connections are included so the caller can tell "not listed" from
+/// "listed, but unavailable".
+pub async fn providers_for_model(
+    pool: &SqlitePool,
+    model_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query(
+        "SELECT p.id
+         FROM connection_models m
+         JOIN providers p ON p.id = m.provider_id
+         WHERE m.model_id = ?
+         ORDER BY p.rowid",
+    )
+    .bind(model_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(|row| Ok(row.try_get("id")?)).collect()
+}
+
+/// Distinct model IDs on at least one enabled connection, in ID order.
+/// IDs starting with `combo/` are omitted; that prefix is reserved for combos.
+pub async fn routable_model_ids(pool: &SqlitePool) -> Result<Vec<String>, AppError> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT m.model_id
+         FROM connection_models m
+         JOIN providers p ON p.id = m.provider_id
+         WHERE p.enabled != 0
+         ORDER BY m.model_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let id: String = row.try_get("model_id")?;
+        if !id.starts_with("combo/") {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Lists for the given connections. Missing keys were never refreshed.
@@ -421,5 +464,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn direct_lookup_follows_connection_age_and_enabled_state() {
+        let pool = pool().await;
+        provider(&pool, "older").await;
+        provider(&pool, "newer").await;
+        provider(&pool, "off").await;
+        sqlx::query("UPDATE providers SET enabled = 0 WHERE id = 'off'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let listed = StoredModel {
+            id: "openai/gpt-6-luna".into(),
+            name: "GPT-6 Luna".into(),
+            fields: Vec::new(),
+            free: false,
+        };
+        for id in ["older", "newer", "off"] {
+            replace(&pool, id, std::slice::from_ref(&listed), false)
+                .await
+                .unwrap();
+        }
+        replace(
+            &pool,
+            "newer",
+            &[
+                listed.clone(),
+                StoredModel {
+                    id: "combo/not-a-combo".into(),
+                    name: "Reserved".into(),
+                    fields: Vec::new(),
+                    free: false,
+                },
+            ],
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            providers_for_model(&pool, "openai/gpt-6-luna")
+                .await
+                .unwrap(),
+            vec!["older".to_owned(), "newer".to_owned(), "off".to_owned()]
+        );
+        assert!(
+            providers_for_model(&pool, "missing")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            routable_model_ids(&pool).await.unwrap(),
+            vec!["openai/gpt-6-luna".to_owned()]
+        );
     }
 }

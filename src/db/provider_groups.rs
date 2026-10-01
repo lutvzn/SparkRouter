@@ -89,6 +89,35 @@ pub async fn members(pool: &SqlitePool, id: &str) -> Result<Vec<Provider>, AppEr
     rows.iter().map(provider_from_row).collect()
 }
 
+/// Custom-provider membership for a connection, when it has one.
+pub struct ConnectionGroup {
+    pub id: String,
+    pub name: String,
+}
+
+/// Custom provider id and name for each grouped connection.
+pub async fn connection_groups(
+    pool: &SqlitePool,
+) -> Result<HashMap<String, ConnectionGroup>, AppError> {
+    let rows = sqlx::query(
+        "SELECT m.provider_id, g.id, g.name FROM provider_group_connections m
+         JOIN custom_provider_groups g ON g.id = m.group_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok((
+                row.try_get("provider_id")?,
+                ConnectionGroup {
+                    id: row.try_get("id")?,
+                    name: row.try_get("name")?,
+                },
+            ))
+        })
+        .collect()
+}
+
 pub async fn connection_group_names(
     pool: &SqlitePool,
 ) -> Result<HashMap<String, String>, AppError> {

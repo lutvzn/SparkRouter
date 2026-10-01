@@ -378,7 +378,10 @@ fn collect_details(value: &Value, prefix: &str, depth: usize, out: &mut Vec<Mode
 fn skipped_detail_key(key: &str) -> bool {
     matches!(
         key,
-        "id" | "object" | "display_name" | "name" | "title"
+        "id" | "object"
+            | "display_name"
+            | "name"
+            | "title"
             | "context_length"
             | "context_window"
             | "max_context_length"
@@ -391,7 +394,8 @@ fn sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     matches!(
         key.as_str(),
-        "key" | "token"
+        "key"
+            | "token"
             | "secret"
             | "password"
             | "authorization"
@@ -478,9 +482,7 @@ fn detail_list(items: &[Value]) -> Option<String> {
 
 fn format_decimal(value: f64) -> String {
     let text = format!("{value:.6}");
-    text.trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_owned()
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 fn compact_count(value: &Value) -> Option<String> {
@@ -741,12 +743,21 @@ mod tests {
         assert!(models[0].search_text().contains("1.050.000"));
         assert!(!models[0].search_text().contains("openai"));
         let info = models[0].info_fields();
-        assert!(info.iter().any(|field| field.label == "Type" && field.value == "text"));
+        assert!(
+            info.iter()
+                .any(|field| field.label == "Type" && field.value == "text")
+        );
         assert!(info.iter().any(|field| {
             field.label == "Pricing · Input per million" && field.value == "$1.25 / 1M tokens"
         }));
-        assert!(info.iter().any(|field| field.label == "Pricing · Above threshold · Output per million"));
-        assert!(info.iter().any(|field| field.label == "Aliases" && field.value.contains("anthropic/claude")));
+        assert!(
+            info.iter()
+                .any(|field| field.label == "Pricing · Above threshold · Output per million")
+        );
+        assert!(
+            info.iter()
+                .any(|field| field.label == "Aliases" && field.value.contains("anthropic/claude"))
+        );
         let (free_models, _) = parse_model_page(&json!({
             "data": [
                 {"id": "llama:free", "context_length": 8192},

@@ -8,7 +8,7 @@ application. It is not a reduced copy of every OmniRoute subsystem.
 ```text
 Browser ──> Askama dashboard + HTMX ──> SQLite configuration
                                                │
-OpenAI client ──> /v1/* ──> ordered combo ──> protocol adapter ──> upstream
+OpenAI client ──> /v1/* ──> combo or direct model ──> protocol adapter ──> upstream
                                                │
                                       shared Reqwest client
 ```
@@ -31,9 +31,10 @@ state, cache, queue, or routing worker is involved.
 | `db/providers.rs` | Provider CRUD and ciphertext persistence |
 | `db/combos.rs` | Combo CRUD, step order, transactional mutations |
 | `web/` | Form validation, CSRF verification, rendering and dashboard actions |
-| `api/chat.rs` | JSON boundary validation and overall routing deadline |
-| `api/models.rs` | Combos listed as virtual OpenAI models |
-| `routing/combo.rs` | Sequential fallback loop and retryable status helper |
+| `api/chat.rs` | JSON boundary validation, combo-or-direct dispatch, and overall routing deadline |
+| `api/models.rs` | Combos and refreshed connection models listed as OpenAI models |
+| `routing/combo.rs` | Sequential combo fallback loop and retryable status helper |
+| `routing/direct.rs` | Direct model lookup and the same pre-commit fallback policy |
 | `providers/mod.rs` | Protocol selection, authentication, bounded HTTP bodies and stream commitment |
 | `providers/openai.rs` | OpenAI passthrough and terminal SSE tracking |
 | `providers/anthropic.rs` | Anthropic request, response, and event translation |
@@ -99,23 +100,31 @@ The public router is mounted at `/v1` separately from the dashboard:
 If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
 exists, API middleware requires `Authorization: Bearer <key>`. The environment
 key is compared with `subtle`. Generated keys are matched by a master-key HMAC
-fingerprint and are unrestricted: any valid key can call every combo. If neither
+fingerprint and are unrestricted: any valid key can call every combo and every
+direct model. If neither
 kind of key is configured, these endpoints permit unauthenticated requests.
 Model listing returns configured combos as
 `combo/<name>`, including empty combos and those with no enabled provider.
+It also returns each distinct model ID from the last refresh of an enabled
+connection. IDs that start with `combo/` are not listed as direct models.
 
 For chat requests:
 
-1. Parse the body into `serde_json::Value`, requiring an object, a model string
-   prefixed with `combo/`, and a boolean `stream` if supplied.
-2. Look up the combo by name and load steps in ascending position order.
+1. Parse the body into `serde_json::Value`, requiring an object, a nonempty model
+   string, and a boolean `stream` if supplied. `combo/<name>` selects a combo.
+   Any other ID is a direct model.
+2. Combo requests look up the combo by name and load steps in ascending position
+   order. Direct requests load connections whose stored model list contains that
+   exact ID, oldest connection first. A missing list is not a direct target.
 3. Priority uses configured order. Round robin and Random snapshot enabled steps
    before selecting a starting step; disabled or concurrently removed providers
    are skipped and do not consume turns. Providers are rechecked before attempts.
 4. Clone the request for the attempt and replace `model` with the step's actual
-   upstream model. Let the selected protocol adapter prepare and send it.
+   upstream model. A direct request already carries that ID, so the replacement
+   is the same string. Let the selected protocol adapter prepare and send it.
 5. Return the first successful response. Retryable failures advance to the next
-   step; permanent errors stop the chain immediately. Round robin reserves one
+   combo step or matching connection; permanent errors stop the chain immediately.
+   Round robin reserves one
    starting turn per request, shared by all handlers; retries do not advance it
    again. Random uses OS randomness with rejection sampling to avoid modulo bias.
    Both visit remaining steps cyclically from the selected start, at most once.
@@ -126,8 +135,10 @@ can also fail over before commitment. Local credential/configuration failures
 are permanent. Most malformed-request and authorization statuses stop the chain.
 There are no repeated attempts, hedged requests, cooldowns, or adaptive routing.
 
-Unknown combos return `404`; exhausted, empty, or wholly disabled chains return
-`502`. Errors have an OpenAI-shaped `error` object without raw upstream bodies.
+Unknown combos and model IDs that no connection lists return `404`. Exhausted,
+empty, or wholly disabled chains, including a direct model listed only by
+disabled connections, return `502`. Errors have an OpenAI-shaped `error` object
+without raw upstream bodies.
 Upstream authentication errors are labeled `upstream_error`, distinct from local
 gateway `authentication_error`. Rejected redirects are surfaced as gateway errors,
 not forwarded to the client as redirect instructions.
@@ -220,8 +231,8 @@ Custom providers are stored separately from their connections. `POST
 protocol; its card remains after the last connection is deleted. Membership is
 explicit, so custom providers sharing an endpoint remain separate. Each
 connection retains its provider UUID, encrypted credential, enabled flag, and
-combo references. Combo selectors show provider/connection labels and target
-one connection explicitly. Preset add forms take their URL and protocol from
+combo references. The combo add-step form chooses a provider, then one of
+its connections, and targets that connection explicitly. Preset add forms take their URL and protocol from
 the server-side catalog; custom connection forms take them from the stored
 provider. Legacy custom connections are assigned to groups by a new migration
 without changing ciphertext. The legacy `POST /providers` connection form is

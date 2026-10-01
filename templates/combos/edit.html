@@ -34,12 +34,20 @@
 {% else %}
 <form method="post" action="/combos/{{ combo_id }}/steps" class="card" hx-post="/combos/{{ combo_id }}/steps" hx-target="#combo-steps" hx-swap="innerHTML">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-  <div class="grid2">
+  <div class="grid3">
     <div>
-      <label for="provider_id">Provider / connection</label>
+      <label for="provider_group">Provider</label>
+      <select id="provider_group" required>
+        {% for group in provider_groups %}
+        <option value="{{ group.id }}">{{ group.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="provider_id">Connection</label>
       <select id="provider_id" name="provider_id" required>
         {% for p in providers %}
-        <option value="{{ p.id }}">{{ p.name }}{% if p.disabled %} (disabled){% endif %}</option>
+        <option value="{{ p.id }}" data-provider="{{ p.group_id }}">{{ p.connection_name }}{% if p.disabled %} (disabled){% endif %}</option>
         {% endfor %}
       </select>
     </div>

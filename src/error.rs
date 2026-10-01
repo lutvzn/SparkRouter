@@ -17,7 +17,7 @@ pub enum AppError {
     Encryption,
     #[error("provider request failed")]
     Provider,
-    #[error("all available combo targets failed")]
+    #[error("all available targets failed")]
     Routing,
     // Do not retain reqwest errors: their URLs can contain sensitive query values.
     #[error("HTTP client operation failed")]

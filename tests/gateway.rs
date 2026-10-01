@@ -37,6 +37,7 @@ use sparkrouter::{
     crypto::Crypto,
     db::{
         combos::{self, Strategy},
+        connection_models::{self, StoredModel},
         providers as provider_db,
     },
     providers::Protocol,
@@ -1297,6 +1298,164 @@ async fn models_endpoint_lists_configured_combos() -> TestResult {
     );
     // Combo models are advertised as owned by the gateway itself.
     assert!(data.iter().all(|model| model["owned_by"] == "sparkrouter"));
+    Ok(())
+}
+
+async fn remember_model(state: &AppState, provider_id: &str, model_id: &str) -> TestResult {
+    connection_models::replace(
+        &state.db,
+        provider_id,
+        &[StoredModel {
+            id: model_id.to_owned(),
+            name: model_id.to_owned(),
+            fields: Vec::new(),
+            free: false,
+        }],
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_model_routes_to_connections_that_list_it() -> TestResult {
+    let state = test_state().await;
+    let first = spawn_upstream(error_status_router(StatusCode::TOO_MANY_REQUESTS)).await;
+    let second = spawn_upstream(openai_echo_router("direct reply")).await;
+    let unused = spawn_upstream(openai_echo_router("other model")).await;
+
+    save_provider(
+        &state,
+        "prov-first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-first",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-second",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-other",
+        &unused.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-other",
+    )
+    .await?;
+    remember_model(&state, "prov-first", "openai/gpt-6-luna").await?;
+    remember_model(&state, "prov-second", "openai/gpt-6-luna").await?;
+    remember_model(&state, "prov-other", "other-model").await?;
+
+    let body = json!({
+        "model": " openai/gpt-6-luna ",
+        "messages": [{"role": "user", "content": "hello"}],
+        "metadata": {"trace_id": "direct-1"},
+    });
+    let response = send(&state, chat_request(&body)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = json_body(response).await;
+    assert_eq!(payload["choices"][0]["message"]["content"], "direct reply");
+    assert_eq!(payload["model"], "openai/gpt-6-luna");
+    assert_eq!(payload["upstream_saw"]["model"], "openai/gpt-6-luna");
+    assert_eq!(payload["upstream_saw"]["metadata"]["trace_id"], "direct-1");
+    assert_eq!(payload["upstream_auth"], "Bearer sk-second");
+    assert_eq!(first.hits.count(), 1);
+    assert_eq!(second.hits.count(), 1);
+    assert_eq!(unused.hits.count(), 0);
+
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    let ids: Vec<&str> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"openai/gpt-6-luna"));
+    assert!(ids.contains(&"other-model"));
+    assert!(!ids.contains(&"combo/not-a-combo"));
+
+    let missing = send(
+        &state,
+        chat_request(&json!({"model": "openai/missing", "messages": []})),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(
+        json_body(missing).await["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("openai/missing")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_model_stops_on_permanent_errors_and_skips_disabled_connections() -> TestResult {
+    let state = test_state().await;
+    let rejecting = spawn_upstream(error_status_router(StatusCode::BAD_REQUEST)).await;
+    let healthy = spawn_upstream(openai_echo_router("should not run")).await;
+    let disabled = spawn_upstream(openai_echo_router("disabled")).await;
+
+    save_provider(
+        &state,
+        "prov-reject",
+        &rejecting.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-reject",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-healthy",
+        &healthy.url(),
+        Protocol::OpenAi,
+        true,
+        "sk-healthy",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-off",
+        &disabled.url(),
+        Protocol::OpenAi,
+        false,
+        "sk-off",
+    )
+    .await?;
+    remember_model(&state, "prov-reject", "openai/gpt-6-luna").await?;
+    remember_model(&state, "prov-healthy", "openai/gpt-6-luna").await?;
+    remember_model(&state, "prov-off", "only-disabled").await?;
+
+    let stopped = send(
+        &state,
+        chat_request(&json!({"model": "openai/gpt-6-luna", "messages": []})),
+    )
+    .await;
+    assert_eq!(stopped.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(rejecting.hits.count(), 1);
+    assert_eq!(healthy.hits.count(), 0);
+
+    let unavailable = send(
+        &state,
+        chat_request(&json!({"model": "only-disabled", "messages": []})),
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(disabled.hits.count(), 0);
+
+    let listed = json_body(send(&state, models_request(None)).await).await["data"].to_string();
+    assert!(listed.contains("openai/gpt-6-luna"));
+    assert!(!listed.contains("only-disabled"));
     Ok(())
 }
 

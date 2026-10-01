@@ -51,6 +51,7 @@ pub(crate) struct ComboEditPage {
     /// the matching option selected.
     strategy: String,
     steps: Vec<StepRow>,
+    provider_groups: Vec<ProviderGroup>,
     providers: Vec<ProviderOption>,
 }
 
@@ -71,9 +72,17 @@ pub(crate) struct StepRow {
     model: String,
 }
 
-pub(crate) struct ProviderOption {
+pub(crate) struct ProviderGroup {
     id: String,
     name: String,
+}
+
+pub(crate) struct ProviderOption {
+    id: String,
+    /// Stable provider key shared by every connection in that dropdown group.
+    group_id: String,
+    /// Connection name only. The provider is chosen in the other dropdown.
+    connection_name: String,
     /// Appended as "(disabled)" in the picker so skipped upstreams are visible.
     disabled: bool,
     /// Last refreshed model IDs for this connection. Empty when never refreshed.
@@ -145,7 +154,7 @@ pub(crate) async fn edit(
 ) -> Result<Html<String>, AppError> {
     let combo = crate::db::combos::get(&state.db, &id).await?;
     let steps = step_rows(&state, &combo.id).await?;
-    let providers = provider_options(&state).await?;
+    let (provider_groups, providers) = provider_options(&state).await?;
     render(ComboEditPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
@@ -153,6 +162,7 @@ pub(crate) async fn edit(
         combo_name: combo.name,
         strategy: combo.strategy.as_str().to_owned(),
         steps,
+        provider_groups,
         providers,
     })
 }
@@ -326,11 +336,14 @@ async fn step_rows(state: &AppState, combo_id: &str) -> Result<Vec<StepRow>, App
         .collect())
 }
 
-async fn provider_options(state: &AppState) -> Result<Vec<ProviderOption>, AppError> {
-    let group_names = crate::db::provider_groups::connection_group_names(&state.db).await?;
+async fn provider_options(
+    state: &AppState,
+) -> Result<(Vec<ProviderGroup>, Vec<ProviderOption>), AppError> {
+    let memberships = crate::db::provider_groups::connection_groups(&state.db).await?;
     let stored = crate::db::providers::list(&state.db).await?;
     let ids: Vec<String> = stored.iter().map(|provider| provider.id.clone()).collect();
     let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
+    let mut groups = HashMap::new();
     let mut options: Vec<ProviderOption> = stored
         .into_iter()
         .map(|p| {
@@ -338,17 +351,65 @@ async fn provider_options(state: &AppState) -> Result<Vec<ProviderOption>, AppEr
                 .get(&p.id)
                 .map(|list| list.ids.clone())
                 .unwrap_or_default();
-            let name = connection_label(&p, &group_names);
+            let (group_id, group_name) = provider_group(&p, &memberships);
+            groups.entry(group_id.clone()).or_insert(group_name);
             ProviderOption {
                 id: p.id,
-                name,
+                group_id,
+                connection_name: p.name,
                 disabled: !p.enabled,
                 models,
             }
         })
         .collect();
-    options.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
-    Ok(options)
+    options.sort_by(|a, b| {
+        groups
+            .get(&a.group_id)
+            .cmp(&groups.get(&b.group_id))
+            .then_with(|| a.connection_name.cmp(&b.connection_name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut provider_groups: Vec<ProviderGroup> = groups
+        .into_iter()
+        .map(|(id, name)| ProviderGroup { id, name })
+        .collect();
+    provider_groups.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    disambiguate_group_names(&mut provider_groups);
+    Ok((provider_groups, options))
+}
+
+/// Custom providers stay separate even when their names match. Preset
+/// connections group by catalog slug. Anything else groups by endpoint.
+fn provider_group(
+    provider: &crate::db::providers::Provider,
+    memberships: &HashMap<String, crate::db::provider_groups::ConnectionGroup>,
+) -> (String, String) {
+    if let Some(group) = memberships.get(&provider.id) {
+        return (format!("group:{}", group.id), group.name.clone());
+    }
+    if let Some(preset) = super::provider_catalog::matching(&provider.base_url, &provider.protocol)
+    {
+        return (format!("preset:{}", preset.slug), preset.name.to_string());
+    }
+    (
+        format!(
+            "endpoint:{}|{}",
+            provider.base_url,
+            provider.protocol.as_str()
+        ),
+        super::provider_catalog::display_name(&provider.base_url, &provider.protocol),
+    )
+}
+
+fn disambiguate_group_names(groups: &mut [ProviderGroup]) {
+    let mut seen = HashMap::<String, usize>::new();
+    for group in groups.iter_mut() {
+        let count = seen.entry(group.name.clone()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            group.name = format!("{} ({count})", group.name);
+        }
+    }
 }
 
 fn connection_label(
@@ -440,6 +501,50 @@ mod tests {
     }
 
     #[test]
+    fn provider_groups_keep_custom_providers_separate_from_presets() {
+        use crate::db::provider_groups::ConnectionGroup;
+        use crate::db::providers::Provider;
+        use crate::providers::Protocol;
+
+        let custom = Provider {
+            id: "conn".into(),
+            name: "Personal".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            protocol: Protocol::OpenAi,
+            encrypted_api_key: Vec::new(),
+            enabled: true,
+        };
+        let memberships = HashMap::from([(
+            "conn".into(),
+            ConnectionGroup {
+                id: "custom-1".into(),
+                name: "OpenRouter".into(),
+            },
+        )]);
+        assert_eq!(
+            provider_group(&custom, &memberships),
+            ("group:custom-1".into(), "OpenRouter".into())
+        );
+        assert_eq!(
+            provider_group(&custom, &HashMap::new()),
+            ("preset:openrouter".into(), "OpenRouter".into())
+        );
+        let mut groups = vec![
+            ProviderGroup {
+                id: "a".into(),
+                name: "Work".into(),
+            },
+            ProviderGroup {
+                id: "b".into(),
+                name: "Work".into(),
+            },
+        ];
+        disambiguate_group_names(&mut groups);
+        assert_eq!(groups[0].name, "Work");
+        assert_eq!(groups[1].name, "Work (2)");
+    }
+
+    #[test]
     fn hx_request_header_detection() {
         let mut headers = http::HeaderMap::new();
         assert!(!is_htmx_request(&headers));
@@ -527,9 +632,14 @@ mod tests {
                 provider_disabled: false,
                 model: "qwen3 <chat>".to_string(),
             }],
+            provider_groups: vec![ProviderGroup {
+                id: "preset:local".to_string(),
+                name: "Local".to_string(),
+            }],
             providers: vec![ProviderOption {
                 id: "p1".to_string(),
-                name: "Local".to_string(),
+                group_id: "preset:local".to_string(),
+                connection_name: "Personal".to_string(),
                 disabled: true,
                 models: vec!["local-model".to_string()],
             }],
@@ -547,8 +657,14 @@ mod tests {
             "only the stored strategy may be selected"
         );
         assert!(edit.contains("Save changes"));
-        // Disabled providers are labeled as skipped in the add-step picker.
-        assert!(edit.contains("<option value=\"p1\">Local (disabled)</option>"));
+        // Provider and connection are separate pickers. The connection still
+        // posts its id, and a disabled connection stays labeled as skipped.
+        assert!(edit.contains("<label for=\"provider_group\">Provider</label>"));
+        assert!(edit.contains("<label for=\"provider_id\">Connection</label>"));
+        assert!(edit.contains("<option value=\"preset:local\">Local</option>"));
+        assert!(edit.contains(
+            "<option value=\"p1\" data-provider=\"preset:local\">Personal (disabled)</option>"
+        ));
         // One step carries three mutation forms (up/down/remove), each with CSRF,
         // plus the rename form and the add-step form.
         assert_eq!(edit.matches("name=\"_csrf\"").count(), 5);

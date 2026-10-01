@@ -40,7 +40,7 @@ cargo test --locked -- --list
 | `src/providers/` tests | URL normalization, unknown-field preservation, model replacement, response translation, fragmented UTF-8/CRLF SSE, tools, usage, truncation, limits, stream commitment |
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
-| `tests/gateway.rs` | Mocked fallback, permanent errors stopping the chain, disabled steps, models, optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
+| `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models, optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
 
@@ -133,7 +133,7 @@ existing installation's database.
    Check preset tiles and Custom provider. Add two named connections to one
    preset and verify both appear on its page without exposing keys. Connections
    in separate custom providers must remain separate. Confirm the combo
-   selector shows provider/connection labels and targets the selected key only.
+   add-step form chooses a provider, then a connection, and targets that key only.
 3. Edit a provider with the key field blank; verify it still authenticates. Toggle
    enabled state and verify its label. Ensure keys never appear in page HTML.
 4. Create `coding`, add two provider/model steps, reorder them, and remove/re-add

@@ -116,25 +116,41 @@ function filterProviderTiles() {
 
 filterProviderTiles();
 
-// Combo steps suggest the selected connection's refreshed model IDs. Typed IDs
-// stay valid when that connection has no list.
-function bindModelSuggestions() {
-  const select = document.getElementById("provider_id");
+// The provider dropdown filters the connection dropdown. Model suggestions
+// follow the selected connection. Typed IDs stay valid when it has no list.
+function bindComboStepPicker() {
+  const provider = document.getElementById("provider_group");
+  const connection = document.getElementById("provider_id");
   const input = document.getElementById("model");
-  if (!select || !input) return;
-  const apply = () => {
-    const list = document.getElementById("models-" + select.value);
+  if (!provider || !connection || !input) return;
+  const applyModels = () => {
+    const list = document.getElementById("models-" + connection.value);
     if (list && list.options.length > 0) {
       input.setAttribute("list", list.id);
     } else {
       input.removeAttribute("list");
     }
   };
-  select.addEventListener("change", apply);
-  apply();
+  const applyConnections = () => {
+    const group = provider.value;
+    let selectedVisible = false;
+    let first = null;
+    for (const option of connection.options) {
+      const match = option.dataset.provider === group;
+      option.hidden = !match;
+      option.disabled = !match;
+      if (match && !first) first = option;
+      if (match && option.value === connection.value) selectedVisible = true;
+    }
+    if (!selectedVisible && first) connection.value = first.value;
+    applyModels();
+  };
+  provider.addEventListener("change", applyConnections);
+  connection.addEventListener("change", applyModels);
+  applyConnections();
 }
 
-bindModelSuggestions();
+bindComboStepPicker();
 
 // Model dropdowns filter their cards as the user types. Delegation keeps this
 // working after HTMX replaces a refreshed list.

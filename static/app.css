@@ -271,7 +271,10 @@ input[type="text"], input[type="password"], input[type="search"], select {
 input[type="checkbox"] { width: auto; }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
-@media (max-width: 40rem) { .grid2 { grid-template-columns: 1fr; } }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 1rem; }
+@media (max-width: 40rem) {
+  .grid2, .grid3 { grid-template-columns: 1fr; }
+}
 
 .form-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
 
