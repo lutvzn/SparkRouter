@@ -38,7 +38,7 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 Open **http://127.0.0.1:8080/providers**:
 
-Use the left sidebar to switch between **Providers** and **Combos**.
+Use the left sidebar to switch between **Providers**, **Combos**, **API keys**, and **test**.
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
 Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
@@ -64,6 +64,16 @@ model ID. **Duplicate** creates an independent combo with the same ordered steps
 and opens it for editing. Copies are named `<name>-copy`, then `<name>-copy-2`,
 and so on; long names are shortened to keep the 64-character limit. Existing
 connections are reused, not duplicated, and the selected strategy is preserved.
+
+Open **test** (`/test`) to chat with a combo and inspect the actual routing attempts:
+connection name, upstream model, configured step number, outcome, and latency.
+Retryable failures and the selected target appear in request order, including
+when a request fails. Tests use the same routing and round-robin state as API
+requests and make real, potentially billable upstream calls. Enter a gateway
+API key if authentication is configured; keys are not saved in browser storage.
+Chat requires JavaScript, uses non-streaming responses, and keeps conversation
+history only in the current page. Changing combos or clearing the chat starts a
+fresh conversation.
 
 ```sh
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -135,6 +145,10 @@ any connection is referenced by a combo; preset provider tiles are not removable
 Keys are encrypted using AES-256-GCM with a fresh random nonce and authenticated provider ID. The database stores versioned ciphertext; the master key is never stored there. Secret values are wrapped with `secrecy` and key/decryption buffers use `zeroize`. Normal logs include routing IDs, model, latency, status, and fallback events; they omit credentials and upstream bodies.
 
 The dashboard has **no user accounts or login**. Keep it on localhost or put it behind an authenticated reverse proxy when exposing it on a network. `ROUTER_API_KEY` and dashboard-generated API keys protect gateway endpoints only. Generated keys are unrestricted, shown once, and stored as a master-key fingerprint rather than a recoverable secret. Dashboard forms have CSRF tokens and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
+
+The test page itself is a dashboard page, but `POST /test/chat` additionally
+requires the same gateway authentication as `/v1/*`, plus dashboard CSRF and
+origin checks. It never reveals saved provider credentials or raw upstream errors.
 
 The dashboard uses `Referrer-Policy: same-origin`: native form submissions retain their Origin for validation, and external destinations receive no referrer. If a submission is rejected, reload the form after a server restart (CSRF tokens change), use one consistent hostname and port, and ensure a reverse proxy preserves the browser-facing Host header.
 

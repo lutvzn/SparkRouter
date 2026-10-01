@@ -75,8 +75,16 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let supplied = request
-        .headers()
+    authorize(&state, request.headers()).await?;
+    Ok(next.run(request).await)
+}
+
+/// Shared by the public API and the dashboard's billable chat test action.
+pub(crate) async fn authorize(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), AppError> {
+    let supplied = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
@@ -89,12 +97,12 @@ async fn authenticate(
         )
     });
     if env_match || crate::db::api_keys::matches(&state.db, &state.crypto, supplied).await? {
-        return Ok(next.run(request).await);
+        return Ok(());
     }
     // Open only when neither the environment key nor a generated key exists.
     // A generated key is unrestricted and can call every combo.
     if state.api_key.is_none() && !crate::db::api_keys::any(&state.db).await? {
-        return Ok(next.run(request).await);
+        return Ok(());
     }
     Err(AppError::Unauthorized)
 }

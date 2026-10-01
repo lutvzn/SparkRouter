@@ -3,12 +3,14 @@
 //! Plain Askama templates rendered to strings and wrapped in `axum::response::Html`
 //! (no `askama_axum` dependency). Interactivity that benefits from it (connection
 //! tests, step reordering) uses a self-hosted, version-pinned HTMX asset served
-//! from `/static/...`; every form works without JavaScript too.
+//! from `/static/...`; management forms work without JavaScript too. The test
+//! chat uses a small embedded script for page-local conversation history.
 
 mod api_keys;
 mod combos;
 mod provider_catalog;
 mod providers;
+mod test;
 
 use askama::Template;
 use axum::{
@@ -59,6 +61,8 @@ pub fn router() -> Router<AppState> {
         .route("/api-keys/{id}", get(api_keys::created))
         .route("/api-keys/{id}/delete", post(api_keys::delete))
         .route("/combos", get(combos::list).post(combos::create))
+        .route("/test", get(test::page))
+        .route("/test/chat", post(test::chat))
         .route("/combos/new", get(combos::new))
         .route("/combos/{id}", get(combos::edit).post(combos::rename))
         .route("/combos/{id}/delete", post(combos::delete))

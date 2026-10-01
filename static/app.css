@@ -817,3 +817,86 @@ main.combo-page { max-width: 90rem; }
   .combo-list-row { flex-wrap: wrap; }
   .combo-list-actions { margin-left: auto; }
 }
+
+/* Test chat page: combo picker, conversation log, and attempt traces. */
+main.test-chat-page { max-width: 46rem; }
+
+.test-controls { margin-bottom: 1rem; }
+.test-controls .hint { margin: 0.3rem 0 0; }
+
+.test-section h2 { margin: 1.3rem 0 0.6rem; }
+
+.test-log {
+  display: grid;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+.test-msg {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  padding: 0.7rem 0.9rem;
+}
+.test-msg-user { background: var(--soft); }
+.test-msg-author {
+  margin: 0 0 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.test-msg-body {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.test-attempts { margin-bottom: 0.4rem; }
+.test-attempt-list {
+  list-style: none;
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+}
+/* display:grid would override the browser's implicit [hidden] display:none. */
+.test-attempt-list[hidden] { display: none; }
+.test-attempt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  font-size: 0.85rem;
+}
+.test-attempt-step { font-weight: 700; flex-shrink: 0; }
+.test-attempt-provider { font-weight: 600; overflow-wrap: anywhere; }
+.test-attempt-model { color: var(--muted); overflow-wrap: anywhere; }
+.test-attempt .badge { margin-left: auto; }
+.test-attempt-latency {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* The compose card matches the shared input styling; only the textarea needs
+   adding, since the global rules cover text/password/search inputs and
+   selects but not multiline fields. */
+.test-compose { margin-top: 1.2rem; }
+.test-compose textarea {
+  width: 100%;
+  min-height: 5.5rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  background: var(--field);
+  color: var(--fg);
+  resize: vertical;
+}
+#test-status { min-height: 1.2rem; }
+#test-error { margin-left: 0; }

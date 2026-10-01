@@ -40,6 +40,7 @@ cargo test --locked -- --list
 | `src/providers/` tests | URL normalization, unknown-field preservation, model replacement, response translation, fragmented UTF-8/CRLF SSE, tools, usage, truncation, limits, stream commitment |
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
+| `tests/test_chat.rs` | Test chat rendering, authenticated/CSRF-protected combo calls, actual fallback traces, sanitized failures, and shared routing strategy state |
 | `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models, optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
@@ -54,6 +55,7 @@ still use real HTTP for upstream requests, exercising Reqwest and protocol wirin
 # One integration test file:
 cargo test --locked --test gateway
 cargo test --locked --test dashboard
+cargo test --locked --test test_chat
 
 # Library module filters:
 cargo test --locked --lib crypto::tests
@@ -145,7 +147,15 @@ existing installation's database.
    Combo titles should be near-white in dark mode and dark in light mode, with
    no underline on hover. Check local SVG icons on navigation and action buttons;
    Copy feedback and theme toggling must preserve their icons and text labels.
-5. List virtual models and make normal and streaming calls:
+5. Open **test** in the sidebar. Choose a combo, enter a gateway key if required,
+   and send a message. Verify the assistant reply and ordered attempt details,
+   including a controlled retryable failure and a permanent failure with local
+   mocks. Repeated requests should follow the combo strategy. Check multi-turn
+   history, reset, combo changes, errors, and narrow layouts in both themes.
+   Refreshing or leaving the page should discard the chat and entered key.
+   These are real upstream generations when using real connections.
+
+   List virtual models and make normal and streaming calls:
 
    ```sh
    curl http://127.0.0.1:8080/v1/models \

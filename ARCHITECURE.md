@@ -211,6 +211,17 @@ longer while data arrives. The individual read timeout still applies.
 
 ## Dashboard and trust boundaries
 
+`GET /test` renders a combo chat playground with embedded JavaScript.
+`POST /test/chat` requires dashboard CSRF/origin checks and the same gateway
+authentication as the public API. It forces non-streaming responses and invokes
+the existing combo fallback loop with an optional request-local attempt trace.
+Strategy selection, deadlines, and shared round-robin cursors are unchanged.
+The response wraps the completion or sanitized error with ordered connection
+names/IDs, models, configured step numbers, outcomes, and attempt latencies;
+no endpoint URLs, credentials, or upstream error bodies are added to the trace.
+Public API response formats remain unchanged. Conversation history lives in the
+page, not SQLite or browser storage; generated text is rendered as text, not HTML.
+
 Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matching
 combo pages. POST actions handle create/edit/delete, connection tests, model-list refresh, and step
 add/remove/up/down operations. HTMX swaps small fragments; ordinary mutation

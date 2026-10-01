@@ -51,6 +51,45 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
 }
 
 pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Response, AppError> {
+    route_inner(state, name, body, None).await
+}
+
+/// Request-local diagnostics for the dashboard; never contains credentials,
+/// endpoint URLs, request content, or upstream error bodies.
+#[derive(serde::Serialize)]
+pub(crate) struct AttemptTrace {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub position: i64,
+    pub outcome: &'static str,
+    pub latency_ms: u128,
+    #[serde(skip)]
+    started: std::time::Instant,
+}
+
+impl AttemptTrace {
+    pub(crate) fn finish(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+        self.latency_ms = self.started.elapsed().as_millis();
+    }
+}
+
+pub(crate) async fn route_with_trace(
+    state: &AppState,
+    name: &str,
+    body: &Value,
+    attempts: &mut Vec<AttemptTrace>,
+) -> Result<Response, AppError> {
+    route_inner(state, name, body, Some(attempts)).await
+}
+
+async fn route_inner(
+    state: &AppState,
+    name: &str,
+    body: &Value,
+    mut attempts: Option<&mut Vec<AttemptTrace>>,
+) -> Result<Response, AppError> {
     let combo = combos::by_name(&state.db, name).await?;
     let mut steps = combos::steps(&state.db, &combo.id).await?;
     if combo.strategy != combos::Strategy::Priority {
@@ -91,12 +130,30 @@ pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Respons
             continue;
         }
         let started = std::time::Instant::now();
+        if let Some(attempts) = attempts.as_deref_mut() {
+            attempts.push(AttemptTrace {
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                model: step.model.clone(),
+                position: step.position + 1,
+                outcome: "in_progress",
+                latency_ms: 0,
+                started,
+            });
+        }
         let attempt = tokio::time::timeout(
             std::time::Duration::from_secs(120),
             providers::call(&state.client, &state.crypto, &provider, &step.model, body),
         )
         .await
         .unwrap_or(Err(AttemptError::Retryable));
+        if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
+            trace.finish(match &attempt {
+                Ok(_) => "selected",
+                Err(AttemptError::Retryable) => "retryable_failure",
+                Err(AttemptError::Permanent(_)) => "permanent_failure",
+            });
+        }
         match attempt {
             Ok(response) => {
                 tracing::info!(combo = name, provider = %provider.id, model = %step.model,
@@ -123,6 +180,25 @@ pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Respons
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attempt_trace_contains_only_routing_metadata() {
+        let mut trace = AttemptTrace {
+            provider_id: "connection-id".into(),
+            provider_name: "Local connection".into(),
+            model: "upstream-model".into(),
+            position: 2,
+            outcome: "in_progress",
+            latency_ms: 0,
+            started: std::time::Instant::now(),
+        };
+        trace.finish("timed_out");
+        let value = serde_json::to_value(trace).unwrap();
+        assert_eq!(value["outcome"], "timed_out");
+        assert_eq!(value["position"], 2);
+        assert_eq!(value.as_object().unwrap().len(), 6);
+        assert!(value.get("started").is_none());
+    }
+
     #[test]
     fn round_robin_wraps_and_keeps_combos_independent() {
         let cursors = RoundRobin::default();
