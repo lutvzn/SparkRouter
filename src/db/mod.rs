@@ -3,9 +3,11 @@
 
 pub mod api_keys;
 pub mod combos;
+pub mod config_transfer;
 pub mod connection_models;
 pub mod provider_groups;
 pub mod providers;
+pub mod request_history;
 
 use std::{str::FromStr, time::Duration};
 

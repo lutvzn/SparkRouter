@@ -9,7 +9,7 @@
 {% endblock %}
 {% block content %}
 <div class="card">
-  <p><strong>{{ name }}</strong> can call every combo. Send it as <code>Authorization: Bearer</code>.</p>
+  <p>Send <strong>{{ name }}</strong> as <code>Authorization: Bearer</code>. Its access and expiry are shown on the API keys page.</p>
   {% if revealed %}
   <code class="key-secret">{{ secret }}</code>
   <button type="button" class="btn" data-copy-model="{{ secret }}" aria-label="Copy API key" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label">Copy</span></button>

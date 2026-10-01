@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}API keys{% endblock %}
-{% block main_class %}combo-page{% endblock %}
+{% block main_class %}api-keys-page{% endblock %}
 {% block topbar_heading %}
 <div class="topbar-heading">
   <h1>API keys</h1>
-  <p class="topbar-subtitle">Keys authorize <code>/v1</code> requests. Each key can call every combo.</p>
+  <p class="topbar-subtitle">Give each app its own gateway key, allowed models, and optional expiry.</p>
 </div>
 {% endblock %}
 {% block content %}
@@ -12,7 +12,17 @@
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <label for="name">Name</label>
   <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. laptop">
-  <p class="hint">1&ndash;64 characters. The key is unrestricted and is shown only once.</p>
+   <p class="hint">1&ndash;64 characters. The secret is shown only once. Dashboard login is separate.</p>
+   <label for="access">Access</label>
+   <select id="access" name="access"><option value="all">All combos and models</option><option value="selected">Only selected model IDs</option></select>
+   <label for="models">Allowed model IDs</label>
+   <textarea id="models" name="models" rows="4" placeholder="combo/coding&#10;openai/gpt-6-luna"></textarea>
+   <p class="hint">For selected access only: one exact, case-sensitive ID per line. No wildcards. Empty selected access denies all models. A combo permission covers its entire fallback chain, not direct access to its upstream models. Permissions follow names: renaming a combo requires updating this list.</p>
+   <details><summary>Currently available model IDs</summary><ul>{% for model in available_models %}<li><code>{{ model }}</code></li>{% endfor %}</ul><p class="hint">You may also enter IDs not yet configured.</p></details>
+   <label for="expiry">Expiry</label>
+   <select id="expiry" name="expiry"><option value="never">Never</option><option value="days">After a number of days</option></select>
+   <label for="expires-days">Days from now (when using expiry)</label>
+   <input id="expires-days" name="expires_days" type="number" min="1" max="3650" placeholder="e.g. 30">
   <div class="form-actions">
     <button class="btn primary" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>
   </div>
@@ -28,6 +38,22 @@
         <span class="provider-tile-title">{{ key.name }}</span>
       </div>
       <span class="hint"><code>{{ key.prefix }}&hellip;</code> &middot; {{ key.created_at }}</span>
+      <p class="hint">{% if key.restricted %}Selected models{% else %}All combos and models{% endif %} &middot; Expires: {{ key.expiry }} {% if key.expired %}<span class="badge fail">Expired</span>{% endif %}</p>
+      <details class="key-policy"><summary>Edit access / expiry</summary>
+        <form method="post" action="/api-keys/{{ key.id }}/policy">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <label for="access-{{ key.id }}">Access</label>
+          <select id="access-{{ key.id }}" name="access"><option value="all"{% if !key.restricted %} selected{% endif %}>All combos and models</option><option value="selected"{% if key.restricted %} selected{% endif %}>Only selected model IDs</option></select>
+          <label for="models-{{ key.id }}">Allowed model IDs (one per line)</label>
+          <textarea id="models-{{ key.id }}" name="models" rows="4">{{ key.models }}</textarea>
+          <p class="hint">Empty selected access denies all models. Clear this list before switching to all access.</p>
+          <label for="expiry-{{ key.id }}">Expiry</label>
+          <select id="expiry-{{ key.id }}" name="expiry"><option value="keep">Keep current expiry</option><option value="never">Never (remove expiry)</option><option value="days">Set days from now</option></select>
+          <label for="days-{{ key.id }}">Days from now (when resetting expiry)</label>
+          <input id="days-{{ key.id }}" name="expires_days" type="number" min="1" max="3650">
+          <button class="btn small" type="submit">Save policy</button>
+        </form>
+      </details>
     </div>
     <div class="combo-list-actions">
       <form class="inline" method="post" action="/api-keys/{{ key.id }}/delete">
@@ -39,4 +65,5 @@
   {% endfor %}
 </div>
 {% endif %}
+<p class="hint">The environment key <code>ROUTER_API_KEY</code> remains unrestricted. Expired keys still keep gateway authentication enabled until revoked. Policy changes affect new requests; an already-started response is not interrupted.</p>
 {% endblock %}

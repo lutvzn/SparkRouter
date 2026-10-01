@@ -40,12 +40,13 @@ pub async fn chat(
     headers: HeaderMap,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let started = std::time::Instant::now();
     let Json(mut body) = payload.map_err(|error| AppError::RequestBody(error.status()))?;
     super::check_csrf(
         &state,
         body.get("_csrf").and_then(Value::as_str).unwrap_or(""),
     )?;
-    app::authorize(&state, &headers).await?;
+    let access = app::authorize(&state, &headers).await?;
     let name = body
         .get("model")
         .and_then(Value::as_str)
@@ -53,6 +54,9 @@ pub async fn chat(
         .filter(|name| !name.is_empty())
         .ok_or_else(|| AppError::InvalidRequest("Select a combo to test".into()))?
         .to_owned();
+    if !access.allows(&format!("combo/{name}")) {
+        return Err(AppError::Forbidden);
+    }
     let messages = body
         .get("messages")
         .and_then(Value::as_array)
@@ -95,6 +99,16 @@ pub async fn chat(
         Ok(response) => response,
         Err(error) => error.into_response(),
     };
+    let response = crate::history::record_response(
+        &state,
+        "test",
+        &format!("combo/{name}"),
+        false,
+        started,
+        &attempts,
+        response,
+    )
+    .await;
     let status = response.status();
     // Adapters already buffer non-streaming responses with the same limit.
     let bytes = to_bytes(response.into_body(), 16 * 1024 * 1024)

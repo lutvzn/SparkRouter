@@ -84,9 +84,17 @@ impl Crypto {
     /// HMAC-SHA256 fingerprint of a gateway API key. The master key is the HMAC
     /// key, so a database copy cannot be matched without it. Not reversible.
     pub fn gateway_key_fingerprint(&self, secret: &str) -> Result<String, AppError> {
+        self.fingerprint(b"sparkrouter.gateway-api-key.v1\0", secret)
+    }
+
+    pub(crate) fn dashboard_password_fingerprint(&self, secret: &str) -> Result<String, AppError> {
+        self.fingerprint(b"sparkrouter.dashboard-password.v1\0", secret)
+    }
+
+    fn fingerprint(&self, domain: &[u8], secret: &str) -> Result<String, AppError> {
         let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.key.as_ref())
             .map_err(|_| AppError::Encryption)?;
-        <Hmac<Sha256> as Mac>::update(&mut mac, b"sparkrouter.gateway-api-key.v1\0");
+        <Hmac<Sha256> as Mac>::update(&mut mac, domain);
         <Hmac<Sha256> as Mac>::update(&mut mac, secret.as_bytes());
         Ok(STANDARD.encode(<Hmac<Sha256> as Mac>::finalize(mac).into_bytes()))
     }
@@ -121,6 +129,10 @@ mod tests {
         let crypto = Crypto::from_base64(&SecretString::from(STANDARD.encode([42; 32]))).unwrap();
         let first = crypto.gateway_key_fingerprint("sk-example").unwrap();
         let second = crypto.gateway_key_fingerprint("sk-example").unwrap();
+        assert_ne!(
+            first,
+            crypto.dashboard_password_fingerprint("sk-example").unwrap()
+        );
         assert_eq!(first, second);
         assert!(!first.contains("sk-example"));
         let other = Crypto::from_base64(&SecretString::from(STANDARD.encode([43; 32]))).unwrap();

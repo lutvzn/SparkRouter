@@ -7,6 +7,7 @@ use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{Row, SqlitePool};
+use std::collections::{BTreeSet, HashMap};
 use zeroize::Zeroizing;
 
 use crate::crypto::Crypto;
@@ -21,6 +22,32 @@ pub struct ApiKey {
     pub name: String,
     pub prefix: String,
     pub created_at: String,
+    pub access: KeyAccess,
+    pub expires_at: Option<String>,
+    pub expired: bool,
+}
+
+/// Exact public model IDs, not upstream targets inside an allowed combo.
+/// No wildcard or prefix matching. Selected([]) deliberately denies all.
+#[derive(Clone)]
+pub enum KeyAccess {
+    All,
+    Selected(Vec<String>),
+}
+
+impl KeyAccess {
+    pub fn allows(&self, model: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Selected(models) => models.iter().any(|allowed| allowed == model),
+        }
+    }
+}
+
+pub enum Expiry {
+    Keep,
+    Never,
+    AfterDays(i64),
 }
 
 /// Newly created key. The secret is not `Debug` and is not written to the list.
@@ -30,42 +57,184 @@ pub struct IssuedKey {
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKey>, AppError> {
+    let mut transaction = pool.begin().await?;
     let rows = sqlx::query(
-        "SELECT id, name, key_prefix, created_at FROM api_keys ORDER BY created_at, id",
+        "SELECT id, name, key_prefix, created_at, restricted,
+         strftime('%Y-%m-%dT%H:%M:%SZ', expires_at, 'unixepoch') AS expires_at,
+         expires_at IS NOT NULL AND expires_at <= unixepoch() AS expired
+         FROM api_keys ORDER BY created_at, id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *transaction)
     .await?;
-    rows.iter()
+    let scopes = sqlx::query("SELECT key_id, model FROM api_key_models ORDER BY model")
+        .fetch_all(&mut *transaction)
+        .await?;
+    let mut models = HashMap::<String, Vec<String>>::new();
+    for row in scopes {
+        models
+            .entry(row.try_get("key_id")?)
+            .or_default()
+            .push(row.try_get("model")?);
+    }
+    let result = rows
+        .iter()
         .map(|row| {
+            let id: String = row.try_get("id")?;
             Ok(ApiKey {
-                id: row.try_get("id")?,
+                access: if row.try_get::<bool, _>("restricted")? {
+                    KeyAccess::Selected(models.remove(&id).unwrap_or_default())
+                } else {
+                    KeyAccess::All
+                },
+                id,
                 name: row.try_get("name")?,
                 prefix: row.try_get("key_prefix")?,
                 created_at: row.try_get("created_at")?,
+                expires_at: row.try_get("expires_at")?,
+                expired: row.try_get("expired")?,
             })
         })
-        .collect()
+        .collect();
+    transaction.commit().await?;
+    result
 }
 
 pub async fn create(pool: &SqlitePool, crypto: &Crypto, name: &str) -> Result<IssuedKey, AppError> {
+    create_with_policy(pool, crypto, name, KeyAccess::All, Expiry::Never).await
+}
+
+pub async fn create_with_policy(
+    pool: &SqlitePool,
+    crypto: &Crypto,
+    name: &str,
+    access: KeyAccess,
+    expiry: Expiry,
+) -> Result<IssuedKey, AppError> {
     let name = validate_name(name)?;
+    let access = validate_access(access)?;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let expires_at = expiration(&mut transaction, expiry, None).await?;
     let id = uuid::Uuid::new_v4().to_string();
     let secret = generate_secret();
     let prefix: String = secret.expose_secret().chars().take(PREFIX_CHARS).collect();
     let key_hash = crypto.gateway_key_fingerprint(secret.expose_secret())?;
     let reveal_envelope = crypto.encrypt_api_key(&id, &secret)?;
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_prefix, key_hash, reveal_envelope)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, name, key_prefix, key_hash, reveal_envelope, restricted, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
     .bind(prefix)
     .bind(key_hash)
     .bind(reveal_envelope)
-    .execute(pool)
+    .bind(matches!(access, KeyAccess::Selected(_)))
+    .bind(expires_at)
+    .execute(&mut *transaction)
     .await?;
+    write_models(&mut transaction, &id, &access).await?;
+    transaction.commit().await?;
     Ok(IssuedKey { id, secret })
+}
+
+/// Change authorization without revealing or rotating the existing secret.
+pub async fn update_policy(
+    pool: &SqlitePool,
+    id: &str,
+    access: KeyAccess,
+    expiry: Expiry,
+) -> Result<(), AppError> {
+    let access = validate_access(access)?;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let existing: Option<i64> = sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key was not found".into()))?;
+    let expires_at = expiration(&mut transaction, expiry, existing).await?;
+    sqlx::query("UPDATE api_keys SET restricted = ?, expires_at = ? WHERE id = ?")
+        .bind(matches!(access, KeyAccess::Selected(_)))
+        .bind(expires_at)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM api_key_models WHERE key_id = ?")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    write_models(&mut transaction, id, &access).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn expiration(
+    connection: &mut sqlx::SqliteConnection,
+    expiry: Expiry,
+    existing: Option<i64>,
+) -> Result<Option<i64>, AppError> {
+    match expiry {
+        Expiry::Keep => Ok(existing),
+        Expiry::Never => Ok(None),
+        Expiry::AfterDays(days) if (1..=3650).contains(&days) => {
+            let now: i64 = sqlx::query_scalar("SELECT unixepoch()")
+                .fetch_one(connection)
+                .await?;
+            Ok(Some(now + days * 86400))
+        }
+        _ => Err(AppError::InvalidRequest(
+            "Expiry must be 1–3650 days from now".into(),
+        )),
+    }
+}
+
+fn validate_access(access: KeyAccess) -> Result<KeyAccess, AppError> {
+    let KeyAccess::Selected(models) = access else {
+        return Ok(KeyAccess::All);
+    };
+    if models.len() > 200 {
+        return Err(AppError::InvalidRequest(
+            "At most 200 allowed model IDs per key".into(),
+        ));
+    }
+    let mut normalized = BTreeSet::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() || model.chars().count() > 256 || model.chars().any(char::is_control) {
+            return Err(AppError::InvalidRequest(
+                "Allowed model IDs must be 1–256 characters without control characters".into(),
+            ));
+        }
+        if let Some(name) = model.strip_prefix("combo/")
+            && (name.is_empty()
+                || name.len() > 64
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        {
+            return Err(AppError::InvalidRequest(
+                "Use combo/<name> with a valid combo name".into(),
+            ));
+        }
+        normalized.insert(model.to_owned());
+    }
+    Ok(KeyAccess::Selected(normalized.into_iter().collect()))
+}
+
+async fn write_models(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+    access: &KeyAccess,
+) -> Result<(), AppError> {
+    if let KeyAccess::Selected(models) = access {
+        for model in models {
+            sqlx::query("INSERT INTO api_key_models (key_id, model) VALUES (?, ?)")
+                .bind(id)
+                .bind(model)
+                .execute(&mut *connection)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Returns the secret exactly once, clearing the encrypted copy in the same
@@ -115,15 +284,39 @@ pub async fn any(pool: &SqlitePool) -> Result<bool, AppError> {
 /// True when `secret` matches a stored fingerprint. Empty and oversized values
 /// are rejected without a database lookup.
 pub async fn matches(pool: &SqlitePool, crypto: &Crypto, secret: &str) -> Result<bool, AppError> {
+    Ok(authenticate(pool, crypto, secret).await?.is_some())
+}
+
+/// Snapshot the policy once per request, including expiry and revocation.
+pub async fn authenticate(
+    pool: &SqlitePool,
+    crypto: &Crypto,
+    secret: &str,
+) -> Result<Option<KeyAccess>, AppError> {
     if secret.is_empty() || secret.len() > 256 {
-        return Ok(false);
+        return Ok(None);
     }
     let fingerprint = crypto.gateway_key_fingerprint(secret)?;
-    let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM api_keys WHERE key_hash = ?")
+    let mut transaction = pool.begin().await?;
+    let found = sqlx::query("SELECT id, restricted FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
         .bind(fingerprint)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-    Ok(found.is_some())
+    let access = match found {
+        None => None,
+        Some(row) if !row.try_get::<bool, _>("restricted")? => Some(KeyAccess::All),
+        Some(row) => {
+            let models = sqlx::query_scalar(
+                "SELECT model FROM api_key_models WHERE key_id = ? ORDER BY model",
+            )
+            .bind(row.try_get::<String, _>("id")?)
+            .fetch_all(&mut *transaction)
+            .await?;
+            Some(KeyAccess::Selected(models))
+        }
+    };
+    transaction.commit().await?;
+    Ok(access)
 }
 
 fn validate_name(name: &str) -> Result<String, AppError> {
@@ -167,6 +360,91 @@ mod tests {
 
     fn crypto() -> Crypto {
         Crypto::from_base64(&SecretString::from(STANDARD.encode([9u8; 32]))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn migration_keeps_existing_key_fingerprints_and_unrestricted_access() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/0004_api_keys.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hash = crypto().gateway_key_fingerprint("legacy-secret").unwrap();
+        sqlx::query("INSERT INTO api_keys (id,name,key_prefix,key_hash,reveal_envelope) VALUES ('legacy','Legacy','legacy',?,NULL)").bind(&hash).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/0008_scoped_api_keys.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stored: (String, bool, Option<i64>) = sqlx::query_as(
+            "SELECT key_hash,restricted,expires_at FROM api_keys WHERE id = 'legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, (hash, false, None));
+        assert!(matches!(
+            authenticate(&pool, &crypto(), "legacy-secret")
+                .await
+                .unwrap(),
+            Some(KeyAccess::All)
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_policy_never_creates_a_key_and_scope_deduplication_is_exact() {
+        let pool = pool().await;
+        for models in [
+            vec![String::new()],
+            vec!["x".repeat(257)],
+            vec!["has\0control".into()],
+            vec!["combo/".into()],
+            vec!["x".into(); 201],
+        ] {
+            assert!(
+                create_with_policy(
+                    &pool,
+                    &crypto(),
+                    "Bad",
+                    KeyAccess::Selected(models),
+                    Expiry::Never
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert!(
+            create_with_policy(
+                &pool,
+                &crypto(),
+                "Bad",
+                KeyAccess::All,
+                Expiry::AfterDays(-1)
+            )
+            .await
+            .is_err()
+        );
+        assert!(!any(&pool).await.unwrap());
+        let issued = create_with_policy(
+            &pool,
+            &crypto(),
+            "Good",
+            KeyAccess::Selected(vec![" foo ".into(), "foo".into(), "Foo".into()]),
+            Expiry::Never,
+        )
+        .await
+        .unwrap();
+        let Some(KeyAccess::Selected(models)) =
+            authenticate(&pool, &crypto(), issued.secret.expose_secret())
+                .await
+                .unwrap()
+        else {
+            panic!("selected policy expected");
+        };
+        assert_eq!(models, ["Foo", "foo"]);
     }
 
     #[tokio::test]

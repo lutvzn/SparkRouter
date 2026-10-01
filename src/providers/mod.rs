@@ -1,7 +1,7 @@
 pub mod anthropic;
 pub mod openai;
 // Framing decoder private to the provider adapters.
-mod sse;
+pub(crate) mod sse;
 
 use std::{pin::Pin, str::FromStr};
 
@@ -627,7 +627,12 @@ async fn read_bounded(response: reqwest::Response) -> Result<Bytes, AttemptError
 }
 
 fn json_response(status: StatusCode, body: Bytes) -> Response {
+    let usage = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .map(|value| crate::history::Usage::from_value(&value))
+        .unwrap_or_default();
     let mut response = Response::new(Body::from(body));
+    response.extensions_mut().insert(usage);
     *response.status_mut() = status;
     response.headers_mut().insert(
         header::CONTENT_TYPE,

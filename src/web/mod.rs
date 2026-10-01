@@ -7,7 +7,10 @@
 //! chat uses a small embedded script for page-local conversation history.
 
 mod api_keys;
+pub(crate) mod auth;
 mod combos;
+mod config_transfer;
+mod history;
 mod provider_catalog;
 mod providers;
 mod test;
@@ -34,6 +37,14 @@ struct StaticAssets;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/login", get(auth::page).post(auth::login))
+        .route("/logout", get(auth::logout_page).post(auth::logout))
+        .route("/history", get(history::page))
+        .route("/history/clear", post(history::clear))
+        .route("/configuration", get(config_transfer::page))
+        .route("/configuration/export", post(config_transfer::export))
+        .route("/configuration/preview", post(config_transfer::preview))
+        .route("/configuration/import", post(config_transfer::import))
         .route("/", get(|| async { Redirect::to("/providers") }))
         .route("/providers", get(providers::list).post(providers::create))
         .route("/providers/new", get(providers::new))
@@ -60,6 +71,7 @@ pub fn router() -> Router<AppState> {
         .route("/api-keys", get(api_keys::list).post(api_keys::create))
         .route("/api-keys/{id}", get(api_keys::created))
         .route("/api-keys/{id}/delete", post(api_keys::delete))
+        .route("/api-keys/{id}/policy", post(api_keys::update_policy))
         .route("/combos", get(combos::list).post(combos::create))
         .route("/test", get(test::page))
         .route("/test/chat", post(test::chat))
@@ -68,6 +80,7 @@ pub fn router() -> Router<AppState> {
         .route("/combos/{id}/delete", post(combos::delete))
         .route("/combos/{id}/duplicate", post(combos::duplicate))
         .route("/combos/{id}/steps", post(combos::add_step))
+        .route("/combos/{id}/steps/{step_id}/edit", post(combos::edit_step))
         .route(
             "/combos/{id}/steps/{step_id}/remove",
             post(combos::remove_step),
@@ -182,6 +195,7 @@ mod tests {
                 Crypto::from_base64(&SecretString::from(STANDARD.encode([3u8; 32]))).unwrap(),
             ),
             api_key: None,
+            dashboard_auth: None,
             csrf_token: Arc::new("expected-token".to_string()),
             round_robin: Arc::default(),
         };

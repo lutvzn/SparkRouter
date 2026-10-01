@@ -23,6 +23,8 @@ async fn state() -> AppState {
         bind: "127.0.0.1:0".parse().unwrap(),
         crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([15; 32]))).unwrap(),
         api_key: None,
+        dashboard_password: None,
+        dashboard_secure_cookie: false,
     })
     .await
     .unwrap()
@@ -503,7 +505,9 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
         let main_section = &html[main_open..main_close];
         if path == "/api-keys" {
             assert!(topbar.contains("<h1>API keys</h1>"));
-            assert!(topbar.contains("Each key can call every combo."));
+            assert!(topbar.contains(
+                "Give each app its own gateway key, allowed models, and optional expiry."
+            ));
             assert!(
                 main_section.contains("Generate key")
                     && main_section.contains("name=\"name\"")
@@ -883,12 +887,13 @@ async fn catalog_connections_are_encrypted_pinned_and_labeled_in_combos() {
     );
     let combo = db::combos::by_name(&state.db, "picker").await.unwrap();
     let edit = get_page(&router, &format!("/combos/{}", combo.id)).await;
+    assert!(edit.contains("<option value=\"preset:openai\">OpenAI</option>"));
     assert!(edit.contains(&format!(
-        "<option value=\"{}\">OpenAI / conn work</option>",
+        "<option value=\"{}\" data-provider=\"preset:openai\">conn work</option>",
         work.id
     )));
     assert!(edit.contains(&format!(
-        "<option value=\"{}\">OpenAI / conn personal</option>",
+        "<option value=\"{}\" data-provider=\"preset:openai\">conn personal</option>",
         personal.id
     )));
     assert_eq!(
@@ -1619,12 +1624,16 @@ async fn named_custom_group_at_preset_endpoint_is_separate_and_labels_combos() {
         .find(|p| p.name == "conn work")
         .expect("preset connection stored");
     let edit = get_page(&router, &format!("/combos/{}", combo.id)).await;
+    assert!(edit.contains("<option value=\"preset:openai\">OpenAI</option>"));
     assert!(edit.contains(&format!(
-        "<option value=\"{}\">OpenAI / conn work</option>",
+        "<option value=\"group:{work_group}\">Work OpenAI</option>"
+    )));
+    assert!(edit.contains(&format!(
+        "<option value=\"{}\" data-provider=\"preset:openai\">conn work</option>",
         preset_row.id
     )));
     assert!(edit.contains(&format!(
-        "<option value=\"{}\">Work OpenAI / team key</option>",
+        "<option value=\"{}\" data-provider=\"group:{work_group}\">team key</option>",
         team.id
     )));
 }

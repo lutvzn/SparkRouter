@@ -75,8 +75,12 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   or unsanitized HTTP errors containing sensitive URLs. Do not add `Debug` to
   structures holding unprotected credential strings.
 - Keep the default bind loopback. Gateway authentication protects `/v1/*`, not
-  the dashboard. `ROUTER_API_KEY` and generated API keys both authorize every
-  combo; `/v1/*` stays open only when neither is configured. Preserve dashboard CSRF checks, origin checks, autoescaping,
+  the dashboard. `ROUTER_API_KEY` is unrestricted; generated keys enforce exact
+  public model-ID scopes and expiry before routing (including test chat) and
+  filter `/v1/models`. Empty selected scopes deny all. Expired keys keep `/v1/*`
+  closed until revoked; it stays open only when neither key type is configured.
+  Health/readiness probes are public, sanitized, and never call providers.
+  Preserve dashboard CSRF checks, origin checks, autoescaping,
   and security headers; they are not a substitute for dashboard authentication.
 - Use parameterized SQL. Serialize step mutations in transactions and preserve
   unique positions, cascade combo deletion, and restricted provider deletion.

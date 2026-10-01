@@ -62,10 +62,14 @@ pub(crate) struct ComboStepsFragment {
     csrf_token: String,
     combo_id: String,
     steps: Vec<StepRow>,
+    provider_groups: Vec<ProviderGroup>,
+    providers: Vec<ProviderOption>,
 }
 
 pub(crate) struct StepRow {
     id: String,
+    provider_id: String,
+    group_id: String,
     provider_name: String,
     /// True when the referenced provider is disabled and skipped by routing.
     provider_disabled: bool,
@@ -244,6 +248,24 @@ pub(crate) async fn remove_step(
     step_mutation_response(&state, &headers, &id).await
 }
 
+pub(crate) async fn edit_step(
+    State(state): State<AppState>,
+    Path((id, step_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Form(form): Form<StepForm>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    crate::db::combos::update_step(
+        &state.db,
+        &id,
+        &step_id,
+        form.provider_id.trim(),
+        &form.model,
+    )
+    .await?;
+    step_mutation_response(&state, &headers, &id).await
+}
+
 pub(crate) async fn move_step_up(
     state: State<AppState>,
     path: Path<(String, String)>,
@@ -296,10 +318,13 @@ async fn step_mutation_response(
 
 async fn steps_fragment(state: &AppState, combo_id: &str) -> Result<Html<String>, AppError> {
     let steps = step_rows(state, combo_id).await?;
+    let (provider_groups, providers) = provider_options(state).await?;
     render(ComboStepsFragment {
         csrf_token: state.csrf_token.as_str().to_owned(),
         combo_id: combo_id.to_string(),
         steps,
+        provider_groups,
+        providers,
     })
 }
 
@@ -310,6 +335,11 @@ async fn step_rows(state: &AppState, combo_id: &str) -> Result<Vec<StepRow>, App
     let steps = crate::db::combos::steps(&state.db, combo_id).await?;
     let providers = crate::db::providers::list(&state.db).await?;
     let group_names = crate::db::provider_groups::connection_group_names(&state.db).await?;
+    let memberships = crate::db::provider_groups::connection_groups(&state.db).await?;
+    let groups: HashMap<&str, String> = providers
+        .iter()
+        .map(|p| (p.id.as_str(), provider_group(p, &memberships).0))
+        .collect();
     let names: HashMap<&str, (String, bool)> = providers
         .iter()
         .map(|p| {
@@ -327,6 +357,11 @@ async fn step_rows(state: &AppState, combo_id: &str) -> Result<Vec<StepRow>, App
                 None => (step.provider_id.clone(), false),
             };
             StepRow {
+                group_id: groups
+                    .get(step.provider_id.as_str())
+                    .cloned()
+                    .unwrap_or_default(),
+                provider_id: step.provider_id,
                 id: step.id,
                 provider_name,
                 provider_disabled,
@@ -628,6 +663,8 @@ mod tests {
             strategy: "round_robin".to_string(),
             steps: vec![StepRow {
                 id: "s1".to_string(),
+                provider_id: "p1".to_string(),
+                group_id: "preset:local".to_string(),
                 provider_name: "Local".to_string(),
                 provider_disabled: false,
                 model: "qwen3 <chat>".to_string(),
@@ -665,22 +702,28 @@ mod tests {
         assert!(edit.contains(
             "<option value=\"p1\" data-provider=\"preset:local\">Personal (disabled)</option>"
         ));
-        // One step carries three mutation forms (up/down/remove), each with CSRF,
+        // One step carries four mutation forms (up/down/remove/edit), each with CSRF,
         // plus the rename form and the add-step form.
-        assert_eq!(edit.matches("name=\"_csrf\"").count(), 5);
+        assert_eq!(edit.matches("name=\"_csrf\"").count(), 6);
 
         let fragment = ComboStepsFragment {
             csrf_token: CSRF.to_string(),
             combo_id: "default".to_string(),
+            provider_groups: vec![],
+            providers: vec![],
             steps: vec![
                 StepRow {
                     id: "s1".to_string(),
+                    provider_id: "p1".to_string(),
+                    group_id: "preset:local".to_string(),
                     provider_name: "A".to_string(),
                     provider_disabled: false,
                     model: "m1".to_string(),
                 },
                 StepRow {
                     id: "s2".to_string(),
+                    provider_id: "p2".to_string(),
+                    group_id: "preset:local".to_string(),
                     provider_name: "B".to_string(),
                     provider_disabled: true,
                     model: "m2".to_string(),
@@ -696,8 +739,8 @@ mod tests {
         // Step provider labels flag routing-skipped providers; enabled ones stay bare.
         assert!(fragment.contains("<td>B (disabled)</td>"));
         assert!(fragment.contains("<td>A</td>"));
-        // Two steps -> six forms, all carrying CSRF.
-        assert_eq!(fragment.matches("name=\"_csrf\"").count(), 6);
+        // Two steps -> eight forms, all carrying CSRF.
+        assert_eq!(fragment.matches("name=\"_csrf\"").count(), 8);
         // Fragment is HTML-only, never a full document.
         assert!(!fragment.contains("<html"));
     }

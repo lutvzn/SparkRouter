@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Configuration{% endblock %}
+{% block main_class %}configuration-page{% endblock %}
+{% block topbar_heading %}
+<div class="topbar-heading">
+  <h1>Configuration</h1>
+  <p class="topbar-subtitle">Move custom providers, connections, and combos between gateways without credentials.</p>
+</div>
+{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Export</h2>
+  <p class="hint">Downloads custom providers, named connections, and combos with their ordered steps. API keys, gateway keys, cached model lists, history, and timestamps are never included. This is not a full backup; endpoints and names can still be sensitive.</p>
+  <form method="post" action="/configuration/export">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="form-actions">
+      <button class="btn primary" type="submit">Download configuration</button>
+    </div>
+  </form>
+</section>
+<section class="card">
+  <h2>Import</h2>
+  <p class="hint">Paste a configuration document exported from another gateway. The format has no fields for API keys or other secrets; do not add any. Preview shows what would be created: importing never overwrites or merges existing entries, a conflicting combo name aborts the whole import, and every imported connection starts disabled with no API key.</p>
+  <p class="hint">Per import: at most 2 MiB of JSON, 100 explicit groups, 500 connections, 200 combos, 50 steps per combo, and 2,000 total steps. The encoded form must also fit the 4 MiB request limit.</p>
+  <form method="post" action="/configuration/preview">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <label for="configuration">Configuration JSON</label>
+    <textarea id="configuration" name="configuration" rows="12" spellcheck="false" placeholder="Paste the JSON document exported from another gateway" required></textarea>
+    <div class="form-actions">
+      <button class="btn primary" type="submit">Preview import</button>
+    </div>
+  </form>
+</section>
+{% if let Some(preview) = preview %}
+<section class="card">
+  <h2>Import preview</h2>
+  <ul>
+    <li>{{ preview.groups }} groups</li>
+    <li>{{ preview.connections }} connections ({{ preview.enabled_connections }} enabled in the file, all imported disabled)</li>
+    <li>{{ preview.combos }} combos with {{ preview.steps }} steps</li>
+  </ul>
+  <details open>
+    <summary>Configuration to create</summary>
+    <h3>Provider groups</h3>
+    <ul>{% for group in preview.contents.groups %}<li>{{ group.name }} &middot; {{ group.protocol }} &middot; <code>{{ group.base_url }}</code> (ID <code>{{ group.id }}</code>)</li>{% endfor %}</ul>
+    <h3>Connections</h3>
+    <ul>{% for connection in preview.contents.connections %}<li>{{ connection.name }} &middot; {{ connection.protocol }} &middot; <code>{{ connection.base_url }}</code> (ID <code>{{ connection.id }}</code>{% if let Some(group_id) = connection.group_id %}, group <code>{{ group_id }}</code>{% endif %}) &mdash; imported disabled</li>{% endfor %}</ul>
+    <h3>Combos</h3>
+    {% for combo in preview.contents.combos %}<h4><code>combo/{{ combo.name }}</code> &middot; {{ combo.strategy }}</h4><ol>{% for step in combo.steps %}<li>Connection <code>{{ step.provider_id }}</code> &middot; model <code>{{ step.model }}</code></li>{% endfor %}</ol>{% endfor %}
+  </details>
+  {% if preview.warnings.is_empty() %}{% else %}
+  <ul>
+    {% for warning in preview.warnings %}
+    <li>{{ warning }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if preview.conflicts.is_empty() %}
+  <form method="post" action="/configuration/import">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="configuration" value="{{ preview.configuration }}">
+    <div class="form-actions">
+      <button class="btn primary" type="submit">Import configuration</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="test fail" role="alert">A combo listed below already exists. Conflicting combo names abort the whole import. Rename incoming combos in the JSON and preview again; no changes were made.</p>
+  <ul>
+    {% for conflict in preview.conflicts %}
+    <li><code>{{ conflict }}</code></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

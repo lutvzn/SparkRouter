@@ -23,7 +23,7 @@
 </form>
 
 <h2>Steps</h2>
-<p class="hint">Order defines priority and fallback order. Disabled connections are skipped. Retryable failures try remaining steps; streaming never switches after it starts. Use the arrows to reorder; remove and re-add a step to change its model.</p>
+<p class="hint">Order defines priority and fallback order. Disabled connections are skipped. Retryable failures try remaining steps; streaming never switches after it starts. Use the arrows to reorder or Edit to change a step's connection/model without moving it.</p>
 <div id="combo-steps">
 {% include "combos/_steps.html" %}
 </div>
@@ -32,12 +32,12 @@
 {% if providers.is_empty() %}
 <p class="empty">No connections configured. <a href="/providers">Add a connection</a> first.</p>
 {% else %}
-<form method="post" action="/combos/{{ combo_id }}/steps" class="card" hx-post="/combos/{{ combo_id }}/steps" hx-target="#combo-steps" hx-swap="innerHTML">
+<form method="post" action="/combos/{{ combo_id }}/steps" class="card" data-step-picker hx-post="/combos/{{ combo_id }}/steps" hx-target="#combo-steps" hx-swap="innerHTML">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <div class="grid3">
     <div>
       <label for="provider_group">Provider</label>
-      <select id="provider_group" required>
+      <select id="provider_group" data-step-provider required>
         {% for group in provider_groups %}
         <option value="{{ group.id }}">{{ group.name }}</option>
         {% endfor %}
@@ -45,7 +45,7 @@
     </div>
     <div>
       <label for="provider_id">Connection</label>
-      <select id="provider_id" name="provider_id" required>
+      <select id="provider_id" name="provider_id" data-step-connection required>
         {% for p in providers %}
         <option value="{{ p.id }}" data-provider="{{ p.group_id }}">{{ p.connection_name }}{% if p.disabled %} (disabled){% endif %}</option>
         {% endfor %}
@@ -53,9 +53,9 @@
     </div>
     <div>
       <label for="model">Model</label>
-      <input id="model" name="model" type="text" required maxlength="256" placeholder="e.g. gpt-4o-mini" autocomplete="off">
+      <input id="model" name="model" data-step-model type="text" required maxlength="256" placeholder="e.g. gpt-4o-mini" autocomplete="off">
       {% for p in providers %}
-      <datalist id="models-{{ p.id }}">
+      <datalist id="models-{{ p.id }}" data-models-for="{{ p.id }}">
         {% for model in p.models %}
         <option value="{{ model }}"></option>
         {% endfor %}

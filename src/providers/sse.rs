@@ -1,9 +1,10 @@
 //! Incremental `text/event-stream` framing shared by the provider adapters.
 //!
-//! Private to the `providers` module: the OpenAI raw passthrough only watches
+//! Internal to the crate: the OpenAI raw passthrough only watches
 //! for the terminal `data: [DONE]` event, while the Anthropic adapter fully
 //! decodes events. Both must frame upstream SSE without assuming HTTP chunk
-//! boundaries align with events.
+//! boundaries align with events. The history observer also uses this bounded
+//! decoder without changing forwarded bytes.
 
 use super::AttemptError;
 
@@ -11,14 +12,14 @@ use super::AttemptError;
 /// comments, and unrecognized fields. The same bound applies to the OpenAI
 /// raw passthrough, whose terminal-event tracker otherwise forwards bytes
 /// verbatim and unbounded in total.
-pub(super) const MAX_EVENT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 /// A fully framed SSE event: `name` is the `event:` field (empty when the
 /// event had none) and `data` is the `data:` field lines joined with `\n`.
 #[derive(Debug)]
-pub(super) struct SseEvent {
-    pub(super) name: String,
-    pub(super) data: String,
+pub(crate) struct SseEvent {
+    pub(crate) name: String,
+    pub(crate) data: String,
 }
 
 /// Byte-at-a-time SSE framing decoder.
@@ -28,7 +29,7 @@ pub(super) struct SseEvent {
 /// entire event (including comments and unrecognized fields), not just the
 /// data lines.
 #[derive(Default)]
-pub(super) struct SseDecoder {
+pub(crate) struct SseDecoder {
     line: Vec<u8>,
     name: String,
     data: String,
@@ -37,7 +38,7 @@ pub(super) struct SseDecoder {
 }
 
 impl SseDecoder {
-    pub(super) fn push(&mut self, byte: u8) -> Result<Option<SseEvent>, AttemptError> {
+    pub(crate) fn push(&mut self, byte: u8) -> Result<Option<SseEvent>, AttemptError> {
         self.size += 1;
         if self.size > MAX_EVENT_BYTES {
             return Err(AttemptError::Retryable);

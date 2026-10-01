@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Log out{% endblock %}
+{% block content %}<h1>Log out</h1><form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><button class="btn" type="submit">Log out of this session</button></form>{% endblock %}

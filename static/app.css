@@ -170,6 +170,24 @@ a:hover { text-decoration: underline; }
 }
 
 main { max-width: 60rem; margin: 1.5rem auto 0; padding: 0 1.2rem; }
+main.login-page { width: 100%; max-width: 30rem; margin-top: 8vh; }
+main.history-page { max-width: 90rem; }
+.history-table-scroll { max-width: 100%; overflow-x: auto; margin-top: 1rem; }
+.history-table-scroll td { overflow-wrap: anywhere; }
+.history-table-scroll details { min-width: 12rem; }
+.history-table-scroll ol { padding-left: 1.2rem; }
+main.configuration-page { max-width: 70rem; }
+main.api-keys-page { max-width: 70rem; }
+.api-keys-page .card { max-width: none; }
+.api-keys-page textarea { width: 100%; padding: 0.6rem; border: 1px solid var(--line); border-radius: 4px; background: var(--field); color: var(--fg); font: 0.85rem/1.5 ui-monospace, monospace; resize: vertical; }
+.key-policy { width: 100%; margin-top: 0.5rem; }
+.key-policy form { padding-top: 0.5rem; }
+.step-editor { text-align: left; }
+.step-editor form { padding: 0.6rem 0; }
+.step-editor summary { cursor: pointer; }
+.step-edit-row td { background: var(--soft); }
+.configuration-page .card { max-width: none; margin-bottom: 1rem; overflow-wrap: anywhere; }
+.configuration-page textarea { width: 100%; padding: 0.6rem; border: 1px solid var(--line); border-radius: 4px; background: var(--field); color: var(--fg); font: 0.85rem/1.5 ui-monospace, monospace; resize: vertical; }
 
 h1 { font-size: 1.4rem; margin: 0.2rem 0 1rem; }
 h2 { font-size: 1.1rem; margin: 1.6rem 0 0.6rem; }

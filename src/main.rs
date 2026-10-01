@@ -17,9 +17,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = state.db.clone();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(address = %listener.local_addr()?, app = sparkrouter::APP_NAME, "server listening");
-    axum::serve(listener, app::router(state))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    axum::serve(
+        listener,
+        app::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     pool.close().await;
     Ok(())
 }

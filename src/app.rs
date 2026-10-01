@@ -22,6 +22,7 @@ pub struct AppState {
     pub crypto: Arc<Crypto>,
     pub api_key: Option<Arc<SecretString>>,
     pub csrf_token: Arc<String>,
+    pub dashboard_auth: Option<Arc<crate::web::auth::DashboardAuth>>,
     pub(crate) round_robin: Arc<crate::routing::combo::RoundRobin>,
 }
 
@@ -41,12 +42,25 @@ impl AppState {
             ))
             .build()
             .map_err(|_| AppError::HttpClient)?;
+        let db = db::connect(&config.database_url).await?;
+        // A previous process cannot still own a committed stream.
+        sqlx::query(
+            "UPDATE request_history SET outcome = 'interrupted' WHERE outcome = 'streaming'",
+        )
+        .execute(&db)
+        .await?;
         Ok(Self {
-            db: db::connect(&config.database_url).await?,
+            db,
             client,
             crypto: Arc::new(config.crypto),
             api_key: config.api_key.map(Arc::new),
             csrf_token: Arc::new(uuid::Uuid::new_v4().to_string()),
+            dashboard_auth: config.dashboard_password.map(|password| {
+                Arc::new(crate::web::auth::DashboardAuth::new(
+                    password,
+                    config.dashboard_secure_cookie,
+                ))
+            }),
             round_robin: Arc::default(),
         })
     }
@@ -55,11 +69,16 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let api =
         crate::api::router().layer(middleware::from_fn_with_state(state.clone(), authenticate));
-    // Dashboard is a distinct router so an authentication layer can be added here.
-    let dashboard = crate::web::router().layer(middleware::from_fn(dashboard_origin));
+    let dashboard = crate::web::router()
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::web::auth::authenticate,
+        ))
+        .layer(middleware::from_fn(dashboard_origin));
     Router::new()
         .nest("/v1", api)
         .merge(dashboard)
+        .merge(crate::health::router())
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -72,10 +91,11 @@ pub fn router(state: AppState) -> Router {
 
 async fn authenticate(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    authorize(&state, request.headers()).await?;
+    let access = authorize(&state, request.headers()).await?;
+    request.extensions_mut().insert(access);
     Ok(next.run(request).await)
 }
 
@@ -83,7 +103,7 @@ async fn authenticate(
 pub(crate) async fn authorize(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<(), AppError> {
+) -> Result<crate::db::api_keys::KeyAccess, AppError> {
     let supplied = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -96,13 +116,18 @@ pub(crate) async fn authorize(
                 .ct_eq(expected.expose_secret().as_bytes()),
         )
     });
-    if env_match || crate::db::api_keys::matches(&state.db, &state.crypto, supplied).await? {
-        return Ok(());
+    if env_match {
+        return Ok(crate::db::api_keys::KeyAccess::All);
+    }
+    if let Some(access) =
+        crate::db::api_keys::authenticate(&state.db, &state.crypto, supplied).await?
+    {
+        return Ok(access);
     }
     // Open only when neither the environment key nor a generated key exists.
-    // A generated key is unrestricted and can call every combo.
+    // Expired keys still keep authentication enabled until explicitly revoked.
     if state.api_key.is_none() && !crate::db::api_keys::any(&state.db).await? {
-        return Ok(());
+        return Ok(crate::db::api_keys::KeyAccess::All);
     }
     Err(AppError::Unauthorized)
 }

@@ -53,6 +53,8 @@ The deployed executable does not need the source directories alongside it.
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite storage location |
 | `ROUTER_API_KEY` | Unset | Optional bearer key for `/v1/*`; empty is invalid. Generated dashboard keys also authorize `/v1/*` |
 | `ROUTER_BIND` | `127.0.0.1:8080` | IP address and port, not a hostname |
+| `ROUTER_DASHBOARD_PASSWORD` | Unset | Optional single-admin login; nonblank 16–1024 bytes, preferably randomly generated |
+| `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` when serving through HTTPS; only `true`/`false` accepted |
 | `RUST_LOG` | `info` | `tracing-subscriber` logging filter |
 
 `.env.example` documents these values. **SparkRouter does not automatically load
@@ -100,9 +102,14 @@ environment configuration. SQLite may create `router.db-wal` and `router.db-shm`
 while running. Do not delete these files from a live installation. Stop the
 application before a simple file-copy backup, or use SQLite's online backup API.
 
-The dashboard has no login. Leave the default loopback bind or use an
-authenticated reverse proxy with TLS. `ROUTER_API_KEY` alone does **not** protect
-provider management pages. See [ARCHITECURE.md](ARCHITECURE.md) for the trust model.
+The dashboard login is enabled only when `ROUTER_DASHBOARD_PASSWORD` is set.
+Otherwise leave the default loopback bind or use an authenticated reverse proxy.
+Use TLS for network access and set `ROUTER_DASHBOARD_SECURE_COOKIE=true` for HTTPS.
+`ROUTER_API_KEY` alone does **not** protect provider management pages.
+Sessions expire after eight hours and restart revokes them. Pass the dashboard
+variables explicitly to Docker (`-e ROUTER_DASHBOARD_PASSWORD` and
+`-e ROUTER_DASHBOARD_SECURE_COOKIE`) if desired.
+See [ARCHITECURE.md](ARCHITECURE.md) for the trust model.
 
 ## Docker
 
@@ -140,5 +147,26 @@ default network binding rather than `.env.example`'s loopback value.
 - **Address already in use:** choose another port through `ROUTER_BIND`.
 - **Template/asset edits not visible:** rebuild and restart. Clear cached assets
   if necessary; HTMX's versioned file has a longer cache lifetime.
+
+## Health checks
+
+Use `GET /healthz` for liveness and `GET /readyz` for database readiness. Both
+are public, independent of dashboard/API keys, support HEAD, and return small
+JSON responses with `Cache-Control: no-store`. Readiness performs only `SELECT 1`
+with a two-second deadline; failures return sanitized `503`, not redirects or
+database diagnostics. Neither endpoint contacts providers or makes billable calls.
+Readiness does not prove write access or upstream/model availability.
+
+From the host or an external probe agent:
+
+```sh
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8080/readyz
+```
+
+Configure your reverse proxy/orchestrator to use `/readyz`. The minimal Docker
+runtime has no curl/wget and no automatic Docker HEALTHCHECK; provide an external
+HTTP probe or a probe tool in your own derived image rather than relying on a
+command that is absent from the image.
 
 For validation commands and acceptance checks, see [TESTING.md](TESTING.md).

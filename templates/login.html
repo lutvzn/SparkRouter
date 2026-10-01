@@ -1,0 +1,5 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ app_name }} :: Login</title><script src="/static/theme.js"></script><link rel="stylesheet" href="/static/app.css"></head>
+<body><main class="login-page"><h1>{{ app_name }}</h1><h2>Dashboard login</h2><p role="alert">{{ error }}</p>
+<form method="post" action="/login"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><label>Admin password<input type="password" name="password" autocomplete="current-password" maxlength="1024" required autofocus></label><button type="submit" class="btn primary">Log in</button></form>
+<p>Gateway API keys do not authorize dashboard access.</p></main></body></html>

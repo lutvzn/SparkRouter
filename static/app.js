@@ -118,13 +118,16 @@ filterProviderTiles();
 
 // The provider dropdown filters the connection dropdown. Model suggestions
 // follow the selected connection. Typed IDs stay valid when it has no list.
-function bindComboStepPicker() {
-  const provider = document.getElementById("provider_group");
-  const connection = document.getElementById("provider_id");
-  const input = document.getElementById("model");
+function bindComboStepPickers() {
+  document.querySelectorAll("[data-step-picker]").forEach((form) => {
+  if (form.dataset.pickerBound) return;
+  const provider = form.querySelector("[data-step-provider]");
+  const connection = form.querySelector("[data-step-connection]");
+  const input = form.querySelector("[data-step-model]");
   if (!provider || !connection || !input) return;
+  form.dataset.pickerBound = "true";
   const applyModels = () => {
-    const list = document.getElementById("models-" + connection.value);
+    const list = Array.from(form.querySelectorAll("datalist[data-models-for]")).find((list) => list.dataset.modelsFor === connection.value);
     if (list && list.options.length > 0) {
       input.setAttribute("list", list.id);
     } else {
@@ -148,9 +151,36 @@ function bindComboStepPicker() {
   provider.addEventListener("change", applyConnections);
   connection.addEventListener("change", applyModels);
   applyConnections();
+  });
 }
 
-bindComboStepPicker();
+bindComboStepPickers();
+document.body.addEventListener("htmx:afterSwap", bindComboStepPickers);
+
+// Edit sits beside Remove; expand the same inline form rather than navigating.
+// Without JavaScript the native details disclosure remains available.
+function bindComboStepEditors() {
+  document.querySelectorAll("[data-step-edit-toggle]").forEach((button) => {
+    if (button.dataset.editorBound) return;
+    const row = document.getElementById(button.getAttribute("aria-controls"));
+    const details = row?.querySelector("details");
+    const summary = details?.querySelector("summary");
+    if (!row || !details || !summary) return;
+    button.dataset.editorBound = "true";
+    row.hidden = true;
+    details.open = true;
+    summary.hidden = true;
+    button.hidden = false;
+    button.addEventListener("click", () => {
+      row.hidden = !row.hidden;
+      button.setAttribute("aria-expanded", String(!row.hidden));
+      if (!row.hidden) row.querySelector("[data-step-model]")?.focus();
+    });
+  });
+}
+
+bindComboStepEditors();
+document.body.addEventListener("htmx:afterSwap", bindComboStepEditors);
 
 // Model dropdowns filter their cards as the user types. Delegation keeps this
 // working after HTMX replaces a refreshed list.

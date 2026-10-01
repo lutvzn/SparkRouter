@@ -17,6 +17,24 @@ use serde_json::Value;
 const MAX_MODEL_CHARS: usize = 256;
 
 pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Response, AppError> {
+    route_inner(state, model, body, None).await
+}
+
+pub(crate) async fn route_with_trace(
+    state: &AppState,
+    model: &str,
+    body: &Value,
+    attempts: &mut Vec<super::combo::AttemptTrace>,
+) -> Result<Response, AppError> {
+    route_inner(state, model, body, Some(attempts)).await
+}
+
+async fn route_inner(
+    state: &AppState,
+    model: &str,
+    body: &Value,
+    mut attempts: Option<&mut Vec<super::combo::AttemptTrace>>,
+) -> Result<Response, AppError> {
     let model = validate_model(model)?;
     let provider_ids = connection_models::providers_for_model(&state.db, &model).await?;
     if provider_ids.is_empty() {
@@ -24,7 +42,7 @@ pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Respon
             "no connection lists model '{model}'"
         )));
     }
-    for provider_id in provider_ids {
+    for (index, provider_id) in provider_ids.into_iter().enumerate() {
         let provider = match provider_db::get(&state.db, &provider_id).await {
             Ok(provider) => provider,
             // A refresh snapshot can outlive a connection deleted mid-request.
@@ -36,12 +54,28 @@ pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Respon
             continue;
         }
         let started = std::time::Instant::now();
+        if let Some(attempts) = attempts.as_deref_mut() {
+            attempts.push(super::combo::AttemptTrace::new(
+                provider.id.clone(),
+                provider.name.clone(),
+                model.clone(),
+                index as i64 + 1,
+                started,
+            ));
+        }
         let attempt = tokio::time::timeout(
             std::time::Duration::from_secs(120),
             providers::call(&state.client, &state.crypto, &provider, &model, body),
         )
         .await
         .unwrap_or(Err(AttemptError::Retryable));
+        if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
+            trace.finish(match &attempt {
+                Ok(_) => "selected",
+                Err(AttemptError::Retryable) => "retryable_failure",
+                Err(AttemptError::Permanent(_)) => "permanent_failure",
+            });
+        }
         match attempt {
             Ok(response) => {
                 tracing::info!(

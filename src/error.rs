@@ -32,6 +32,8 @@ pub enum AppError {
     NotFound(String),
     #[error("gateway API authentication required")]
     Unauthorized,
+    #[error("API key does not allow this model")]
+    Forbidden,
     #[error("upstream rejected the request (HTTP {0})")]
     Upstream(StatusCode),
 }
@@ -60,6 +62,7 @@ impl IntoResponse for AppError {
                 self.to_string(),
                 "authentication_error",
             ),
+            Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string(), "permission_error"),
             Self::Upstream(status) => (
                 if status.is_client_error() || status.is_server_error() {
                     *status

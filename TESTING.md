@@ -44,6 +44,12 @@ cargo test --locked -- --list
 | `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models, optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
+| `tests/dashboard_auth.rs` | Optional admin login, cookie isolation/revocation, CSRF/origin protections, login limits |
+| `tests/request_history.rs`, `tests/history_dashboard.rs` | Metadata recording, fallback attempts, usage, streaming lifecycle, retention, escaping, protected clear |
+| `tests/config_transfer.rs` | Credential-free transfer, preview, validation, atomic rollback, fresh disabled connections |
+| `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
+| `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
+| `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
 
 Library tests sit next to their implementation. Integration tests use the exported
 library and `tower::ServiceExt::oneshot` to call the assembled Axum router. They
@@ -176,7 +182,12 @@ existing installation's database.
    or its native HTTP commands and `$env:ROUTER_API_KEY` for environment access.
 
 6. If a gateway key is configured, verify missing/wrong keys receive `401` on
-   both API endpoints. Generate an API key and confirm it can call every combo, is shown only once, and is absent from the list and stored plaintext. Revoking the last generated key reopens the API when ROUTER_API_KEY is unset. Dashboard pages remain unauthenticated by design.
+both API endpoints. Generate an unrestricted API key and confirm it can call every combo, is shown only once, and is absent from the list and stored plaintext. Revoking the last generated key reopens the API when ROUTER_API_KEY is unset. With no dashboard password, pages remain open. With `ROUTER_DASHBOARD_PASSWORD` set, check login, wrong password, logout/replay, restart revocation, and that gateway bearer keys do not grant dashboard access. Set Secure cookies only when testing through HTTPS.
+   Create a selected-model key with an expiry. Check its filtered `/v1/models`,
+   allowed JSON/streaming/test-chat calls and disallowed 403 responses without
+   upstream attempts. Edit scopes/expiry without changing its secret. Expire a
+   disposable test key: it must return 401, not reopen the gateway. Confirm
+   environment and legacy unrestricted keys remain unrestricted.
 7. Verify ordered fallback using a controlled local mock that returns `503` for
    its first step and success for its second. A `400` must stop the chain. Do not
    deliberately generate rate-limit traffic against real providers.
@@ -195,6 +206,29 @@ existing installation's database.
    than simply searching file bytes.
 
 ## Packaging checks and limits of verification
+
+For the new dashboard pages, also verify:
+
+- Make successful, fallback, and interrupted-stream requests using local mocks;
+  inspect History outcomes, attempts, usage (unknown if omitted), pagination, and
+  Clear. Confirm conversation text is absent, including after restarting.
+- Export configuration, preview it in a second disposable instance using a
+  different master key, and confirm import. Check empty/custom provider groups,
+  named connections, combo strategies and ordering; connections must be disabled
+  and credential-free. Add keys and enable explicitly. Conflicting combo names
+  or invalid references must leave the database unchanged.
+- Check Login, History, Configuration, and Logout in both themes and on narrow
+  screens, including ordinary forms with JavaScript disabled.
+- Edit multiple combo steps in place, including a disabled connection and an
+  arbitrary typed model. Check the Edit button is immediately left of Remove,
+  toggles only its own editor, exposes expanded state, and works after swaps.
+  Without JavaScript, the native Edit step disclosure should remain usable.
+  Check stable order/IDs, provider filtering and per-form
+  suggestions after HTMX swaps, ordinary non-JS submits, and both themes.
+- With dashboard and API authentication enabled, `/healthz` and `/readyz` must
+  still return public 200/no-store responses (HEAD too). Confirm a closed or
+  exhausted disposable DB pool returns sanitized readiness 503 within two seconds
+  without changing liveness. No upstream calls should occur.
 
 - Run the release binary from a different working directory with an explicit
   database URL; dashboard assets and migrations should still be available without

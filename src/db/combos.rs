@@ -422,6 +422,50 @@ pub async fn add_step(
     }
 }
 
+/// Replace a step target without changing its identity or fallback position.
+pub async fn update_step(
+    pool: &SqlitePool,
+    combo_id: &str,
+    step_id: &str,
+    provider_id: &str,
+    model: &str,
+) -> Result<(), AppError> {
+    let model = validate_model(model)?;
+    let mut transaction = begin_immediate(pool).await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM combo_steps WHERE id = ? AND combo_id = ?)",
+    )
+    .bind(step_id)
+    .bind(combo_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !exists {
+        return Err(AppError::NotFound(
+            "Step was not found in this combo".into(),
+        ));
+    }
+    let provider_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE id = ?)")
+            .bind(provider_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if !provider_exists {
+        return Err(AppError::InvalidRequest(
+            "Selected connection does not exist".into(),
+        ));
+    }
+    sqlx::query("UPDATE combo_steps SET provider_id = ?, model = ? WHERE id = ? AND combo_id = ?")
+        .bind(provider_id)
+        .bind(model)
+        .bind(step_id)
+        .bind(combo_id)
+        .execute(&mut *transaction)
+        .await?;
+    touch_combo(&mut transaction, combo_id).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// Remove a step and transactionally renumber the remaining steps so
 /// positions stay contiguous starting at zero.
 pub async fn remove_step(pool: &SqlitePool, combo_id: &str, step_id: &str) -> Result<(), AppError> {

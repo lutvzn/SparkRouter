@@ -38,7 +38,7 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 Open **http://127.0.0.1:8080/providers**:
 
-Use the left sidebar to switch between **Providers**, **Combos**, **API keys**, and **test**.
+Use the left sidebar to switch between **Providers**, **Combos**, **API keys**, **test**, **History**, and **Configuration**.
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
 Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
@@ -54,7 +54,12 @@ font dependency. Their license is included at `/static/icons-LICENSE.txt`.
 3. Open **Combos**, create `coding`, and add provider/model steps in preference order.
 4. Choose a **provider**, then one of its **connections**, for each step and use the up/down
    buttons to change fallback order. Enter model IDs exactly as your upstream
-   accepts them. Keys within a provider are not automatically rotated or retried.
+    accepts them. Keys within a provider are not automatically rotated or retried.
+
+Use **Edit** immediately before **Remove** to open a step's inline connection/model editor. Saving
+keeps its ID and fallback position; refreshed model suggestions are optional.
+Without JavaScript, use the **Edit step** disclosure below the row; all connection
+options remain visible and ordinary form submissions still work.
 
 Choose **Priority**, **Round robin**, or **Random** when creating or editing a
 combo. Existing combos default to Priority. The Combos list shows its strategy.
@@ -86,7 +91,31 @@ curl http://127.0.0.1:8080/v1/models \
   -H "Authorization: Bearer $ROUTER_API_KEY"
 ```
 
-Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. Either key can call every combo and every directly routed model. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
+Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. The environment key is unrestricted; generated keys can be unrestricted or scoped to selected model IDs. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
+
+### Scoped gateway API keys
+
+Choose **Only selected model IDs** when generating a key, then enter one exact
+public ID per line, for example `combo/coding` or `openai/gpt-6-luna`. Up to 200
+IDs are allowed per key; IDs are case-sensitive, trimmed, and have no wildcard or
+prefix semantics. Empty selected access deliberately permits no models. IDs need
+not exist yet. An allowed combo authorizes its entire configured fallback chain,
+but does not grant direct access to those steps' upstream models. Permissions
+follow public names, not combo UUIDs: update the policy after renaming a combo;
+reusing an allowed name grants access to the new combo under that name.
+
+Optionally set expiry to **1–3650 days from now**. Expiration is stored as an
+absolute timestamp and displayed in UTC. **Edit access / expiry** changes a key's
+policy without rotating or revealing its secret; expiry is preserved unless you
+explicitly remove or reset it. Existing keys remain unrestricted and non-expiring.
+
+`/v1/models` lists only models allowed by the supplied key. A valid key calling a
+disallowed model gets `403`; an expired, revoked, or invalid key gets `401` while
+authentication is enabled. Test chat uses the same restrictions. Authorization
+is checked at request start: expiry/revocation/policy edits do not interrupt
+already-started requests or streams. Expired keys still keep authentication
+enabled until explicitly revoked. Revoking the last key reopens the API only
+when `ROUTER_API_KEY` is also unset.
 
 A refreshed connection model can also be called by its upstream ID, with no combo:
 
@@ -105,6 +134,8 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite URL; database and schema created on startup |
 | `ROUTER_API_KEY` | unset | Optional bearer key protecting `/v1/*`; an explicitly empty value is rejected. Dashboard-generated keys also authorize `/v1/*` and, once any exist, require authentication even when this variable is unset |
 | `ROUTER_BIND` | `127.0.0.1:8080` | IP address and port |
+| `ROUTER_DASHBOARD_PASSWORD` | unset | Optional separate admin login; 16–1024 bytes, not blank. Use a long random password |
+| `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` for HTTPS deployment; marks dashboard session cookies Secure. Must be `true` or `false` |
 | `RUST_LOG` | `info` | `tracing` filter |
 
 The parent database directory must already exist and be writable. SQLite WAL/SHM sidecar files are normal while running. For backups, stop the application first or use SQLite's online backup facility rather than copying an active database file alone.
@@ -144,13 +175,41 @@ any connection is referenced by a combo; preset provider tiles are not removable
 
 Keys are encrypted using AES-256-GCM with a fresh random nonce and authenticated provider ID. The database stores versioned ciphertext; the master key is never stored there. Secret values are wrapped with `secrecy` and key/decryption buffers use `zeroize`. Normal logs include routing IDs, model, latency, status, and fallback events; they omit credentials and upstream bodies.
 
-The dashboard has **no user accounts or login**. Keep it on localhost or put it behind an authenticated reverse proxy when exposing it on a network. `ROUTER_API_KEY` and dashboard-generated API keys protect gateway endpoints only. Generated keys are unrestricted, shown once, and stored as a master-key fingerprint rather than a recoverable secret. Dashboard forms have CSRF tokens and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
+Set `ROUTER_DASHBOARD_PASSWORD` to enable a single-admin dashboard login at `/login`. Sessions expire after eight hours and are revoked by logout or restart; cookies are HttpOnly and SameSite=Strict. Set `ROUTER_DASHBOARD_SECURE_COOKIE=true` behind HTTPS. There are at most 128 active sessions, and ten failed logins per minute trigger a temporary limit per socket-peer IP. Forwarded headers are not trusted; behind a reverse proxy, add a per-client login limit there because clients share the proxy's peer IP. There are no user accounts or password recovery; change the environment password and restart to change it. Login is optional for existing local installations: **without the password, the dashboard remains open**. Keep it local or behind an authenticated reverse proxy. Do not expose dashboard passwords over public HTTP.
+
+`ROUTER_API_KEY` and dashboard-generated API keys protect gateway endpoints only; a dashboard session does not authorize API requests. Generated keys support model allowlists and expiry, are shown once, and are authenticated by a master-key fingerprint; the temporary encrypted reveal envelope is cleared on first viewing. Dashboard forms retain CSRF and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
+
+### Request history and configuration transfer
+
+**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. It stores **metadata only**, never prompts, completions, credentials, endpoint URLs, or raw upstream errors. Retention is the newest 10,000 requests, with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; database write failures do not fail generation. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
+
+**Configuration** (`/configuration`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
+
+One import is limited to 2 MiB of JSON, 100 explicit groups, 500 connections,
+200 combos, 50 steps per combo, and 2,000 total steps (the encoded form must
+also fit the 4 MiB HTTP body limit). Split larger configurations into smaller
+documents with their required references. Ungrouped custom connections receive
+their own new provider groups so they remain manageable in the dashboard.
 
 The test page itself is a dashboard page, but `POST /test/chat` additionally
 requires the same gateway authentication as `/v1/*`, plus dashboard CSRF and
 origin checks. It never reveals saved provider credentials or raw upstream errors.
 
 The dashboard uses `Referrer-Policy: same-origin`: native form submissions retain their Origin for validation, and external destinations receive no referrer. If a submission is rejected, reload the form after a server restart (CSRF tokens change), use one consistent hostname and port, and ensure a reverse proxy preserves the browser-facing Host header.
+
+### Health and readiness
+
+- `GET /healthz` returns `200 {"status":"ok"}` while the HTTP server is responsive.
+- `GET /readyz` checks database access with `SELECT 1` and a two-second deadline;
+  it returns `200 {"status":"ready"}` or `503 {"status":"unavailable"}`.
+- Both support HEAD, use `Cache-Control: no-store`, and are public even when
+  dashboard/API authentication is enabled. They never call upstream providers or
+  disclose configuration/errors. Readiness checks database access, not provider
+  availability, write permissions, or model health.
+
+Use `/healthz` for liveness and `/readyz` for reverse-proxy/orchestrator readiness.
+From the host: `curl --fail http://127.0.0.1:8080/readyz`. The minimal Docker image
+does not contain curl; configure probes externally or supply your own probe tool.
 
 ### Docker
 
@@ -183,6 +242,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-Only `/v1/chat/completions` and `/v1/models` are implemented. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. No embeddings, Responses API, Gemini, OAuth, routing optimization, price optimization, queues, caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. To change a combo step's provider/model, remove it and add the replacement. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections.
+Only `/v1/chat/completions` and `/v1/models` are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. No embeddings, Responses API, Gemini, OAuth, routing optimization, price optimization, queues, caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
-Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 1024 if unspecified. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow or dashboard authentication in this version.
+Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 1024 if unspecified. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow in this version.

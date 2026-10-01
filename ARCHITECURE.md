@@ -55,7 +55,7 @@ binary, and API `owned_by` value are separate identifiers.
 6. Bind the listener and serve until shutdown. Close the database pool afterward.
 
 `AppState` clones share the SQLx pool and Reqwest client. Crypto state, optional
-gateway secret, and CSRF token are shared through `Arc`. There is no global
+gateway secret, optional dashboard authentication state, and CSRF token are shared through `Arc`. There is no global
 provider cache: routing reads persisted configuration for each request. Per-combo
 round-robin cursors are ephemeral shared runtime state, protected by a short
 mutex reservation with no lock held during database or upstream I/O. They reset
@@ -70,7 +70,8 @@ on process restart and dashboard deletion removes the combo's cursor.
 | `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
-| `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope |
+| `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope, restricted flag, optional Unix expiry timestamp |
+| `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
 reference it. An index supports provider-reference lookups. There is no models
@@ -83,6 +84,9 @@ positions are zero-based; the dashboard displays one-based numbers.
 Step mutations use `BEGIN IMMEDIATE`, taking the SQLite write lock before
 reading positions. Adds append, removals renumber, and swaps temporarily park a
 step at position `-1` inside the transaction to avoid uniqueness conflicts.
+Step target edits update the existing row in the same immediate transaction,
+preserving its ID, combo, position, and the combo's strategy. Invalid connections
+or cross-combo step IDs never mutate configuration.
 Timestamps are updated on edits; provider creation time is preserved by upserts.
 
 Routing snapshots the ordered step list, then loads each provider as its attempt
@@ -100,9 +104,23 @@ The public router is mounted at `/v1` separately from the dashboard:
 If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
 exists, API middleware requires `Authorization: Bearer <key>`. The environment
 key is compared with `subtle`. Generated keys are matched by a master-key HMAC
-fingerprint and are unrestricted: any valid key can call every combo and every
-direct model. If neither
+fingerprint and checked against expiry, then their authorization policy is loaded
+in one read transaction. A request-local `KeyAccess` extension carries either
+unrestricted access or an exact model-ID allowlist; empty selected access denies
+all models and never defaults to unrestricted. The environment key remains
+unrestricted. Existing generated keys migrate to unrestricted/non-expiring. If neither
 kind of key is configured, these endpoints permit unauthenticated requests.
+Expired keys count as configured until revoked. Authentication failures return
+401, and valid keys requesting a disallowed model return OpenAI-shaped 403 before
+any routing/strategy reservation/history/upstream work. `/test/chat` applies the
+same policy. Model listing filters both combos and direct IDs by this policy.
+Scopes are case-sensitive public IDs; allowing a combo permits its full fallback
+chain but not direct access to its step models. Renaming a combo does not rewrite
+key scopes; reusing an allowed public name authorizes that new configuration.
+Key expiry is an absolute Unix timestamp computed from SQLite's clock and checked
+at request start. Policy changes/revocation/expiry affect new requests, not active
+generations. Updates serialize the flag, expiry, and allowlist in an immediate
+transaction without changing key fingerprints or reveal envelopes.
 Model listing returns configured combos as
 `combo/<name>`, including empty combos and those with no enabled provider.
 It also returns each distinct model ID from the last refresh of an enabled
@@ -224,7 +242,7 @@ page, not SQLite or browser storage; generated text is rendered as text, not HTM
 
 Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matching
 combo pages. POST actions handle create/edit/delete, connection tests, model-list refresh, and step
-add/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
+add/edit/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
 forms generally use 303 redirects back to GET pages. There is no SPA state store.
 `POST /combos/{id}/duplicate` requires dashboard CSRF/origin checks and copies
 the combo and its ordered steps in one immediate transaction. A unique copy
@@ -248,6 +266,10 @@ the server-side catalog; custom connection forms take them from the stored
 provider. Legacy custom connections are assigned to groups by a new migration
 without changing ciphertext. The legacy `POST /providers` connection form is
 retained for compatibility.
+Each step has a native details/edit form with the same provider/connection/model
+controls. Picker JavaScript is form-scoped and reinitializes swapped fragments;
+unique per-step labels and datalists prevent controls from interfering. Without
+JavaScript, the submitted connection still selects the target directly.
 `POST /providers/groups/{id}/delete` accepts canonical custom-provider IDs only
 and requires dashboard CSRF/origin checks. It deletes the provider and all member
 connections in one immediate transaction; combo foreign keys block the entire
@@ -258,11 +280,19 @@ also reject cross-site fetch metadata and mismatched supplied Origin/Host values
 `Referrer-Policy: same-origin` preserves the browser's Origin on native form
 POSTs while withholding referrers from external destinations. `no-referrer`
 would turn those form origins into `null`, which the origin check rejects.
-These protections do not provide user authentication. **Dashboard access permits
+These protections are independent of the optional dashboard login. **Dashboard access permits
 changing credentials and making outbound connections, including to local hosts.**
-An internet-facing deployment needs authenticated dashboard access at a reverse
-proxy or a future dashboard-specific middleware layer. Gateway API authentication
-does not cover the dashboard. TLS is terminated outside the application.
+`ROUTER_DASHBOARD_PASSWORD` enables dashboard-specific middleware and a CSRF/origin-
+protected login form. The password remains in process environment/state, never
+SQLite. Domain-separated master-key HMAC fingerprints are compared in constant
+time. Random 256-bit session cookies are HttpOnly, SameSite=Strict, optionally
+Secure; a bounded process-local session map enforces eight-hour expiry and logout
+revocation. Restart invalidates all sessions. Bounded per-socket-peer accounting
+permits ten failed logins per minute; forwarding headers are deliberately ignored.
+Reverse proxies should apply their own per-client limits. Without
+the variable, the dashboard remains open. Gateway API authentication does not
+cover the dashboard, and dashboard sessions never authorize `/v1/*` or test chat.
+TLS is terminated outside the application.
 
 Askama escapes user-controlled HTML. Embedded scripts/styles are served from
 `/static/`; CSP permits self-hosted assets and blocks framing. HTMX evaluation,
@@ -278,6 +308,15 @@ the button displays the resolved mode and toggles directly to its opposite.
 Theme selection does not mutate server configuration or relax CSP.
 
 ## Credential protection and observability
+
+### Public local probes
+
+`health.rs` exposes `/healthz` and `/readyz` on a router merged outside dashboard
+and gateway authentication. Liveness performs no database work. Readiness executes
+`SELECT 1` against the shared pool with a two-second acquisition/query deadline.
+Both return fixed JSON statuses, no-store headers, and no provider requests or
+configuration/errors. Failed readiness is 503; liveness remains 200 while the
+server responds. These are not upstream availability or SQLite writability checks.
 
 Configured API keys use AES-256-GCM with a random 96-bit nonce and the provider
 ID as authenticated associated data. The blob is:
@@ -301,6 +340,33 @@ HTTP errors are logged through sanitized categories rather than full Reqwest
 errors. Do not enable or introduce credential/header/body dumps.
 
 ## Extension rules
+
+### Local request history and configuration transfer
+
+`history.rs` observes routing traces and response bodies without changing upstream
+bytes, response envelopes, strategy state, or fallback semantics. JSON responses
+carry best-effort usage metadata in internal response extensions. The streaming
+observer frames bounded SSE events and reads usage without re-encoding events;
+malformed observer data never alters forwarding. Terminal body errors record
+interruption; dropped bodies record cancellation (or success if `[DONE]` was
+already observed). Drop finalization is a bounded asynchronous database write,
+not a recurring worker. Recording failures are logged only as fixed categories
+and never fail generation. Startup marks orphaned streaming rows interrupted.
+The `request_history` and `request_attempts` tables contain metadata snapshots
+only, with no foreign keys to live configuration that could block deletion.
+Inserts prune to 10,000 requests; attempts cascade with history deletion. The
+dashboard lists 50 rows per page with aggregates and a protected clear action.
+
+Configuration transfer uses a strict versioned JSON schema and consistent export
+snapshot, excluding all secret material, API keys, cached models, and history.
+Preview performs validation; confirmation repeats validation under a write
+transaction and inserts fresh IDs without modifying existing rows. Invalid
+references or conflicting combo names roll back the entire import. Imported
+connections have empty credential blobs and start disabled, regardless of their
+exported enabled flag. Endpoints must be reviewed and credentials set before
+enabling. Provider groups, including distinct groups sharing an endpoint and empty
+groups, and combo strategy/step ordering survive transfer. This is not a database
+backup or master-key rotation mechanism.
 
 - Add protocols in `src/providers/` with explicit request/JSON/SSE translation,
   preserving the existing retry and commitment contracts.

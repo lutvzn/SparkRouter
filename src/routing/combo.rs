@@ -69,6 +69,23 @@ pub(crate) struct AttemptTrace {
 }
 
 impl AttemptTrace {
+    pub(crate) fn new(
+        provider_id: String,
+        provider_name: String,
+        model: String,
+        position: i64,
+        started: std::time::Instant,
+    ) -> Self {
+        Self {
+            provider_id,
+            provider_name,
+            model,
+            position,
+            outcome: "in_progress",
+            latency_ms: 0,
+            started,
+        }
+    }
     pub(crate) fn finish(&mut self, outcome: &'static str) {
         self.outcome = outcome;
         self.latency_ms = self.started.elapsed().as_millis();

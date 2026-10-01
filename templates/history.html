@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Request history{% endblock %}
+{% block main_class %}history-page{% endblock %}
+{% block topbar_heading %}
+<div class="topbar-heading">
+  <h1>Request history</h1>
+  <p class="topbar-subtitle">Metadata only &mdash; no prompts, completions, credentials, endpoint URLs, or upstream error bodies are stored.</p>
+</div>
+{% endblock %}
+{% block content %}
+<section class="card provider-details">
+  <div class="provider-details-heading">
+    <h2>Retained requests</h2>
+  </div>
+  <dl class="provider-details-grid">
+    <div><dt>Finished</dt><dd>{{ stats.finished }}</dd></div>
+    <div><dt>Successes</dt><dd>{{ stats.successes }}</dd></div>
+    <div><dt>Failures</dt><dd>{{ stats.failures }}</dd></div>
+    <div><dt>Reported tokens in / out</dt><dd>{{ stats.input_tokens }} / {{ stats.output_tokens }}</dd></div>
+    <div><dt>Average latency</dt><dd>{{ stats.average_latency_ms }} ms</dd></div>
+  </dl>
+  <p class="hint">Figures cover finished requests only; token sums include reported usage only. A dash means unknown usage, not zero. Only the newest {{ max_retained }} requests are kept; older rows are deleted as new ones arrive. Clearing removes the retained history permanently.</p>
+</section>
+{% if rows.is_empty() %}
+<p class="empty">No requests recorded yet.</p>
+{% else %}
+<div class="page-head-actions">
+  <form class="inline" method="post" action="/history/clear">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button class="btn small danger" type="submit">Clear history</button>
+  </form>
+</div>
+<div class="history-table-scroll" tabindex="0" role="region" aria-label="Request history table">
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Time</th>
+      <th scope="col">Source</th>
+      <th scope="col">Model</th>
+      <th scope="col">Stream</th>
+      <th scope="col">Outcome</th>
+      <th scope="col">Status</th>
+      <th scope="col">Latency</th>
+      <th scope="col">Tokens</th>
+      <th scope="col">Attempts</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.created_at }}</td>
+      <td>{{ row.source }}</td>
+      <td><code>{{ row.model }}</code></td>
+      <td>{{ row.streaming }}</td>
+      <td><span class="{{ row.outcome_class }}">{{ row.outcome }}</span></td>
+      <td>{{ row.status }}</td>
+      <td>{{ row.latency_ms }} ms</td>
+      <td>{{ row.tokens }}</td>
+      <td>
+        {% if row.attempts.is_empty() %}
+        <span class="hint">none</span>
+        {% else %}
+        <details>
+          <summary>{{ row.attempts.len() }} attempts</summary>
+          <ol>
+            {% for attempt in row.attempts %}
+            <li><code>{{ attempt.provider_name }}</code> &middot; <code>{{ attempt.model }}</code> &middot; position {{ attempt.position }} &middot; <span class="{{ attempt.outcome_class }}">{{ attempt.outcome }}</span> &middot; {{ attempt.latency_ms }} ms</li>
+            {% endfor %}
+          </ol>
+        </details>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<nav class="form-actions" aria-label="History pages">
+  {% if page > 1 %}<a class="btn small" href="/history?page={{ page - 1 }}">Previous</a>{% endif %}
+  <span class="hint">Page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}<a class="btn small" href="/history?page={{ page + 1 }}">Next</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}
