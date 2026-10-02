@@ -50,6 +50,7 @@ cargo test --locked -- --list
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
 | `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
+| `src/db/provider_slugs.rs` tests | Readable unique slugs, reserved names, transactional conflicts/concurrency, stable legacy initialization |
 
 Library tests sit next to their implementation. Integration tests use the exported
 library and `tower::ServiceExt::oneshot` to call the assembled Axum router. They
@@ -128,7 +129,7 @@ existing installation's database.
    generation access.
    Check the provider grid shows six columns on wide screens, never more than
    six, and fewer columns as the viewport narrows without horizontal overflow.
-   Check compact card headers, protocol/Custom badges sharing the metadata row,
+    Check compact card headers, protocol/Custom badges sharing the metadata row,
    and inline status badges in both themes. Card URLs are hidden; provider pages
    still display the full endpoint. Long names must not overflow the cards.
    Create a custom provider using only name, base URL, and protocol; its empty
@@ -143,7 +144,14 @@ existing installation's database.
    in separate custom providers must remain separate. Confirm the combo
    add-step form chooses a provider, then a connection, and targets that key only.
 3. Edit a provider with the key field blank; verify it still authenticates. Toggle
-   enabled state and verify its label. Ensure keys never appear in page HTML.
+    enabled state and verify its label. Ensure keys never appear in page HTML.
+   Create two custom providers with slugs `provider1` and `provider2`, both listing
+   the same upstream model. Confirm `/v1/models` and Copy expose separate qualified
+   IDs; each request reaches only its provider, with no cross-provider fallback
+   on failure. Confirm combo suggestions still use raw upstream IDs. Check exact
+   API-key scopes allow only the selected provider/model. Verify omitted slugs
+   gain readable collision suffixes, reserved/duplicate explicit slugs are rejected,
+   and restart/export/import preserve slugs (imports suffix conflicts).
 4. Create `coding`, add two provider/model steps, reorder them, and remove/re-add
    a step. Verify the order persists after restarting with the **same** master key.
    Check full-width combo rows: name and Copy on the left; Duplicate, Edit, and
@@ -153,7 +161,7 @@ existing installation's database.
    Combo titles should be near-white in dark mode and dark in light mode, with
    no underline on hover. Check local SVG icons on navigation and action buttons;
    Copy feedback and theme toggling must preserve their icons and text labels.
-5. Open **test** in the sidebar. Choose a combo, enter a gateway key if required,
+5. Open **Test chat** in the sidebar. Choose a combo, enter a gateway key if required,
    and send a message. Verify the assistant reply and ordered attempt details,
    including a controlled retryable failure and a permanent failure with local
    mocks. Repeated requests should follow the combo strategy. Check multi-turn
@@ -218,7 +226,16 @@ For the new dashboard pages, also verify:
   and credential-free. Add keys and enable explicitly. Conflicting combo names
   or invalid references must leave the database unchanged.
 - Check Login, History, Configuration, and Logout in both themes and on narrow
-  screens, including ordinary forms with JavaScript disabled.
+   screens, including ordinary forms with JavaScript disabled.
+- Check one highlighted current navigation section on list and nested edit pages,
+  a single page heading in the shared header, keyboard-visible focus rings and
+  the Skip to content link. Check consistent text, number, password, select, and
+  multiline controls. At 375px and desktop widths, only table regions may scroll
+  horizontally; connection actions and navigation must wrap rather than overflow.
+- Open model details for multiple models and connections, including after an
+  HTMX refresh. Native popover targets must remain distinct. Check Close, Escape,
+  focus return, and details with JavaScript disabled; no custom modal script is
+  required. Check light, dark, and system themes without external font requests.
 - Edit multiple combo steps in place, including a disabled connection and an
   arbitrary typed model. Check the Edit button is immediately left of Remove,
   toggles only its own editor, exposes expanded state, and works after swaps.

@@ -20,7 +20,7 @@ use axum::{
     extract::Request,
     http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -1353,12 +1353,27 @@ async fn direct_model_routes_to_connections_that_list_it() -> TestResult {
         "sk-other",
     )
     .await?;
+    let group = sparkrouter::db::provider_groups::create_with_slug(
+        &state.db,
+        "Shared upstream",
+        &second.url(),
+        &Protocol::OpenAi,
+        Some("shared"),
+    )
+    .await?;
+    for provider_id in ["prov-first", "prov-second"] {
+        sqlx::query("INSERT INTO provider_group_connections (provider_id, group_id) VALUES (?, ?)")
+            .bind(provider_id)
+            .bind(&group.id)
+            .execute(&state.db)
+            .await?;
+    }
     remember_model(&state, "prov-first", "openai/gpt-6-luna").await?;
     remember_model(&state, "prov-second", "openai/gpt-6-luna").await?;
     remember_model(&state, "prov-other", "other-model").await?;
 
     let body = json!({
-        "model": " openai/gpt-6-luna ",
+        "model": " shared/openai/gpt-6-luna ",
         "messages": [{"role": "user", "content": "hello"}],
         "metadata": {"trace_id": "direct-1"},
     });
@@ -1381,13 +1396,14 @@ async fn direct_model_routes_to_connections_that_list_it() -> TestResult {
         .iter()
         .filter_map(|model| model["id"].as_str())
         .collect();
-    assert!(ids.contains(&"openai/gpt-6-luna"));
-    assert!(ids.contains(&"other-model"));
+    assert!(ids.contains(&"shared/openai/gpt-6-luna"));
+    assert!(!ids.contains(&"connection-prov-first/openai/gpt-6-luna"));
+    assert!(ids.contains(&"connection-prov-other/other-model"));
     assert!(!ids.contains(&"combo/not-a-combo"));
 
     let missing = send(
         &state,
-        chat_request(&json!({"model": "openai/missing", "messages": []})),
+        chat_request(&json!({"model": "shared/openai/missing", "messages": []})),
     )
     .await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
@@ -1395,7 +1411,7 @@ async fn direct_model_routes_to_connections_that_list_it() -> TestResult {
         json_body(missing).await["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("openai/missing")
+            .contains("shared/openai/missing")
     );
     Ok(())
 }
@@ -1440,7 +1456,7 @@ async fn direct_model_stops_on_permanent_errors_and_skips_disabled_connections()
 
     let stopped = send(
         &state,
-        chat_request(&json!({"model": "openai/gpt-6-luna", "messages": []})),
+        chat_request(&json!({"model": "connection-prov-reject/openai/gpt-6-luna", "messages": []})),
     )
     .await;
     assert_eq!(stopped.status(), StatusCode::BAD_REQUEST);
@@ -1449,15 +1465,171 @@ async fn direct_model_stops_on_permanent_errors_and_skips_disabled_connections()
 
     let unavailable = send(
         &state,
-        chat_request(&json!({"model": "only-disabled", "messages": []})),
+        chat_request(&json!({"model": "connection-prov-off/only-disabled", "messages": []})),
     )
     .await;
     assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(disabled.hits.count(), 0);
 
     let listed = json_body(send(&state, models_request(None)).await).await["data"].to_string();
-    assert!(listed.contains("openai/gpt-6-luna"));
-    assert!(!listed.contains("only-disabled"));
+    assert!(listed.contains("connection-prov-reject/openai/gpt-6-luna"));
+    assert!(listed.contains("connection-prov-healthy/openai/gpt-6-luna"));
+    assert!(!listed.contains("connection-prov-off/only-disabled"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_group_slugs_isolate_identical_models_and_preserve_nested_ids() -> TestResult {
+    let state = test_state().await;
+    let fail_first = Arc::new(AtomicUsize::new(0));
+    let failure_control = fail_first.clone();
+    let first = spawn_upstream(openai_echo_router("provider one").layer(
+        axum::middleware::from_fn(move |request: Request, next: Next| {
+            let failure_control = failure_control.clone();
+            async move {
+                if failure_control.load(Ordering::SeqCst) != 0 {
+                    StatusCode::SERVICE_UNAVAILABLE.into_response()
+                } else {
+                    next.run(request).await
+                }
+            }
+        }),
+    ))
+    .await;
+    let second = spawn_upstream(openai_echo_router("provider two")).await;
+    let first_provider =
+        save_provider(&state, "p-one", &first.url(), Protocol::OpenAi, true, "one").await?;
+    let second_provider = save_provider(
+        &state,
+        "p-two",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "two",
+    )
+    .await?;
+    for (slug, url, provider) in [
+        ("provider1", first.url(), first_provider),
+        ("provider2", second.url(), second_provider),
+    ] {
+        let group = sparkrouter::db::provider_groups::create_with_slug(
+            &state.db,
+            slug,
+            &url,
+            &Protocol::OpenAi,
+            Some(slug),
+        )
+        .await?;
+        sqlx::query("INSERT INTO provider_group_connections (provider_id, group_id) VALUES (?, ?)")
+            .bind(provider.id)
+            .bind(group.id)
+            .execute(&state.db)
+            .await?;
+    }
+    for id in ["p-one", "p-two"] {
+        connection_models::replace(
+            &state.db,
+            id,
+            &[
+                StoredModel {
+                    id: "openai/gpt-6-luna".into(),
+                    name: "gpt".into(),
+                    fields: vec![],
+                    free: false,
+                },
+                StoredModel {
+                    id: "combo/nested/model".into(),
+                    name: "nested".into(),
+                    fields: vec![],
+                    free: false,
+                },
+            ],
+            false,
+        )
+        .await?;
+    }
+
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    let ids: Vec<_> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    for slug in ["provider1", "provider2"] {
+        assert_eq!(
+            ids.iter()
+                .filter(|id| **id == format!("{slug}/openai/gpt-6-luna"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            ids.iter()
+                .filter(|id| **id == format!("{slug}/combo/nested/model"))
+                .count(),
+            1
+        );
+    }
+    assert!(!ids.contains(&"openai/gpt-6-luna"));
+
+    for (public, raw, reply, expected_first, expected_second) in [
+        (
+            "provider1/openai/gpt-6-luna",
+            "openai/gpt-6-luna",
+            "provider one",
+            1,
+            0,
+        ),
+        (
+            "provider2/openai/gpt-6-luna",
+            "openai/gpt-6-luna",
+            "provider two",
+            1,
+            1,
+        ),
+        (
+            "provider1/combo/nested/model",
+            "combo/nested/model",
+            "provider one",
+            2,
+            1,
+        ),
+    ] {
+        let response = send(
+            &state,
+            chat_request(&json!({"model":public,"messages":[],"extension":{"preserved":true}})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        assert_eq!(payload["choices"][0]["message"]["content"], reply);
+        assert_eq!(payload["upstream_saw"]["model"], raw);
+        assert_eq!(payload["upstream_saw"]["extension"]["preserved"], true);
+        assert_eq!(
+            (first.hits.count(), second.hits.count()),
+            (expected_first, expected_second)
+        );
+    }
+
+    let raw = send(
+        &state,
+        chat_request(&json!({"model":"openai/gpt-6-luna","messages":[]})),
+    )
+    .await;
+    assert_eq!(raw.status(), StatusCode::NOT_FOUND);
+    assert_eq!((first.hits.count(), second.hits.count()), (2, 1));
+    fail_first.store(1, Ordering::SeqCst);
+    let failed = send(
+        &state,
+        chat_request(&json!({"model":"provider1/openai/gpt-6-luna","messages":[]})),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        (first.hits.count(), second.hits.count()),
+        (3, 1),
+        "retryable failures must not cross provider namespaces"
+    );
     Ok(())
 }
 
@@ -1575,7 +1747,7 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     assert!(page.contains("alpha") && page.contains("beta"));
     assert!(page.contains("Alpha"));
     assert!(page.contains("1.050.000 ctx"));
-    assert!(page.contains("data-copy-model=\"alpha\""));
+    assert!(page.contains("data-copy-model=\"connection-listed/alpha\""));
     assert!(page.contains("model-card-free"));
     assert!(!page.contains("Owned by"));
     assert!(page.contains("data-model-search"));

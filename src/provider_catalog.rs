@@ -14,7 +14,7 @@ use crate::providers::Protocol;
 /// A built-in provider template shown in the dashboard. Public catalog data
 /// only (slug, display name, endpoint, protocol adapter); nothing secret.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Preset {
+pub(crate) struct Preset {
     pub slug: &'static str,
     pub name: &'static str,
     pub base_url: &'static str,
@@ -22,7 +22,7 @@ pub(super) struct Preset {
 }
 
 /// Well-known gateways, in dashboard display order.
-pub(super) const PRESETS: &[Preset] = &[
+pub(crate) const PRESETS: &[Preset] = &[
     Preset {
         slug: "openai",
         name: "OpenAI",
@@ -1052,14 +1052,14 @@ pub(super) const PRESETS: &[Preset] = &[
 ];
 
 /// Looks up a preset by its exact slug.
-pub(super) fn find(slug: &str) -> Option<&'static Preset> {
+pub(crate) fn find(slug: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|preset| preset.slug == slug)
 }
 
 /// Returns the preset whose endpoint and protocol both match exactly, after
 /// trimming trailing slashes from `base_url`. The same endpoint advertised
 /// with a different protocol is a different tile, not a match.
-pub(super) fn matching(base_url: &str, protocol: &Protocol) -> Option<&'static Preset> {
+pub(crate) fn matching(base_url: &str, protocol: &Protocol) -> Option<&'static Preset> {
     let base_url = base_url.trim_end_matches('/');
     PRESETS
         .iter()
@@ -1070,7 +1070,7 @@ pub(super) fn matching(base_url: &str, protocol: &Protocol) -> Option<&'static P
 /// protocol match the catalog, otherwise the URL hostname, falling back to a
 /// generic label for values that are not parseable URLs. Named custom providers
 /// use their stored names instead; detail pages show the full endpoint.
-pub(super) fn display_name(base_url: &str, protocol: &Protocol) -> String {
+pub(crate) fn display_name(base_url: &str, protocol: &Protocol) -> String {
     if let Some(preset) = matching(base_url, protocol) {
         return preset.name.to_string();
     }
@@ -1078,6 +1078,72 @@ pub(super) fn display_name(base_url: &str, protocol: &Protocol) -> String {
         .ok()
         .and_then(|url| url.host_str().map(|host| host.to_string()))
         .unwrap_or_else(|| "Custom provider".to_string())
+}
+
+impl Preset {
+    /// Stable routing alias used by OmniRoute's default provider catalog.
+    /// The aliases correspond to entries in OmniRoute's `src/shared/constants/providers/apikey/`
+    /// gateway, frontier-labs, inference-hosts, enterprise-cloud, regional, and specialty-media catalogs.
+    pub(crate) fn routing_slug(&self) -> &'static str {
+        match self.slug {
+            "deepseek" => "ds",
+            "cheaperinference" => "cinf",
+            "zylo-api" => "zylo",
+            "llm-kiwi" => "llmkiwi",
+            "api-airforce" => "af",
+            "bazaarlink" => "bzl",
+            "kilo-gateway" => "kg",
+            "freetheai" => "fta",
+            "g4f-groq" => "g4fgroq",
+            "g4f-gemini" => "g4fgem",
+            "g4f-pollinations" => "g4fpol",
+            "g4f-ollama" => "g4foll",
+            "g4f-nvidia" => "g4fnv",
+            "vercel-ai-gateway" => "vag",
+            "aimlapi" => "aiml",
+            "bluesminds" => "bm",
+            "freemodel-dev" => "fmd",
+            "freeaiapikey" => "faik",
+            "zenmux" => "zm",
+            "openadapter" => "oad",
+            "dit" => "dai",
+            "tokenrouter" => "trk",
+            "token-kiosk" => "tk",
+            "seekai" => "ska",
+            "perplexity" => "pplx",
+            "meta-llama" => "meta",
+            "nous-research" => "nous",
+            "arcee-ai" => "arcee",
+            "openference-api" => "ofa",
+            "hyperbolic" => "hyp",
+            "ollama-cloud" => "ollamacloud",
+            "huggingface" => "hf",
+            "lambda-ai" => "lambda",
+            "sambanova" => "samba",
+            "featherless-ai" => "featherless",
+            "friendliai" => "friendli",
+            "inference-net" => "inet",
+            "modelscope" => "ms",
+            "byteplus" => "bpm",
+            "modal" => "mdl",
+            "scaleway" => "scw",
+            "ovhcloud" => "ovh",
+            "glm-cn" => "glmcn",
+            "bailian-coding-plan" => "bcp",
+            "qwen-cloud" => "qwc",
+            "qwen-cloud-token-plan" => "qct",
+            "longcat" => "lc",
+            "volcengine-agent-plan" => "veap",
+            "volcengine-coding-plan" => "vecp",
+            "xiaomi-mimo" => "mimo",
+            "xiaomi-mimo-token-plan" => "mimotp",
+            "agnes-cn" => "agnescn",
+            "ant-ling" => "ling",
+            "pollinations" => "pol",
+            "v0-vercel" => "v0",
+            _ => self.slug,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1143,5 +1209,22 @@ mod tests {
             display_name("not a valid url", &Protocol::Anthropic),
             "Custom provider"
         );
+    }
+
+    #[test]
+    fn routing_slugs_are_valid_unique_and_non_combo() {
+        let mut slugs = std::collections::BTreeSet::new();
+        for preset in PRESETS {
+            let slug = preset.routing_slug();
+            assert!(
+                slug.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            );
+            assert!(slugs.insert(slug), "duplicate routing slug {slug}");
+            assert!(!slug.starts_with("combo/"));
+        }
+        assert_eq!(slugs.len(), 171);
+        assert_eq!(find("openrouter").unwrap().routing_slug(), "openrouter");
+        assert_eq!(find("deepseek").unwrap().routing_slug(), "ds");
     }
 }

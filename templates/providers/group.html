@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block nav_providers %} aria-current="page"{% endblock %}
 {% block title %}{{ name }}{% endblock %}
 {% block main_class %}provider-page{% endblock %}
 {% block topbar_heading %}
@@ -25,6 +26,7 @@
     {% if is_custom %}<span class="badge">Custom</span>{% endif %}
   </header>
   <dl class="provider-details-grid">
+    <div><dt>Routing slug</dt><dd><code>{{ slug }}</code></dd></div>
     <div>
       <dt>Base URL</dt>
       <dd><code>{{ base_url }}</code></dd>
@@ -34,6 +36,7 @@
       <dd><code>{{ protocol }}</code></dd>
     </div>
   </dl>
+  <p class="hint">Direct model ID: <code>{{ slug }}/&lt;upstream-model-id&gt;</code>. Requests stay within this provider; its enabled connections are tried oldest first. Combo steps use upstream IDs without this prefix.</p>
   {% if is_custom %}
   <p class="hint">Deleting this provider also deletes its connections. Remove any linked combo steps first.</p>
   {% endif %}
@@ -46,12 +49,6 @@
 <p class="empty">No connections for this endpoint yet. Use Add connection to get started.</p>
 {% else %}
 <span class="visually-hidden" id="copy-status" role="status" aria-live="polite"></span>
-<dialog id="model-info-dialog" class="model-info-dialog" aria-labelledby="model-info-heading">
-  <form method="dialog" class="model-info-close">
-    <button type="submit" class="btn" aria-label="Close model details"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#x"></use></svg>Close</button>
-  </form>
-  <div class="model-info-body"></div>
-</dialog>
 <div class="connection-list">
   {% for provider in providers %}
   <article class="card connection-row">

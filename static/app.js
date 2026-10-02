@@ -61,25 +61,6 @@ async function copyModelId(button) {
 document.body.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy-model]");
   if (button) copyModelId(button);
-  const info = event.target.closest("[data-model-info]");
-  if (info) openModelInfo(info);
-});
-
-function openModelInfo(button) {
-  const source = button.closest(".model-card")?.querySelector(".model-info-source");
-  const dialog = document.getElementById("model-info-dialog");
-  const body = dialog?.querySelector(".model-info-body");
-  if (!source || !dialog || !body || typeof dialog.showModal !== "function") return;
-  const details = source.cloneNode(true);
-  details.hidden = false;
-  const heading = details.querySelector("h2");
-  if (heading) heading.id = "model-info-heading";
-  body.replaceChildren(details);
-  if (!dialog.open) dialog.showModal();
-}
-
-document.getElementById("model-info-dialog")?.addEventListener("click", (event) => {
-  if (event.target.id === "model-info-dialog") event.target.close();
 });
 
 revealCopyButtons();

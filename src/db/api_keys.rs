@@ -199,9 +199,9 @@ fn validate_access(access: KeyAccess) -> Result<KeyAccess, AppError> {
     let mut normalized = BTreeSet::new();
     for model in models {
         let model = model.trim();
-        if model.is_empty() || model.chars().count() > 256 || model.chars().any(char::is_control) {
+        if model.is_empty() || model.chars().count() > 321 || model.chars().any(char::is_control) {
             return Err(AppError::InvalidRequest(
-                "Allowed model IDs must be 1–256 characters without control characters".into(),
+                "Allowed model IDs must be 1–321 characters without control characters".into(),
             ));
         }
         if let Some(name) = model.strip_prefix("combo/")
@@ -399,7 +399,7 @@ mod tests {
         let pool = pool().await;
         for models in [
             vec![String::new()],
-            vec!["x".repeat(257)],
+            vec!["x".repeat(322)],
             vec!["has\0control".into()],
             vec!["combo/".into()],
             vec!["x".into(); 201],
@@ -432,7 +432,12 @@ mod tests {
             &pool,
             &crypto(),
             "Good",
-            KeyAccess::Selected(vec![" foo ".into(), "foo".into(), "Foo".into()]),
+            KeyAccess::Selected(vec![
+                " foo ".into(),
+                "foo".into(),
+                "Foo".into(),
+                "x".repeat(321),
+            ]),
             Expiry::Never,
         )
         .await
@@ -444,7 +449,14 @@ mod tests {
         else {
             panic!("selected policy expected");
         };
-        assert_eq!(models, ["Foo", "foo"]);
+        assert_eq!(models.len(), 3);
+        assert!(models.contains(&"Foo".to_owned()));
+        assert!(models.contains(&"foo".to_owned()));
+        assert!(models.contains(&"x".repeat(321)));
+        assert!(KeyAccess::Selected(vec!["x".repeat(321)]).allows(&"x".repeat(321)));
+        assert!(
+            !KeyAccess::Selected(vec!["x".repeat(321)]).allows(&format!("{}y", "x".repeat(321)))
+        );
     }
 
     #[tokio::test]

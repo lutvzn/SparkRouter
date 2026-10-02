@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}API keys{% endblock %}
+{% block nav_api_keys %} aria-current="page"{% endblock %}
 {% block main_class %}api-keys-page{% endblock %}
 {% block topbar_heading %}
 <div class="topbar-heading">
@@ -8,25 +9,39 @@
 </div>
 {% endblock %}
 {% block content %}
+<h2>Generate a key</h2>
 <form method="post" action="/api-keys" class="card">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-  <label for="name">Name</label>
-  <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. laptop">
-   <p class="hint">1&ndash;64 characters. The secret is shown only once. Dashboard login is separate.</p>
-   <label for="access">Access</label>
-   <select id="access" name="access"><option value="all">All combos and models</option><option value="selected">Only selected model IDs</option></select>
-   <label for="models">Allowed model IDs</label>
-   <textarea id="models" name="models" rows="4" placeholder="combo/coding&#10;openai/gpt-6-luna"></textarea>
-   <p class="hint">For selected access only: one exact, case-sensitive ID per line. No wildcards. Empty selected access denies all models. A combo permission covers its entire fallback chain, not direct access to its upstream models. Permissions follow names: renaming a combo requires updating this list.</p>
-   <details><summary>Currently available model IDs</summary><ul>{% for model in available_models %}<li><code>{{ model }}</code></li>{% endfor %}</ul><p class="hint">You may also enter IDs not yet configured.</p></details>
-   <label for="expiry">Expiry</label>
-   <select id="expiry" name="expiry"><option value="never">Never</option><option value="days">After a number of days</option></select>
-   <label for="expires-days">Days from now (when using expiry)</label>
-   <input id="expires-days" name="expires_days" type="number" min="1" max="3650" placeholder="e.g. 30">
+  <div class="grid2">
+    <div>
+      <label for="name">Name</label>
+      <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. laptop">
+      <p class="hint">1&ndash;64 characters. The secret is shown only once. Dashboard login is separate.</p>
+    </div>
+    <div>
+      <label for="access">Access</label>
+      <select id="access" name="access"><option value="all">All combos and models</option><option value="selected">Only selected model IDs</option></select>
+    </div>
+  </div>
+  <label for="models">Allowed model IDs</label>
+  <textarea id="models" name="models" rows="4" placeholder="combo/coding&#10;openrouter/openai/gpt-6-luna"></textarea>
+  <p class="hint">For selected access only: one exact, case-sensitive ID per line. No wildcards. Empty selected access denies all models. A combo permission covers its entire fallback chain, not direct access to its upstream models. Permissions follow names: renaming a combo requires updating this list.</p>
+  <details><summary>Currently available model IDs</summary><ul>{% for model in available_models %}<li><code>{{ model }}</code></li>{% endfor %}</ul><p class="hint">You may also enter IDs not yet configured.</p></details>
+  <div class="grid2">
+    <div>
+      <label for="expiry">Expiry</label>
+      <select id="expiry" name="expiry"><option value="never">Never</option><option value="days">After a number of days</option></select>
+    </div>
+    <div>
+      <label for="expires-days">Days from now (when using expiry)</label>
+      <input id="expires-days" name="expires_days" type="number" min="1" max="3650" placeholder="e.g. 30">
+    </div>
+  </div>
   <div class="form-actions">
     <button class="btn primary" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>
   </div>
 </form>
+<h2>Your keys</h2>
 {% if keys.is_empty() %}
 <p class="empty">No API keys yet. Until one is generated, <code>/v1</code> stays open unless <code>ROUTER_API_KEY</code> is set.</p>
 {% else %}

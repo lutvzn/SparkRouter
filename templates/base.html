@@ -11,16 +11,17 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#content">Skip to content</a>
   <aside class="sidebar">
     <div class="brand"><a href="/">{{ app_name }}</a></div>
     <nav aria-label="Dashboard">
-      <a href="/providers"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#server"></use></svg>Providers</a>
-      <a href="/combos"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#layers"></use></svg>Combos</a>
-      <a href="/api-keys"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#key"></use></svg>API keys</a>
-      <a href="/test"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#flask-conical"></use></svg>test</a>
-      <a href="/history">History</a>
-      <a href="/configuration">Configuration</a>
-      <a href="/logout">Log out</a>
+      <a href="/providers"{% block nav_providers %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#server"></use></svg>Providers</a>
+      <a href="/combos"{% block nav_combos %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#layers"></use></svg>Combos</a>
+      <a href="/api-keys"{% block nav_api_keys %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#key"></use></svg>API keys</a>
+      <a href="/test"{% block nav_test %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#flask-conical"></use></svg>Test chat</a>
+      <a href="/history"{% block nav_history %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#clock"></use></svg>History</a>
+      <a href="/configuration"{% block nav_configuration %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#layers"></use></svg>Configuration</a>
+      <a href="/logout"{% block nav_logout %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#log-out"></use></svg>Log out</a>
     </nav>
   </aside>
   <div class="dashboard-content">
@@ -28,7 +29,7 @@
 {% block topbar_heading %}{% endblock %}
       <button id="theme-toggle" type="button" class="btn theme-toggle" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#moon"></use></svg><span class="btn-label">Theme: Light</span></button>
     </header>
-    <main class="{% block main_class %}{% endblock %}">
+    <main id="content" tabindex="-1" class="{% block main_class %}{% endblock %}">
       <p id="action-error" class="test fail" role="alert" hidden></p>
 {% block content %}{% endblock %}
     </main>

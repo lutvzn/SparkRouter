@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{% if is_edit %}Edit connection{% else %}Add custom connection{% endif %}{% endblock %}
+{% block nav_providers %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>{% if is_edit %}Edit connection{% else %}Add custom connection{% endif %}</h1><p class="topbar-subtitle">Configure a named upstream connection and its routing availability.</p></div>{% endblock %}
 {% block content %}
-<h1>{% if is_edit %}Edit connection{% else %}Add custom connection{% endif %}</h1>
 <form method="post" action="{{ action }}" class="card">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <label for="name">Connection name</label>

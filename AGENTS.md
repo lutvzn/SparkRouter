@@ -59,9 +59,12 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   at most once per request. Round robin advances once per request, not per retry.
   Permanent client/upstream request
   errors stop the chain; retry classification belongs in the routing helper.
-  `combo/<name>` is always a combo. Any other model ID is sent unchanged to
-  enabled connections whose last refresh listed it, oldest first, with the same
-  once-each fallback. A missing model list never blocks a combo step.
+  `combo/<name>` is always a combo. Direct public IDs are
+  `<provider-slug>/<upstream-model-id>`; strip only the first prefix and preserve
+  the complete upstream suffix. Try enabled connections within that provider
+  whose last refresh listed it, oldest first, with once-each fallback. Never
+  cross provider slugs or treat raw IDs as aliases. Combo steps retain upstream
+  IDs unchanged. A missing model list never blocks a combo step.
 - **Never fall back after a streaming response has been returned to Axum.**
   Before commitment, adapters may report a retryable failure. After commitment,
   interruptions terminate the body; do not synthesize a successful ending.

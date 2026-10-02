@@ -371,6 +371,25 @@ async fn export_excludes_secrets_and_round_trips_under_a_new_master_key() {
         .find(|summary| summary.group.name == "Work <LLM>")
         .expect("work group");
     assert_eq!(work.group.base_url, "https://work.example/v1");
+    let source_slug = db::provider_slugs::for_group(
+        &source.db,
+        &db::provider_groups::list(&source.db)
+            .await
+            .unwrap()
+            .iter()
+            .find(|summary| summary.group.name == "Work <LLM>")
+            .unwrap()
+            .group
+            .id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::provider_slugs::for_group(&target.db, &work.group.id)
+            .await
+            .unwrap(),
+        source_slug
+    );
     assert_ne!(work.group.id, empty.group.id);
     let solo = groups
         .iter()
@@ -450,6 +469,60 @@ async fn export_excludes_secrets_and_round_trips_under_a_new_master_key() {
         steps
             .iter()
             .all(|step| imported_ids.contains(step.provider_id.as_str()))
+    );
+}
+
+#[tokio::test]
+async fn imported_slugs_suffix_conflicts_and_invalid_slugs_roll_back() {
+    let target = state_with(TARGET_KEY).await;
+    let existing = db::provider_groups::create(
+        &target.db,
+        "Existing",
+        "https://existing.example/v1",
+        &Protocol::OpenAi,
+    )
+    .await
+    .unwrap();
+    let document = json!({
+        "version": 1,
+        "groups": [{"id":"g", "name":"Group", "slug":"existing", "base_url":"https://g.example/v1", "protocol":"openai"}],
+        "connections": [], "combos": []
+    }).to_string();
+    db::config_transfer::apply(&target.db, &document, &|_, _| false)
+        .await
+        .unwrap();
+    let groups = db::provider_groups::list(&target.db).await.unwrap();
+    let imported = groups
+        .iter()
+        .find(|group| group.group.name == "Group")
+        .unwrap();
+    assert_eq!(
+        db::provider_slugs::for_group(&target.db, &imported.group.id)
+            .await
+            .unwrap(),
+        "existing-2"
+    );
+
+    let before = groups.len();
+    let invalid = json!({
+        "version": 1,
+        "groups": [{"id":"bad", "name":"Bad", "slug":"combo", "base_url":"https://bad.example/v1", "protocol":"openai"}],
+        "connections": [], "combos": []
+    }).to_string();
+    assert!(
+        db::config_transfer::apply(&target.db, &invalid, &|_, _| false)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        db::provider_groups::list(&target.db).await.unwrap().len(),
+        before
+    );
+    assert_eq!(
+        db::provider_slugs::for_group(&target.db, &existing.id)
+            .await
+            .unwrap(),
+        "existing"
     );
 }
 

@@ -723,11 +723,26 @@ async fn direct_model_records_each_refreshed_connection_attempt() -> TestResult 
     .await?;
     remember_model(&state, "prov-one", "openai/gpt-6-luna").await?;
     remember_model(&state, "prov-two", "openai/gpt-6-luna").await?;
+    let group = sparkrouter::db::provider_groups::create_with_slug(
+        &state.db,
+        "History provider",
+        &first.url(),
+        &Protocol::OpenAi,
+        Some("history-provider"),
+    )
+    .await?;
+    for id in ["prov-one", "prov-two"] {
+        sqlx::query("INSERT INTO provider_group_connections (provider_id, group_id) VALUES (?, ?)")
+            .bind(id)
+            .bind(&group.id)
+            .execute(&state.db)
+            .await?;
+    }
 
     // Surrounding whitespace is trimmed by the endpoint; the record keeps the
     // trimmed model id the client asked for, not the step's substituted id.
     let body = json!({
-        "model": " openai/gpt-6-luna ",
+        "model": " history-provider/openai/gpt-6-luna ",
         "messages": [{"role": "user", "content": "hello"}],
     });
     let response = send(&state, chat_request(&body)).await;
@@ -735,7 +750,7 @@ async fn direct_model_records_each_refreshed_connection_attempt() -> TestResult 
 
     let row = single_record(&state).await;
     assert_eq!(row.source, "api");
-    assert_eq!(row.model, "openai/gpt-6-luna");
+    assert_eq!(row.model, "history-provider/openai/gpt-6-luna");
     assert!(!row.streaming);
     assert_eq!(row.outcome, "success");
     assert_eq!(row.status, 200);

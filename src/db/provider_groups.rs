@@ -138,6 +138,16 @@ pub async fn create(
     base_url: &str,
     protocol: &Protocol,
 ) -> Result<CustomGroup, AppError> {
+    create_with_slug(pool, name, base_url, protocol, None).await
+}
+
+pub async fn create_with_slug(
+    pool: &SqlitePool,
+    name: &str,
+    base_url: &str,
+    protocol: &Protocol,
+    slug: Option<&str>,
+) -> Result<CustomGroup, AppError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(AppError::InvalidRequest(
@@ -150,8 +160,10 @@ pub async fn create(
         base_url: crate::providers::normalize_base_url(base_url.trim())?,
         protocol: *protocol,
     };
-    let mut connection = pool.acquire().await?;
-    insert_group(&mut connection, &group).await?;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    insert_group(&mut transaction, &group).await?;
+    super::provider_slugs::assign(&mut transaction, &group.id, &group.name, slug, false).await?;
+    transaction.commit().await?;
     Ok(group)
 }
 
@@ -321,6 +333,7 @@ pub async fn save_legacy_connection(
             protocol: provider.protocol,
         };
         insert_group(&mut transaction, &group).await?;
+        super::provider_slugs::assign(&mut transaction, &group.id, &group.name, None, true).await?;
         group
     };
     insert_connection(&mut transaction, &group, provider, true).await?;

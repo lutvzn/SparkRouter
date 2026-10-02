@@ -70,6 +70,7 @@ on process restart and dashboard deletion removes the combo's cursor.
 | `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
+| `provider_slugs` | Custom group ID with cascading deletion; unique saved public slug (1–64 lowercase letters/digits/hyphens) |
 | `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope, restricted flag, optional Unix expiry timestamp |
 | `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
 
@@ -78,7 +79,12 @@ reference it. An index supports provider-reference lookups. There is no models
 table or provider-specific vendor metadata.
 
 Combo names are case-sensitive, 1–64 ASCII letters/digits or `-`, `_`, `.`.
-Model strings are trimmed, nonempty, and at most 256 characters. Stored step
+Upstream model strings are trimmed, nonempty, and at most 256 characters. Public
+direct IDs allow 321 characters (64-character slug, slash, 256-character model).
+New migrations preserve existing scope/history rows while extending public-ID
+limits; startup assigns legacy custom groups unique slugs in one immediate
+transaction. Slug generation reserves built-in aliases and the combo namespace.
+Stored step
 positions are zero-based; the dashboard displays one-based numbers.
 
 Step mutations use `BEGIN IMMEDIATE`, taking the SQLite write lock before
@@ -123,8 +129,11 @@ generations. Updates serialize the flag, expiry, and allowlist in an immediate
 transaction without changing key fingerprints or reveal envelopes.
 Model listing returns configured combos as
 `combo/<name>`, including empty combos and those with no enabled provider.
-It also returns each distinct model ID from the last refresh of an enabled
-connection. IDs that start with `combo/` are not listed as direct models.
+It also returns distinct `<provider-slug>/<upstream-model-id>` IDs from enabled
+connections' last refresh. Preset namespaces use OmniRoute's default aliases;
+custom namespaces are persisted independently of credentials or connection names.
+Model listings, dashboard Copy buttons, and key scopes use these same public IDs.
+Old raw direct scopes are not rewritten; operators must update them explicitly.
 
 For chat requests:
 
@@ -132,16 +141,19 @@ For chat requests:
    string, and a boolean `stream` if supplied. `combo/<name>` selects a combo.
    Any other ID is a direct model.
 2. Combo requests look up the combo by name and load steps in ascending position
-   order. Direct requests load connections whose stored model list contains that
-   exact ID, oldest connection first. A missing list is not a direct target.
+    order. Direct requests split off the first provider slug and load only its
+    connections whose list contains the remaining upstream ID, oldest first.
+    Custom membership overrides endpoint/preset matching. A missing list is not
+    a direct target. Unassigned non-preset rows get reserved connection namespaces.
 3. Priority uses configured order. Round robin and Random snapshot enabled steps
    before selecting a starting step; disabled or concurrently removed providers
    are skipped and do not consume turns. Providers are rechecked before attempts.
 4. Clone the request for the attempt and replace `model` with the step's actual
-   upstream model. A direct request already carries that ID, so the replacement
-   is the same string. Let the selected protocol adapter prepare and send it.
+    upstream model. Direct requests replace the public ID with its complete
+    upstream suffix, preserving additional slashes. Let the adapter send it.
 5. Return the first successful response. Retryable failures advance to the next
-   combo step or matching connection; permanent errors stop the chain immediately.
+    combo step or matching connection within the same provider slug; permanent
+    errors stop the chain immediately. No direct fallback crosses provider slugs.
    Round robin reserves one
    starting turn per request, shared by all handlers; retries do not advance it
    again. Random uses OS randomness with rejection sampling to avoid modulo bias.
@@ -244,6 +256,9 @@ Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matchin
 combo pages. POST actions handle create/edit/delete, connection tests, model-list refresh, and step
 add/edit/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
 forms generally use 303 redirects back to GET pages. There is no SPA state store.
+The shared shell renders page headings and the current navigation section on the
+server. One embedded stylesheet supplies light/dark design tokens, reusable
+controls, focus indicators, and responsive layout; no frontend build is needed.
 `POST /combos/{id}/duplicate` requires dashboard CSRF/origin checks and copies
 the combo and its ordered steps in one immediate transaction. A unique copy
 name and fresh combo/step IDs are allocated; provider connection IDs are reused.
@@ -255,6 +270,8 @@ and `/providers/groups/{id}` show named connections and an add-connection popup.
 The popup uses native HTML popover controls, retaining ordinary POST forms and
 CSRF fields without inline scripts or a JavaScript dependency. Browsers without
 popover support display the form inline.
+Model details also use native popovers with unique connection/model targets;
+opening, closing, Escape, and focus handling require no custom dialog script.
 Custom providers are stored separately from their connections. `POST
 /providers/custom` creates a named, empty provider from its name, base URL, and
 protocol; its card remains after the last connection is deleted. Membership is

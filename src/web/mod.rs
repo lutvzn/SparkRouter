@@ -11,7 +11,7 @@ pub(crate) mod auth;
 mod combos;
 mod config_transfer;
 mod history;
-mod provider_catalog;
+pub(crate) use crate::provider_catalog;
 mod providers;
 mod test;
 

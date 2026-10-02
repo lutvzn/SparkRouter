@@ -6,6 +6,7 @@ pub mod combos;
 pub mod config_transfer;
 pub mod connection_models;
 pub mod provider_groups;
+pub mod provider_slugs;
 pub mod providers;
 pub mod request_history;
 
@@ -50,6 +51,7 @@ pub async fn connect(url: &str) -> Result<SqlitePool, AppError> {
         .await?;
 
     sqlx::migrate!().run(&pool).await?;
+    provider_slugs::initialize(&pool).await?;
 
     Ok(pool)
 }

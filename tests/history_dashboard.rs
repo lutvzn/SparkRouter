@@ -232,7 +232,7 @@ async fn save_is_transactional_and_rejects_oversize_values() {
     assert_eq!(attempts, 0, "a failed save stores no attempts");
 
     // Oversize or empty metadata fails validation before any write.
-    let mut long_model = record("long-model", &"m".repeat(257));
+    let mut long_model = record("long-model", &"m".repeat(322));
     long_model.attempts = vec![attempt("p", "One", 0, "success")];
     assert!(matches!(
         history::save(&pool, &long_model).await,

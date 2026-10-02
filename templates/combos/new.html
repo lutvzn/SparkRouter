@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Add combo{% endblock %}
+{% block nav_combos %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>Add combo</h1><p class="topbar-subtitle">Create an ordered route with fallback connections.</p></div>{% endblock %}
 {% block content %}
-<h1>Add combo</h1>
 <form method="post" action="/combos" class="card">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <label for="name">Name</label>

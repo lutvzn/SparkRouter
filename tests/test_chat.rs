@@ -368,8 +368,23 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
     combos::create(&state.db, "writing").await?;
 
     let page = get_page(&state, "/test").await;
+    assert!(page.contains("href=\"#content\""));
+    assert!(page.contains("<main id=\"content\" tabindex=\"-1\""));
+    assert_eq!(page.matches("<h1>").count(), 1);
+    let topbar_start = page.find("<header class=\"topbar\">").expect("topbar");
+    let topbar_end = topbar_start
+        + page[topbar_start..]
+            .find("</header>")
+            .expect("topbar closing");
+    assert!(page[topbar_start..topbar_end].contains("<h1>Test chat</h1>"));
+    let nav_start = page
+        .find("<nav aria-label=\"Dashboard\">")
+        .expect("dashboard nav");
+    let nav_end = nav_start + page[nav_start..].find("</nav>").expect("nav closing");
+    let sidebar_nav = &page[nav_start..nav_end];
+    assert_eq!(sidebar_nav.matches("aria-current=\"page\"").count(), 1);
 
-    // The sidebar links the playground with a visible "test" label and the
+    // The sidebar links the playground with a visible "Test chat" label and the
     // local icon sprite.
     let sidebar_open = page
         .find("<aside class=\"sidebar\">")
@@ -383,7 +398,7 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
         .expect("the sidebar must link the test playground");
     let label = strip_tags(test_link);
     assert!(
-        label.to_lowercase().contains("test"),
+        label.contains("Test chat"),
         "sidebar link label was {label:?}"
     );
     assert!(

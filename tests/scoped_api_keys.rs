@@ -127,7 +127,7 @@ async fn allowing_a_combo_covers_ordered_fallback_but_not_its_direct_targets() {
             &state,
             "/v1/chat/completions",
             issued.secret.expose_secret(),
-            Some(json!({"model":"direct-model"}))
+            Some(json!({"model":"connection-provider/direct-model"}))
         )
         .await
         .0,
@@ -245,7 +245,10 @@ async fn exact_scopes_filter_models_and_stop_unauthorized_json_streams_and_test_
         &state.db,
         &state.crypto,
         "App",
-        KeyAccess::Selected(vec!["combo/allowed".into(), "direct-model".into()]),
+        KeyAccess::Selected(vec![
+            "combo/allowed".into(),
+            "connection-provider/direct-model".into(),
+        ]),
         Expiry::Never,
     )
     .await
@@ -260,13 +263,15 @@ async fn exact_scopes_filter_models_and_stop_unauthorized_json_streams_and_test_
             .iter()
             .map(|v| v["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["combo/allowed", "direct-model"]
+        ["combo/allowed", "connection-provider/direct-model"]
     );
     for model in [
         "combo/denied",
         "combo/allowed-copy",
         "combo/Allowed",
-        "other-model",
+        "connection-provider/other-model",
+        "direct-model",
+        "retry/first-target",
         "inner-model",
         "does-not-exist",
     ] {
@@ -301,7 +306,7 @@ async fn exact_scopes_filter_models_and_stop_unauthorized_json_streams_and_test_
         &state,
         "/v1/chat/completions",
         token,
-        Some(json!({"model":"direct-model","stream":true})),
+        Some(json!({"model":"connection-provider/direct-model","stream":true})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -309,6 +314,95 @@ async fn exact_scopes_filter_models_and_stop_unauthorized_json_streams_and_test_
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["attempts"].as_array().unwrap().len(), 1);
     assert_eq!(upstream.hits.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn direct_model_scopes_are_isolated_by_provider_slug() {
+    let state = state().await;
+    let upstream = mock().await;
+    seed(&state, &upstream).await;
+    let other = db::providers::Provider {
+        id: "other".into(),
+        name: "Other".into(),
+        base_url: upstream.url.clone(),
+        protocol: Protocol::OpenAi,
+        encrypted_api_key: vec![],
+        enabled: true,
+    };
+    db::providers::save(&state.db, &other).await.unwrap();
+    let group = db::provider_groups::create_with_slug(
+        &state.db,
+        "Other group",
+        &upstream.url,
+        &Protocol::OpenAi,
+        Some("provider2"),
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO provider_group_connections (provider_id, group_id) VALUES (?, ?)")
+        .bind("other")
+        .bind(group.id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    for provider in ["provider", "other"] {
+        db::connection_models::replace(
+            &state.db,
+            provider,
+            &[db::connection_models::StoredModel {
+                id: "openai/gpt-6-luna".into(),
+                name: "model".into(),
+                fields: vec![],
+                free: false,
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let issued = api_keys::create_with_policy(
+        &state.db,
+        &state.crypto,
+        "Only one provider",
+        KeyAccess::Selected(vec!["connection-provider/openai/gpt-6-luna".into()]),
+        Expiry::Never,
+    )
+    .await
+    .unwrap();
+    let (status, list) = request(&state, "/v1/models", issued.secret.expose_secret(), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["connection-provider/openai/gpt-6-luna"]
+    );
+    assert_eq!(
+        request(
+            &state,
+            "/v1/chat/completions",
+            issued.secret.expose_secret(),
+            Some(json!({"model":"provider2/openai/gpt-6-luna"}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            &state,
+            "/v1/chat/completions",
+            issued.secret.expose_secret(),
+            Some(json!({"model":"openai/gpt-6-luna"}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(upstream.hits.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -417,7 +511,10 @@ async fn policy_edits_are_atomic_keep_secrets_and_empty_selected_never_means_all
     let path = format!("/api-keys/{}/policy", issued.id);
     let fields = [
         ("access", "selected"),
-        ("models", "combo/allowed\ndirect-model\ncombo/allowed"),
+        (
+            "models",
+            "combo/allowed\nconnection-provider/direct-model\ncombo/allowed",
+        ),
         ("expiry", "keep"),
     ];
     assert_eq!(

@@ -1,20 +1,20 @@
-//! Route a request by the upstream model ID itself.
+//! Route a request by its provider-prefixed public model ID.
 //!
 //! `combo/<name>` stays on the combo path. Any other model is looked up in the
-//! last refreshed connection lists and sent, unchanged, to each enabled
-//! connection that listed it. Oldest connection first. The retry policy matches
+//! last refreshed connection lists within that provider. Only the upstream
+//! suffix is sent to enabled connections, oldest first. The retry policy matches
 //! combos: each connection at most once, and a permanent error stops the chain.
 
 use crate::{
     app::AppState,
-    db::{connection_models, providers as provider_db},
+    db::{connection_models, provider_slugs},
     error::AppError,
     providers::{self, AttemptError},
 };
 use axum::response::Response;
 use serde_json::Value;
 
-const MAX_MODEL_CHARS: usize = 256;
+const MAX_MODEL_CHARS: usize = crate::db::provider_slugs::MAX_PUBLIC_MODEL_CHARS;
 
 pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Response, AppError> {
     route_inner(state, model, body, None).await
@@ -35,20 +35,41 @@ async fn route_inner(
     body: &Value,
     mut attempts: Option<&mut Vec<super::combo::AttemptTrace>>,
 ) -> Result<Response, AppError> {
-    let model = validate_model(model)?;
-    let provider_ids = connection_models::providers_for_model(&state.db, &model).await?;
+    let public_model = validate_model(model)?;
+    let (slug, upstream_model) = public_model.split_once('/').ok_or_else(|| {
+        AppError::NotFound(
+            "direct models require a provider slug; use an ID from /v1/models".into(),
+        )
+    })?;
+    if slug.is_empty()
+        || slug.len() > crate::db::provider_slugs::MAX_SLUG_CHARS
+        || upstream_model.is_empty()
+        || upstream_model.chars().count() > 256
+    {
+        return Err(AppError::InvalidRequest(
+            "model must be <provider-slug>/<upstream-model-id>".into(),
+        ));
+    }
+    let model = upstream_model.to_owned();
+    let provider_ids =
+        connection_models::providers_for_public_model(&state.db, slug, &model).await?;
     if provider_ids.is_empty() {
         return Err(AppError::NotFound(format!(
-            "no connection lists model '{model}'"
+            "no connection lists public model '{public_model}'"
         )));
     }
     for (index, provider_id) in provider_ids.into_iter().enumerate() {
-        let provider = match provider_db::get(&state.db, &provider_id).await {
-            Ok(provider) => provider,
-            // A refresh snapshot can outlive a connection deleted mid-request.
-            Err(AppError::NotFound(_)) => continue,
-            Err(error) => return Err(error),
-        };
+        let (provider, namespace) =
+            match provider_slugs::connection(&state.db, &provider_id).await? {
+                Some(provider) => provider,
+                // A refresh snapshot can outlive a connection deleted mid-request.
+                None => continue,
+            };
+        // Endpoint edits can change an unassigned connection's namespace.
+        // Validate the namespace from the same snapshot as its credentials/URL.
+        if namespace != slug {
+            continue;
+        }
         if !provider.enabled {
             tracing::debug!(provider = %provider.id, model = %model, "disabled provider skipped");
             continue;
@@ -118,7 +139,7 @@ fn validate_model(model: &str) -> Result<String, AppError> {
         || model.chars().any(char::is_control)
     {
         return Err(AppError::InvalidRequest(
-            "model must be combo/<name> or a provider model id of at most 256 characters".into(),
+            "model must be combo/<name> or <provider-slug>/<upstream-model-id> (up to 321 characters)".into(),
         ));
     }
     Ok(model.to_owned())

@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Edit combo {{ combo_name }}{% endblock %}
+{% block main_class %}combo-page{% endblock %}
+{% block nav_combos %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>Combo <code>{{ combo_name }}</code></h1><p class="topbar-subtitle">Configure the strategy and ordered fallback steps for this combo.</p></div>{% endblock %}
 {% block content %}
-<div class="page-head">
-  <h1>Combo <code>{{ combo_name }}</code></h1>
-</div>
 <form method="post" action="/combos/{{ combo_id }}" class="card">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <label for="name">Name</label>
@@ -32,7 +32,7 @@
 {% if providers.is_empty() %}
 <p class="empty">No connections configured. <a href="/providers">Add a connection</a> first.</p>
 {% else %}
-<form method="post" action="/combos/{{ combo_id }}/steps" class="card" data-step-picker hx-post="/combos/{{ combo_id }}/steps" hx-target="#combo-steps" hx-swap="innerHTML">
+<form method="post" action="/combos/{{ combo_id }}/steps" class="card step-form" data-step-picker hx-post="/combos/{{ combo_id }}/steps" hx-target="#combo-steps" hx-swap="innerHTML">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <div class="grid3">
     <div>

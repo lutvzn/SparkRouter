@@ -250,11 +250,30 @@ pub async fn providers_for_model(
     rows.iter().map(|row| Ok(row.try_get("id")?)).collect()
 }
 
-/// Distinct model IDs on at least one enabled connection, in ID order.
-/// IDs starting with `combo/` are omitted; that prefix is reserved for combos.
+/// Connections listing this public provider/model ID, oldest first. The prefix
+/// is removed exactly once; slashes inside the upstream model stay unchanged.
+pub async fn providers_for_public_model(
+    pool: &SqlitePool,
+    slug: &str,
+    upstream_model: &str,
+) -> Result<Vec<String>, AppError> {
+    let namespaces = super::provider_slugs::for_connections(pool).await?;
+    Ok(providers_for_model(pool, upstream_model)
+        .await?
+        .into_iter()
+        .filter(|id| {
+            namespaces
+                .get(id)
+                .is_some_and(|namespace| namespace == slug)
+        })
+        .collect())
+}
+
+/// Distinct provider-prefixed public IDs on enabled connections, in ID order.
 pub async fn routable_model_ids(pool: &SqlitePool) -> Result<Vec<String>, AppError> {
+    let namespaces = super::provider_slugs::for_connections(pool).await?;
     let rows = sqlx::query(
-        "SELECT DISTINCT m.model_id
+        "SELECT m.provider_id, m.model_id
          FROM connection_models m
          JOIN providers p ON p.id = m.provider_id
          WHERE p.enabled != 0
@@ -262,14 +281,15 @@ pub async fn routable_model_ids(pool: &SqlitePool) -> Result<Vec<String>, AppErr
     )
     .fetch_all(pool)
     .await?;
-    let mut ids = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
     for row in rows {
+        let provider_id: String = row.try_get("provider_id")?;
         let id: String = row.try_get("model_id")?;
-        if !id.starts_with("combo/") {
-            ids.push(id);
+        if let Some(slug) = namespaces.get(&provider_id) {
+            ids.insert(format!("{slug}/{id}"));
         }
     }
-    Ok(ids)
+    Ok(ids.into_iter().collect())
 }
 
 /// Lists for the given connections. Missing keys were never refreshed.
@@ -518,7 +538,29 @@ mod tests {
         );
         assert_eq!(
             routable_model_ids(&pool).await.unwrap(),
-            vec!["openai/gpt-6-luna".to_owned()]
+            vec![
+                "connection-newer/combo/not-a-combo".to_owned(),
+                "connection-newer/openai/gpt-6-luna".to_owned(),
+                "connection-older/openai/gpt-6-luna".to_owned(),
+            ]
+        );
+        assert_eq!(
+            providers_for_public_model(&pool, "connection-older", "openai/gpt-6-luna")
+                .await
+                .unwrap(),
+            vec!["older"]
+        );
+        assert_eq!(
+            providers_for_public_model(&pool, "connection-off", "openai/gpt-6-luna")
+                .await
+                .unwrap(),
+            vec!["off"]
+        );
+        assert!(
+            providers_for_public_model(&pool, "unknown", "openai/gpt-6-luna")
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

@@ -1,13 +1,13 @@
 {% if steps.is_empty() %}
 <p class="empty">No steps yet. Add the first fallback connection below.</p>
 {% else %}
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Combo steps"><table>
   <thead>
     <tr>
-      <th>#</th>
-      <th>Provider / connection</th>
-      <th>Model</th>
-      <th class="actions">Actions</th>
+      <th scope="col">#</th>
+      <th scope="col">Provider / connection</th>
+      <th scope="col">Model</th>
+      <th scope="col" class="actions">Actions</th>
     </tr>
   </thead>
   <tbody>
@@ -49,5 +49,5 @@
     </td></tr>
     {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% endif %}

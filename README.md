@@ -38,11 +38,16 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 Open **http://127.0.0.1:8080/providers**:
 
-Use the left sidebar to switch between **Providers**, **Combos**, **API keys**, **test**, **History**, and **Configuration**.
+Use the sidebar to switch between **Providers**, **Combos**, **API keys**, **Test chat**, **History**, and **Configuration**. Navigation wraps above the page on smaller screens.
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
 Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
 font dependency. Their license is included at `/static/icons-LICENSE.txt`.
+The dashboard shares simple forms, buttons, and keyboard focus indicators across
+pages. Navigation and page headings render on the server; connection and model
+detail popovers use native HTML, with no JavaScript needed to open or close them.
+JavaScript enhances partial updates, search, copy, step pickers, and test chat;
+management forms still work with ordinary submissions when it is disabled.
 
 1. Select the **OpenRouter** provider tile, click **Add connection**, give the connection a name (such as
    `Personal`), and add its API key. Add more named connections on the same page.
@@ -54,7 +59,8 @@ font dependency. Their license is included at `/static/icons-LICENSE.txt`.
 3. Open **Combos**, create `coding`, and add provider/model steps in preference order.
 4. Choose a **provider**, then one of its **connections**, for each step and use the up/down
    buttons to change fallback order. Enter model IDs exactly as your upstream
-    accepts them. Keys within a provider are not automatically rotated or retried.
+     accepts them. Each combo step targets one connection; it does not implicitly
+     rotate or retry other keys within that provider.
 
 Use **Edit** immediately before **Remove** to open a step's inline connection/model editor. Saving
 keeps its ID and fallback position; refreshed model suggestions are optional.
@@ -70,7 +76,7 @@ and opens it for editing. Copies are named `<name>-copy`, then `<name>-copy-2`,
 and so on; long names are shortened to keep the 64-character limit. Existing
 connections are reused, not duplicated, and the selected strategy is preserved.
 
-Open **test** (`/test`) to chat with a combo and inspect the actual routing attempts:
+Open **Test chat** (`/test`) to chat with a combo and inspect the actual routing attempts:
 connection name, upstream model, configured step number, outcome, and latency.
 Retryable failures and the selected target appear in request order, including
 when a request fails. Tests use the same routing and round-robin state as API
@@ -96,8 +102,8 @@ Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and mod
 ### Scoped gateway API keys
 
 Choose **Only selected model IDs** when generating a key, then enter one exact
-public ID per line, for example `combo/coding` or `openai/gpt-6-luna`. Up to 200
-IDs are allowed per key; IDs are case-sensitive, trimmed, and have no wildcard or
+public ID per line, for example `combo/coding` or `openrouter/openai/gpt-6-luna`. Up to 200
+IDs (up to 321 characters each) are allowed per key; IDs are case-sensitive, trimmed, and have no wildcard or
 prefix semantics. Empty selected access deliberately permits no models. IDs need
 not exist yet. An allowed combo authorizes its entire configured fallback chain,
 but does not grant direct access to those steps' upstream models. Permissions
@@ -117,14 +123,23 @@ already-started requests or streams. Expired keys still keep authentication
 enabled until explicitly revoked. Revoking the last key reopens the API only
 when `ROUTER_API_KEY` is also unset.
 
-A refreshed connection model can also be called by its upstream ID, with no combo:
+A refreshed model can also be called directly using **`<provider-slug>/<upstream-model-id>`**, with no combo:
 
 ```sh
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer $ROUTER_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"openai/gpt-6-luna","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"openrouter/openai/gpt-6-luna","messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+For example, `provider1/openai/gpt-6-luna` and `provider2/openai/gpt-6-luna`
+are separate targets even when both providers list the same upstream model.
+The gateway removes only the provider prefix before sending the request.
+
+**Upgrade note:** old raw direct IDs are no longer aliases. Update client model
+settings and exact API-key allowlists using `/v1/models` or the model-card Copy
+button. Existing scopes are not automatically rewritten or broadened. Combos
+and their upstream step model IDs are unchanged.
 
 ## Configuration
 
@@ -146,7 +161,18 @@ Providers are configuration, not vendor-specific implementations. The dashboard 
 
 The **Anthropic** protocol uses `https://api.anthropic.com/v1` and translates Chat Completions to `/messages`, including text, system instructions, tools, and streaming. Vendor-specific protocol limitations are described below.
 
-The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** on a connection stores that list. Open the model dropdown on the connection to search names and IDs. Cards also show a grouped context size as `ctx` when the provider returns one, a green free tag when that model is free, and a button to copy the model ID. The combo editor suggests those IDs, and you can still type any model. Some compatible servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
+Provider detail pages show their **Routing slug**. Built-in defaults use the
+OmniRoute catalog's routing aliases where available, such as `openrouter`,
+`groq`, and `ds` (DeepSeek); dashboard preset URLs keep their existing names.
+Custom providers may specify a slug at creation or leave it blank for a saved,
+lowercase slug derived from their name. Slugs are 1–64 lowercase letters,
+digits, or hyphens, without leading/trailing hyphens. Generated collisions get
+`-2`, `-3`, etc. Preset names/aliases, `combo`, and `connection-` prefixes are
+reserved. Existing custom providers receive saved slugs on startup without
+changing credentials or combo references. Ungrouped non-preset connections use
+a reserved connection-specific namespace.
+
+The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** stores that list. Model cards show and copy the provider-prefixed **public ID**; model details also show the **upstream ID** used by combo steps. Cards support search, context size (`ctx`), and free-model labels. Combo suggestions retain raw upstream IDs, and you can still type any model. Some servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
 
 Saved API keys are never rendered back into HTML. Leaving the key field blank
 when editing a connection preserves the existing encrypted value. To clear a
@@ -165,7 +191,7 @@ any connection is referenced by a combo; preset provider tiles are not removable
 - Connect/read/request failures and HTTP **408, 429, 500, 502, 503, 504** try the next step. The status policy lives in `src/routing/combo.rs`.
 - Other HTTP failures, including **400, 401, 403, 404, 422**, stop the chain. No repeated attempts, cooldown state, or background work.
 - Empty combos, entirely disabled combos, or exhausted chains return a sanitized OpenAI-shaped `502` error. Unknown combo names return `404`.
-- A model that does not start with `combo/` is routed directly. SparkRouter sends that exact ID to each enabled connection whose last **Refresh models** listed it, oldest connection first. Retryable failures try the next matching connection; permanent errors stop. A model that no connection lists returns `404`. A model listed only by disabled connections, or whose attempts are exhausted, returns `502`. Connections that have never been refreshed are not direct targets. Combo steps are unchanged and still accept any model string. IDs beginning with `combo/` are always combo names, not direct models.
+- Direct IDs use `<provider-slug>/<upstream-model-id>`. Only connections within that provider whose last **Refresh models** listed the upstream ID are tried, oldest first. Retryable failures never cross to another provider slug; permanent errors stop. Unknown public IDs return `404`; wholly disabled or exhausted targets return `502`. Never-refreshed connections are not direct targets. The prefix is stripped once, preserving slashes inside the upstream ID. `combo/<name>` always selects a combo; an upstream ID starting with `combo/` can be called as `<provider-slug>/combo/...`. `/v1/models` lists distinct qualified IDs from enabled connections. Combo step IDs remain arbitrary upstream strings of up to 256 characters.
 - OpenAI requests remain `serde_json::Value`; only the model is replaced for each target. Unknown fields are preserved by the OpenAI adapter.
 - **Failover is possible only before a streaming response is committed.** The adapter obtains initial upstream data before returning the response. After that, the selected upstream owns the request. A mid-stream failure terminates the HTTP body with an error; it never switches to another provider or restarts generated text. Clients must handle incomplete streams.
 - One shared pooled HTTP client uses a 10-second connect timeout, 120-second idle read timeout, and 90-second idle pool lifetime. Each attempt has 120 seconds to prepare its response; the entire pre-commit fallback phase has a 180-second ceiling. Committed streams can run longer while data continues to arrive. Redirects are rejected to protect credentials.
@@ -184,6 +210,9 @@ Set `ROUTER_DASHBOARD_PASSWORD` to enable a single-admin dashboard login at `/lo
 **History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. It stores **metadata only**, never prompts, completions, credentials, endpoint URLs, or raw upstream errors. Retention is the newest 10,000 requests, with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; database write failures do not fail generation. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
 
 **Configuration** (`/configuration`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
+Group slugs are exported too. Version 1 documents without a slug remain accepted;
+imports preserve requested slugs when available and add a suffix on conflicts.
+Check the imported provider's displayed slug before updating client model IDs.
 
 One import is limited to 2 MiB of JSON, 100 explicit groups, 500 connections,
 200 combos, 50 steps per combo, and 2,000 total steps (the encoded form must

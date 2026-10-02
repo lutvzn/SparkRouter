@@ -6,6 +6,7 @@ pub mod db;
 pub mod error;
 pub mod health;
 mod history;
+pub(crate) mod provider_catalog;
 pub mod providers;
 pub mod routing;
 pub mod web;

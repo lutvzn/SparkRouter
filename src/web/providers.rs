@@ -53,6 +53,7 @@ pub(crate) struct ProviderGroupPage {
     app_name: &'static str,
     csrf_token: String,
     name: String,
+    slug: String,
     base_url: String,
     protocol: String,
     action: String,
@@ -67,6 +68,7 @@ pub(crate) struct ProviderGroupPage {
 pub(crate) struct ProviderRow {
     id: String,
     name: String,
+    slug: String,
     enabled: bool,
     has_key: bool,
     models: Vec<crate::db::connection_models::StoredModel>,
@@ -76,11 +78,16 @@ pub(crate) struct ProviderRow {
 }
 
 impl ProviderRow {
+    fn public_model_id(&self, upstream_model: &str) -> String {
+        format!("{}/{upstream_model}", self.slug)
+    }
+
     fn from_stored(provider: Provider) -> Self {
         Self {
             has_key: !provider.encrypted_api_key.is_empty(),
             id: provider.id,
             name: provider.name,
+            slug: String::new(),
             enabled: provider.enabled,
             models: Vec::new(),
             models_known: false,
@@ -151,6 +158,8 @@ pub(crate) struct ProviderForm {
 pub(crate) struct CustomProviderForm {
     _csrf: String,
     name: String,
+    #[serde(default)]
+    slug: Option<String>,
     base_url: String,
     protocol: String,
 }
@@ -210,6 +219,7 @@ pub(crate) async fn catalog(
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
         name: preset.name.to_string(),
+        slug: preset.routing_slug().to_owned(),
         base_url: preset.base_url.to_string(),
         protocol: preset.protocol.as_str().to_string(),
         action: format!("/providers/catalog/{slug}"),
@@ -237,6 +247,7 @@ pub(crate) async fn group(
     render(ProviderGroupPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
+        slug: crate::db::provider_slugs::for_group(&state.db, &group.id).await?,
         name: group.name,
         base_url: group.base_url,
         protocol: group.protocol.as_str().to_string(),
@@ -290,7 +301,14 @@ pub(crate) async fn custom_create(
     let name = validate_name(&form.name)?;
     let base_url = crate::providers::normalize_base_url(form.base_url.trim())?;
     let protocol = parse_protocol(&form.protocol)?;
-    let group = provider_groups::create(&state.db, name, &base_url, &protocol).await?;
+    let group = provider_groups::create_with_slug(
+        &state.db,
+        name,
+        &base_url,
+        &protocol,
+        form.slug.as_deref(),
+    )
+    .await?;
     Ok(see_other(&format!("/providers/groups/{}", group.id)))
 }
 
@@ -414,7 +432,9 @@ async fn attach_models(
 ) -> Result<Vec<ProviderRow>, AppError> {
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
+    let namespaces = crate::db::provider_slugs::for_connections(&state.db).await?;
     for row in &mut rows {
+        row.slug = namespaces.get(&row.id).cloned().unwrap_or_default();
         if let Some(list) = lists.get(&row.id) {
             row.models.clone_from(&list.models);
             row.models_known = true;
@@ -433,7 +453,7 @@ pub(crate) async fn refresh_models(
 ) -> Result<Html<String>, AppError> {
     check_csrf(&state, &form._csrf)?;
     let provider = crate::db::providers::get(&state.db, &id).await?;
-    let fragment = match crate::providers::list_models(&state.client, &state.crypto, &provider)
+    let mut fragment = match crate::providers::list_models(&state.client, &state.crypto, &provider)
         .await
     {
         Ok(listed) => {
@@ -464,6 +484,11 @@ pub(crate) async fn refresh_models(
             }
         }
     };
+    fragment.provider.slug = crate::db::provider_slugs::for_connections(&state.db)
+        .await?
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound("provider was not found".into()))?;
     render(fragment)
 }
 
@@ -892,6 +917,66 @@ mod tests {
     }
 
     #[test]
+    fn model_details_use_unique_native_popovers_per_connection_and_model() {
+        let providers = ["p1", "p2"]
+            .into_iter()
+            .map(|id| ProviderRow {
+                id: id.into(),
+                name: "Connection".into(),
+                slug: "local".into(),
+                enabled: true,
+                has_key: false,
+                models: ["vendor/<one>", "vendor/two"]
+                    .into_iter()
+                    .map(|id| crate::db::connection_models::StoredModel {
+                        id: id.into(),
+                        name: "Model <details>".into(),
+                        fields: Vec::new(),
+                        free: false,
+                    })
+                    .collect(),
+                models_known: true,
+                models_truncated: false,
+                model_error: String::new(),
+            })
+            .collect();
+        let html = ProviderGroupPage {
+            app_name: crate::APP_NAME,
+            csrf_token: "csrf-test-token".into(),
+            name: "Local".into(),
+            slug: "local".into(),
+            base_url: "http://localhost/v1".into(),
+            protocol: "openai".into(),
+            action: "/providers/groups/local".into(),
+            providers,
+            is_custom: true,
+        }
+        .render()
+        .unwrap();
+        for connection in ["p1", "p2"] {
+            for index in [1, 2] {
+                let target = format!("model-info-{connection}-{index}");
+                assert_eq!(html.matches(&format!("id=\"{target}\"")).count(), 1);
+                assert_eq!(
+                    html.matches(&format!("popovertarget=\"{target}\"")).count(),
+                    2,
+                    "each popover has one open and one close control"
+                );
+                assert!(html.contains(&format!(
+                    "id=\"{target}\" class=\"model-info-dialog\" popover role=\"dialog\""
+                )));
+                let heading = format!("model-info-heading-{connection}-{index}");
+                assert!(html.contains(&format!("aria-labelledby=\"{heading}\"")));
+                assert!(html.contains(&format!("id=\"{heading}\"")));
+            }
+        }
+        assert!(html.contains("vendor/&#60;one&#62;"));
+        assert!(html.contains("Model &#60;details&#62;"));
+        assert!(!html.contains("data-model-info"));
+        assert!(!include_str!("../../static/app.js").contains("openModelInfo"));
+    }
+
+    #[test]
     fn pages_render_with_escaping_and_csrf() {
         use askama::Template;
 
@@ -942,12 +1027,14 @@ mod tests {
             app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
             name: "Local <LLM> & Friends".to_string(),
+            slug: "local-llm".into(),
             base_url: "http://127.0.0.1:8080/v1".to_string(),
             protocol: "openai".to_string(),
             action: "/providers/groups/custom-g1".to_string(),
             providers: vec![ProviderRow {
                 id: "p1".to_string(),
                 name: "Local <LLM> & Friends".to_string(),
+                slug: "local-llm".into(),
                 enabled: true,
                 has_key: false,
                 models: vec![crate::db::connection_models::StoredModel {
@@ -985,6 +1072,18 @@ mod tests {
         assert!(group.contains("GPT-4o mini"));
         assert!(group.contains("model-card-free"));
         assert!(group.contains("data-model-search"));
+        assert!(group.contains("data-copy-model=\"local-llm/gpt-4o-mini\""));
+        assert!(group.contains("Public ID: <code>local-llm/gpt-4o-mini</code>"));
+        assert!(group.contains("Upstream ID (for combo steps): <code>gpt-4o-mini</code>"));
+        assert!(group.contains("popovertarget=\"model-info-p1-1\""));
+        assert!(group.contains(
+            "id=\"model-info-p1-1\" class=\"model-info-dialog\" popover role=\"dialog\""
+        ));
+        assert!(group.contains("aria-labelledby=\"model-info-heading-p1-1\""));
+        assert!(group.contains("id=\"model-info-heading-p1-1\">GPT-4o mini</h2>"));
+        assert!(group.contains("popovertargetaction=\"hide\" aria-label=\"Close model details\""));
+        assert!(!group.contains("data-model-info"));
+        assert!(!group.contains("<dialog"));
         assert!(group.contains("class=\"connection-list\""));
         assert!(group.contains("action=\"/providers/p1/models\""));
         assert_eq!(group.matches("name=\"_csrf\"").count(), 5);
@@ -999,12 +1098,14 @@ mod tests {
             app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
             name: "Preset <A> & Co".to_string(),
+            slug: "preset-a".into(),
             base_url: "https://preset.example.com/v1".to_string(),
             protocol: "openai".to_string(),
             action: "/providers/catalog/preset-a".to_string(),
             providers: vec![ProviderRow {
                 id: "p9".to_string(),
                 name: "Preset <A> & Co".to_string(),
+                slug: "preset-a".into(),
                 enabled: true,
                 has_key: true,
                 models: Vec::new(),

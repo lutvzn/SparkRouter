@@ -67,6 +67,8 @@ pub struct ConfigTransfer {
 pub struct TransferGroup {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub base_url: String,
     pub protocol: String,
 }
@@ -140,7 +142,7 @@ pub async fn export(pool: &SqlitePool) -> Result<ConfigTransfer, AppError> {
     let mut transaction = pool.begin().await?;
 
     let group_rows = sqlx::query(
-        "SELECT id, name, base_url, protocol FROM custom_provider_groups ORDER BY rowid",
+        "SELECT g.id, g.name, g.base_url, g.protocol, s.slug FROM custom_provider_groups g LEFT JOIN provider_slugs s ON s.group_id = g.id ORDER BY g.rowid",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -168,6 +170,7 @@ pub async fn export(pool: &SqlitePool) -> Result<ConfigTransfer, AppError> {
             Ok(TransferGroup {
                 id: row.try_get("id")?,
                 name: row.try_get("name")?,
+                slug: row.try_get("slug")?,
                 base_url: row.try_get("base_url")?,
                 protocol: row.try_get("protocol")?,
             })
@@ -271,6 +274,9 @@ fn parse_and_validate(
     for group in &mut transfer.groups {
         group.id = validate_id(&group.id, "group id")?.to_owned();
         group.name = validate_text(&group.name, NAME_MAX_CHARS, "group name")?;
+        if let Some(slug) = &group.slug {
+            crate::db::provider_slugs::validate(slug)?;
+        }
         group.base_url = validate_url(&group.base_url)?;
         let protocol = parse_protocol(&group.protocol)?;
         group.protocol = protocol.as_str().to_owned();
@@ -385,6 +391,8 @@ pub async fn check_import(
     let mut warnings = vec![
         "Every imported connection starts disabled with no API key: review it, add its key, and enable it before routing uses it."
             .to_owned(),
+        "Custom provider slugs may receive a suffix if they are already in use on this gateway."
+            .to_owned(),
     ];
     for combo in &transfer.combos {
         if combo.steps.is_empty() {
@@ -441,6 +449,14 @@ pub async fn apply(
         .bind(&group.protocol)
         .execute(&mut *transaction)
         .await?;
+        crate::db::provider_slugs::assign(
+            &mut transaction,
+            &id,
+            &group.name,
+            group.slug.as_deref(),
+            true,
+        )
+        .await?;
         group_ids.insert(group.id.clone(), id);
     }
 
@@ -483,6 +499,14 @@ pub async fn apply(
             .bind(&connection.base_url)
             .bind(&connection.protocol)
             .execute(&mut *transaction)
+            .await?;
+            crate::db::provider_slugs::assign(
+                &mut transaction,
+                &group_id,
+                &connection.name,
+                None,
+                true,
+            )
             .await?;
             sqlx::query(
                 "INSERT INTO provider_group_connections (provider_id, group_id) VALUES (?, ?)",

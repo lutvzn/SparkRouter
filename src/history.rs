@@ -68,7 +68,7 @@ pub(crate) async fn record_response(
     let record = Record {
         id: uuid::Uuid::new_v4().to_string(),
         source: source.into(),
-        model: model.chars().take(256).collect(),
+        model: model.chars().take(321).collect(),
         streaming,
         outcome: if is_stream {
             "streaming"

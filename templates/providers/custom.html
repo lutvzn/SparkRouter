@@ -1,12 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Add custom provider{% endblock %}
+{% block nav_providers %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>Add custom provider</h1><p class="topbar-subtitle">Create a provider endpoint, then add named connections.</p></div>{% endblock %}
 {% block content %}
-<h1>Add custom provider</h1>
 <form method="post" action="/providers/custom" class="card">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <label for="name">Provider name</label>
   <input id="name" name="name" type="text" required maxlength="100" placeholder="e.g. Company LLM">
   <p class="hint">A label for this endpoint, such as Company LLM or Local vLLM.</p>
+  <label for="slug">Routing slug (optional)</label>
+  <input id="slug" name="slug" type="text" maxlength="64" pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="e.g. provider1">
+  <p class="hint">Used in public model IDs: <code>provider1/openai/gpt-6-luna</code>. Leave blank to generate a unique slug from the name. Lowercase letters, digits, and hyphens; preset slugs are reserved.</p>
   <label for="base_url">Base URL</label>
   <input id="base_url" name="base_url" type="text" required placeholder="https://api.example.com/v1">
   <p class="hint">Include http:// or https:// and the API prefix, such as /v1. Trailing slashes are trimmed.</p>

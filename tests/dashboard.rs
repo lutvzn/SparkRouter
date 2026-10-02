@@ -85,6 +85,48 @@ async fn get_page(router: &Router, path: &str) -> String {
     .unwrap()
 }
 
+fn assert_dashboard_shell(html: &str, active_href: &str) {
+    assert!(
+        html.contains("<a class=\"skip-link\" href=\"#content\">"),
+        "skip link targets content"
+    );
+    assert!(
+        html.contains("<main id=\"content\" tabindex=\"-1\""),
+        "main is the skip-link target and focusable"
+    );
+    let nav = html
+        .find("<nav aria-label=\"Dashboard\">")
+        .expect("dashboard nav");
+    let nav_end = nav + html[nav..].find("</nav>").expect("nav closing");
+    let nav = &html[nav..nav_end];
+    let active = nav.matches("aria-current=\"page\"").count();
+    assert_eq!(active, 1, "exactly one sidebar link is active");
+    let link = nav.find("aria-current=\"page\"").unwrap();
+    let start = nav[..link].rfind("<a ").unwrap();
+    let tag_end = nav[start..].find('>').unwrap() + start;
+    assert!(
+        nav[start..tag_end].contains(&format!("href=\"{active_href}\"")),
+        "active link must target {active_href}"
+    );
+    let topbar_start = html.find("<header class=\"topbar\">").expect("topbar");
+    let topbar_end = topbar_start
+        + html[topbar_start..]
+            .find("</header>")
+            .expect("topbar closing");
+    let h1_count = html.matches("<h1>").count();
+    assert_eq!(h1_count, 1, "each page has one h1");
+    assert!(
+        html[topbar_start..topbar_end].contains("<h1>"),
+        "the only h1 belongs to the topbar"
+    );
+    let main_start = html.find("<main id=\"content\"").expect("main");
+    let main_end = main_start + html[main_start..].find("</main>").expect("main closing");
+    assert!(
+        !html[main_start..main_end].contains("<h1>"),
+        "main does not contain the page heading"
+    );
+}
+
 /// Canonical custom-group id owning a stored connection, for index-href
 /// assertions: tiles link the persisted group id, never the connection id.
 async fn group_id_for(state: &AppState, connection_id: &str) -> String {
@@ -497,9 +539,13 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
                 && !topbar.contains("href=\"/api-keys\""),
             "topbar must not duplicate navigation links"
         );
-        // Index pages move their page heading and subtitle into the topbar,
-        // keeping <main> free of duplicate headings; the new-form pages keep
-        // a body heading and leave the topbar heading block empty.
+        let active_href = match path {
+            "/providers" | "/providers/new" => "/providers",
+            "/combos" | "/combos/new" => "/combos",
+            _ => "/api-keys",
+        };
+        assert_dashboard_shell(&html, active_href);
+        // Index pages move their page heading and subtitle into the topbar.
         let main_open = html.find("<main").expect("main opening");
         let main_close = main_open + html[main_open..].find("</main>").expect("main closing");
         let main_section = &html[main_open..main_close];
@@ -557,18 +603,18 @@ async fn theme_toggle_script_loads_before_paint_and_csp_stays_strict() {
                 "{path} main keeps its {action_label} action"
             );
         } else {
-            assert!(
-                !topbar.contains("topbar-heading"),
-                "{path} form page must leave the topbar heading block empty"
-            );
             let form_heading = if path == "/providers/new" {
                 "<h1>Add custom provider</h1>"
             } else {
                 "<h1>Add combo</h1>"
             };
             assert!(
-                main_section.contains(form_heading),
-                "{path} body heading must still render in main"
+                topbar.contains(form_heading),
+                "{path} form heading belongs in topbar"
+            );
+            assert!(
+                !main_section.contains(form_heading),
+                "{path} main does not repeat its heading"
             );
         }
     }
@@ -644,7 +690,7 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
     let state = state().await;
     let router = app::router(state.clone());
     let index = get_page(&router, "/providers").await;
-    assert!(index.contains("<main class=\"provider-page\">"));
+    assert!(index.contains("class=\"provider-page\""));
     assert!(
         index.contains("id=\"provider-search\"")
             && index.contains("type=\"search\"")
@@ -698,7 +744,7 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
     );
     let catalog = get_page(&router, "/providers/catalog/openai").await;
     assert!(
-        catalog.contains("<main class=\"provider-page\">"),
+        catalog.contains("class=\"provider-page\""),
         "catalog preset pages share the provider-page group layout"
     );
     assert!(catalog.contains("OpenAI"));
@@ -887,6 +933,7 @@ async fn catalog_connections_are_encrypted_pinned_and_labeled_in_combos() {
     );
     let combo = db::combos::by_name(&state.db, "picker").await.unwrap();
     let edit = get_page(&router, &format!("/combos/{}", combo.id)).await;
+    assert_dashboard_shell(&edit, "/combos");
     assert!(edit.contains("<option value=\"preset:openai\">OpenAI</option>"));
     assert!(edit.contains(&format!(
         "<option value=\"{}\" data-provider=\"preset:openai\">conn work</option>",
@@ -1030,6 +1077,7 @@ async fn custom_tiles_group_by_exact_endpoint_and_reject_unknown_or_bad_csrf() {
 
     let group_path = format!("/providers/groups/{shared_group}");
     let group = get_page(&router, &group_path).await;
+    assert_dashboard_shell(&group, "/providers");
     assert!(group.contains("shared one") && group.contains("shared two"));
     assert!(!group.contains("protocol flip") && !group.contains("prefix shift"));
     assert!(group.contains("https://llm.internal.example/v1"));
@@ -1171,7 +1219,7 @@ async fn custom_provider_post_creates_empty_named_group_card() {
     // the enabled flag belong to connections, added later on the group page.
     let form = get_page(&router, "/providers/new").await;
     assert!(form.contains("action=\"/providers/custom\""));
-    for field in ["_csrf", "name", "base_url", "protocol"] {
+    for field in ["_csrf", "name", "slug", "base_url", "protocol"] {
         assert!(
             form.contains(&format!("name=\"{field}\"")),
             "custom provider form must include the {field} field"
@@ -1270,7 +1318,7 @@ async fn custom_provider_post_creates_empty_named_group_card() {
         "the group Custom badge renders in the body after the header"
     );
     assert!(
-        group.contains("<main class=\"provider-page\">"),
+        group.contains("class=\"provider-page\""),
         "the group page uses the provider-page main layout"
     );
     assert!(
@@ -1489,6 +1537,88 @@ async fn custom_group_keys_counts_metadata_and_validation_rejections() {
     let index = get_page(&router, "/providers").await;
     assert!(index.contains(&format!("href=\"/providers/groups/{group_id}\"")));
     assert!(index.contains("not connected"));
+}
+
+#[tokio::test]
+async fn custom_provider_slug_is_persisted_and_must_be_unique_and_non_reserved() {
+    let state = state().await;
+    let router = app::router(state.clone());
+    let fields = [
+        ("name", "Provider One"),
+        ("slug", "provider1"),
+        ("base_url", "https://slug.test/v1"),
+        ("protocol", "openai"),
+    ];
+    let created = submit(&router, &state, "/providers/custom", &fields, false).await;
+    assert_eq!(created.status(), StatusCode::SEE_OTHER);
+    let group_id = redirected_group_id(&created);
+    assert_eq!(
+        db::provider_slugs::for_group(&state.db, &group_id)
+            .await
+            .unwrap(),
+        "provider1"
+    );
+    let page = get_page(&router, &format!("/providers/groups/{group_id}")).await;
+    assert!(
+        page.contains("provider1"),
+        "group details display its routing slug"
+    );
+    assert!(page.contains("Direct model ID: <code>provider1/&lt;upstream-model-id&gt;</code>"));
+    assert!(page.contains("Combo steps use upstream IDs without this prefix."));
+
+    let fields = [
+        ("name", "Duplicate"),
+        ("slug", "provider1"),
+        ("base_url", "https://slug.test/v1"),
+        ("protocol", "openai"),
+    ];
+    let duplicate = submit(&router, &state, "/providers/custom", &fields, false).await;
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(db::provider_groups::list(&state.db).await.unwrap().len(), 1);
+
+    for slug in ["combo", "openrouter", "ds", "bad/path"] {
+        let fields = [
+            ("name", "Rejected"),
+            ("slug", slug),
+            ("base_url", "https://slug.test/v1"),
+            ("protocol", "openai"),
+        ];
+        let response = submit(&router, &state, "/providers/custom", &fields, false).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "slug {slug}");
+        assert_eq!(db::provider_groups::list(&state.db).await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn omitted_custom_provider_slug_is_generated_stably_and_resolves_collisions() {
+    let state = state().await;
+    let router = app::router(state.clone());
+    let fields = [
+        ("name", "Acme LLM"),
+        ("base_url", "https://generated.test/v1"),
+        ("protocol", "openai"),
+    ];
+    let first = submit(&router, &state, "/providers/custom", &fields, false).await;
+    assert_eq!(first.status(), StatusCode::SEE_OTHER);
+    let first_id = redirected_group_id(&first);
+    let second = submit(&router, &state, "/providers/custom", &fields, false).await;
+    assert_eq!(second.status(), StatusCode::SEE_OTHER);
+    let second_id = redirected_group_id(&second);
+    let first_slug = db::provider_slugs::for_group(&state.db, &first_id)
+        .await
+        .unwrap();
+    let second_slug = db::provider_slugs::for_group(&state.db, &second_id)
+        .await
+        .unwrap();
+    assert_ne!(
+        first_slug, second_slug,
+        "colliding generated slugs get a suffix"
+    );
+    let group_page_path = format!("/providers/groups/{first_id}");
+    let initial = get_page(&router, &group_page_path).await;
+    let repeated = get_page(&router, &group_page_path).await;
+    assert_eq!(initial, repeated, "GET does not mutate/regenerate the slug");
+    assert!(initial.contains(&first_slug));
 }
 
 #[tokio::test]

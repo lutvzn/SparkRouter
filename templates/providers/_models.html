@@ -23,24 +23,29 @@
         {% for model in provider.models %}
         <article class="model-card" data-model-text="{{ model.search_text() }}">
           <div class="model-card-tools">
-            <button type="button" class="model-card-copy" data-copy-model="{{ model.id }}" aria-label="Copy {{ model.id }}" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label visually-hidden">Copy</span></button>
-            <button type="button" class="model-card-info" data-model-info aria-haspopup="dialog" aria-controls="model-info-dialog" aria-label="Details for {{ model.name }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#info"></use></svg></button>
+            <button type="button" class="model-card-copy" data-copy-model="{{ provider.public_model_id(model.id) }}" aria-label="Copy {{ provider.public_model_id(model.id) }}" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label visually-hidden">Copy</span></button>
+             <button type="button" class="model-card-info" popovertarget="model-info-{{ provider.id }}-{{ loop.index }}" aria-haspopup="dialog" aria-label="Details for {{ model.name }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#info"></use></svg></button>
           </div>
           <div class="model-card-line">
             <span class="model-card-name">{{ model.name }}</span>
             {% if model.is_free() %}<span class="model-card-free">free</span>{% endif %}
           </div>
           <div class="model-card-line">
-            <span class="model-card-id">{{ model.id }}</span>
+            <span class="model-card-id">{{ provider.public_model_id(model.id) }}</span>
             <span class="model-card-side">
               {% for field in model.display_fields() %}
               <span class="model-card-chip" title="{{ field.label }}">{{ field.value }}</span>
               {% endfor %}
             </span>
           </div>
-          <div class="model-info-source" hidden>
-            <h2>{{ model.name }}</h2>
-            <p><code>{{ model.id }}</code></p>
+           <div id="model-info-{{ provider.id }}-{{ loop.index }}" class="model-info-dialog" popover role="dialog" aria-labelledby="model-info-heading-{{ provider.id }}-{{ loop.index }}">
+             <div class="model-info-close">
+               <button type="button" class="btn small" popovertarget="model-info-{{ provider.id }}-{{ loop.index }}" popovertargetaction="hide" aria-label="Close model details">Close</button>
+             </div>
+             <div class="model-info-body">
+             <h2 id="model-info-heading-{{ provider.id }}-{{ loop.index }}">{{ model.name }}</h2>
+             <p>Public ID: <code>{{ provider.public_model_id(model.id) }}</code></p>
+             <p class="hint">Upstream ID (for combo steps): <code>{{ model.id }}</code></p>
             {% if model.info_fields().is_empty() %}
             <p class="hint">This model did not include any extra fields.</p>
             {% else %}
@@ -49,8 +54,9 @@
               <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
               {% endfor %}
             </dl>
-            {% endif %}
-          </div>
+             {% endif %}
+             </div>
+           </div>
         </article>
         {% endfor %}
       </div>
