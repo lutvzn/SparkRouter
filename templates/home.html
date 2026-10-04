@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% block nav_home %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>Gateway overview</h1><p class="topbar-subtitle">A clear view of your recent gateway activity.</p></div>{% endblock %}
+{% block main_class %}home-page{% endblock %}
+{% block content %}
+<section class="home-hero" aria-labelledby="home-title">
+  <div><p class="home-eyebrow">Gateway overview</p><h2 id="home-title">Your gateway, at a glance.</h2><p>Usage and provider activity from your retained request history.</p></div>
+  <div class="home-actions"><a class="btn primary" href="/providers">Providers</a><a class="btn" href="/test">Test chat</a><a class="btn" href="/history">History</a></div>
+</section>
+<section class="home-stats" aria-label="Usage totals">
+  <article class="home-stat"><span>Requests</span><strong>{{ requests }}</strong><small>{{ successes }} successful</small></article>
+  <article class="home-stat"><span>Tokens sent <span class="home-unit">(input)</span></span><strong>{{ input_tokens }}</strong><small>{{ input_coverage }}</small></article>
+  <article class="home-stat"><span>Tokens received <span class="home-unit">(output)</span></span><strong>{{ output_tokens }}</strong><small>{{ output_coverage }}</small></article>
+  <article class="home-stat"><span>Cached tokens</span><strong>{{ cached_tokens }}</strong><small>{{ cache_coverage }} · subset of input</small></article>
+  <article class="home-stat"><span>Spend (USD)</span><strong>{{ cost }}</strong><small>{{ cost_coverage }} · known provider-reported USD</small></article>
+</section>
+{% if has_data %}
+<section class="home-leaderboard" aria-labelledby="providers-heading">
+  <div class="home-section-head"><div><h2 id="providers-heading">Provider leaderboard</h2><p>Ranked by requests, including failed requests.</p></div><a href="/history">View history →</a></div>
+  <div class="home-provider-list">
+  {% if providers.is_empty() %}<p class="hint">No upstream provider attempts were recorded for these requests.</p>{% endif %}
+  {% for provider in providers %}
+    <article class="home-provider">
+      <div class="home-provider-title"><span class="home-rank">{{ loop.index }}</span><div class="home-provider-name"><strong>{{ provider.name }}</strong><code>{{ provider.slug }}</code></div><strong class="home-provider-requests">{{ provider.requests }} <span>requests</span></strong></div>
+      <progress class="home-meter" value="{{ provider.proportion }}" max="100" aria-label="{{ provider.proportion }} percent of requests">{{ provider.proportion }}%</progress>
+      <div class="home-provider-metrics"><span>Input <b>{{ provider.input_tokens }}</b></span><span>Output <b>{{ provider.output_tokens }}</b></span><span>Cached <b>{{ provider.cached_tokens }}</b></span><span>Cost <b>{{ provider.cost }}</b></span></div>
+      <p class="home-coverage">{{ provider.coverage }} · {{ provider.cost_coverage }} with cost</p>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% else %}
+<section class="home-empty"><div class="home-empty-mark" aria-hidden="true">✦</div><h2>No requests yet</h2><p>Once you send a request, your usage summary and provider ranking will appear here.</p><div class="home-actions"><a class="btn primary" href="/providers">Set up a provider</a><a class="btn" href="/test">Try test chat</a></div></section>
+{% endif %}
+<p class="home-footnote">Totals cover finished requests within the newest 10,000 retained records across API and test chat. Clearing History clears these totals too. Provider requests count each provider once per request; usage is assigned to the selected provider only. Cached tokens are cache reads, not cache writes, and are already included in input. Spend includes known provider-reported USD, not necessarily your full invoice. Missing usage or spend is shown as an em dash, not zero. Older records without a provider snapshot appear under their connection name.</p>
+{% endblock %}

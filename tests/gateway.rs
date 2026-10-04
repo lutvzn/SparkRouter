@@ -485,6 +485,98 @@ async fn client_error_stops_the_chain() -> TestResult {
 }
 
 #[tokio::test]
+async fn target_specific_failures_fall_back_and_request_errors_still_stop() -> TestResult {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::PAYMENT_REQUIRED,
+        StatusCode::NOT_FOUND,
+        StatusCode::from_u16(529).unwrap(),
+    ] {
+        let state = test_state().await;
+        let failing = spawn_upstream(error_status_router(status)).await;
+        let healthy = spawn_upstream(openai_echo_router("fallback reply")).await;
+        save_provider(
+            &state,
+            "prov-fail",
+            &failing.url(),
+            Protocol::OpenAi,
+            true,
+            "sk-fail",
+        )
+        .await?;
+        save_provider(
+            &state,
+            "prov-good",
+            &healthy.url(),
+            Protocol::OpenAi,
+            true,
+            "sk-good",
+        )
+        .await?;
+        combo_with_steps(
+            &state,
+            &[("prov-fail", "model-a"), ("prov-good", "model-b")],
+        )
+        .await?;
+        assert_combo_reply(&state, "coding", "model-b").await?;
+        assert_eq!(
+            failing.hits.count(),
+            1,
+            "status {status} should be attempted"
+        );
+        assert_eq!(
+            healthy.hits.count(),
+            1,
+            "status {status} is a target failure and must fall back"
+        );
+    }
+
+    for status in [StatusCode::FORBIDDEN, StatusCode::UNPROCESSABLE_ENTITY] {
+        let state = test_state().await;
+        let failing = spawn_upstream(error_status_router(status)).await;
+        let healthy = spawn_upstream(openai_echo_router("should never be used")).await;
+        save_provider(
+            &state,
+            "prov-fail",
+            &failing.url(),
+            Protocol::OpenAi,
+            true,
+            "sk-fail",
+        )
+        .await?;
+        save_provider(
+            &state,
+            "prov-good",
+            &healthy.url(),
+            Protocol::OpenAi,
+            true,
+            "sk-good",
+        )
+        .await?;
+        combo_with_steps(
+            &state,
+            &[("prov-fail", "model-a"), ("prov-good", "model-b")],
+        )
+        .await?;
+        let response = send(
+            &state,
+            chat_request(
+                &json!({"model": "combo/coding", "messages": [{"role": "user", "content": "hi"}]}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        assert_eq!(failing.hits.count(), 1);
+        assert_eq!(
+            healthy.hits.count(),
+            0,
+            "status {status} must still stop the chain"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn exhausted_combo_returns_bad_gateway() -> TestResult {
     let state = test_state().await;
     let only = spawn_upstream(error_status_router(StatusCode::SERVICE_UNAVAILABLE)).await;
@@ -2072,6 +2164,312 @@ async fn anthropic_provider_converts_tools_and_text() -> TestResult {
         json!({"prompt_tokens":12,"completion_tokens":34,"total_tokens":46})
     );
     assert_eq!(payload["choices"][0]["finish_reason"], "tool_calls");
+    Ok(())
+}
+
+// HTTP-200 error payloads are still upstream failures, not successful replies.
+#[tokio::test]
+async fn openai_invalid_success_bodies_fall_back() -> TestResult {
+    for (index, body) in [
+        "null",
+        "7",
+        "{}",
+        r#"{"choices":null}"#,
+        r#"{"choices":[],"error":{"message":"failure"}}"#,
+        r#"{"error":{"message":"failure"}}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let state = test_state().await;
+        let first = spawn_upstream(Router::new().route(
+            "/chat/completions",
+            post(move || async move { ([(header::CONTENT_TYPE, "application/json")], body) }),
+        ))
+        .await;
+        let second = spawn_upstream(openai_echo_router("fallback reply")).await;
+        save_provider(
+            &state,
+            "prov-first",
+            &first.url(),
+            Protocol::OpenAi,
+            true,
+            "a",
+        )
+        .await?;
+        save_provider(
+            &state,
+            "prov-second",
+            &second.url(),
+            Protocol::OpenAi,
+            true,
+            "b",
+        )
+        .await?;
+        combo_with_steps(
+            &state,
+            &[("prov-first", "first"), ("prov-second", "second")],
+        )
+        .await?;
+
+        let response = send(
+            &state,
+            chat_request(&json!({
+                "model": "combo/coding", "messages": [{"role":"user","content":"hi"}]
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "body case {index}");
+        let payload = json_body(response).await;
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "fallback reply"
+        );
+        assert_eq!(payload["provider_extension"]["keep"], true);
+        assert_eq!(first.hits.count(), 1);
+        assert_eq!(second.hits.count(), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn openai_valid_formatted_success_is_forwarded_verbatim() -> TestResult {
+    let state = test_state().await;
+    let exact = r#"{ "id":"x", "choices":[{"message":{"content":"ok"},"extension":{"n":1}}], "error":null, "unknown":{"keep":true} }"#;
+    let first = spawn_upstream(Router::new().route(
+        "/chat/completions",
+        post(move || async move { ([(header::CONTENT_TYPE, "application/json")], exact) }),
+    ))
+    .await;
+    let second = spawn_upstream(openai_echo_router("unused")).await;
+    save_provider(
+        &state,
+        "prov-first",
+        &first.url(),
+        Protocol::OpenAi,
+        true,
+        "a",
+    )
+    .await?;
+    save_provider(
+        &state,
+        "prov-second",
+        &second.url(),
+        Protocol::OpenAi,
+        true,
+        "b",
+    )
+    .await?;
+    combo_with_steps(
+        &state,
+        &[("prov-first", "first"), ("prov-second", "second")],
+    )
+    .await?;
+    let response = send(
+        &state,
+        chat_request(&json!({
+            "model":"combo/coding", "messages":[{"role":"user","content":"hi"}]
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_bytes(response).await.as_ref(), exact.as_bytes());
+    assert_eq!(first.hits.count(), 1);
+    assert_eq!(second.hits.count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_http_error_types_follow_fallback_policy() -> TestResult {
+    for (error_type, expected_status, fallback) in [
+        ("authentication_error", StatusCode::OK, true),
+        ("not_found_error", StatusCode::OK, true),
+        ("invalid_request_error", StatusCode::BAD_REQUEST, false),
+        ("permission_error", StatusCode::FORBIDDEN, false),
+        ("request_too_large", StatusCode::PAYLOAD_TOO_LARGE, false),
+    ] {
+        let state = test_state().await;
+        let error = json!({"type":"error", "error":{"type":error_type,"message":"no"}}).to_string();
+        let first = spawn_upstream(Router::new().route(
+            "/messages",
+            post(move || {
+                let error = error.clone();
+                async move { ([(header::CONTENT_TYPE, "application/json")], error) }
+            }),
+        ))
+        .await;
+        let second = spawn_upstream(openai_echo_router("fallback reply")).await;
+        save_provider(
+            &state,
+            "prov-first",
+            &first.url(),
+            Protocol::Anthropic,
+            true,
+            "a",
+        )
+        .await?;
+        save_provider(
+            &state,
+            "prov-second",
+            &second.url(),
+            Protocol::OpenAi,
+            true,
+            "b",
+        )
+        .await?;
+        combo_with_steps(
+            &state,
+            &[("prov-first", "claude"), ("prov-second", "model")],
+        )
+        .await?;
+        let response = send(
+            &state,
+            chat_request(&json!({
+                "model":"combo/coding", "messages":[{"role":"user","content":"hi"}]
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), expected_status, "{error_type}");
+        if fallback {
+            let payload = json_body(response).await;
+            assert_eq!(
+                payload["choices"][0]["message"]["content"],
+                "fallback reply"
+            );
+        }
+        assert_eq!(first.hits.count(), 1);
+        assert_eq!(second.hits.count(), usize::from(fallback));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_precommit_sse_errors_fall_back() -> TestResult {
+    for (error_type, expected_status, fallback) in [
+        ("authentication_error", StatusCode::OK, true),
+        ("not_found_error", StatusCode::OK, true),
+        ("invalid_request_error", StatusCode::BAD_REQUEST, false),
+        ("permission_error", StatusCode::FORBIDDEN, false),
+        ("request_too_large", StatusCode::PAYLOAD_TOO_LARGE, false),
+    ] {
+        let state = test_state().await;
+        let event = format!(
+            "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{error_type}\",\"message\":\"no\"}}}}\n\n"
+        );
+        let first = spawn_upstream(Router::new().route(
+            "/messages",
+            post(move || {
+                let event = event.clone();
+                async move { ([(header::CONTENT_TYPE, "text/event-stream")], event) }
+            }),
+        ))
+        .await;
+        let healthy_sse = sse_router(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let second = spawn_upstream(healthy_sse).await;
+        save_provider(
+            &state,
+            "prov-first",
+            &first.url(),
+            Protocol::Anthropic,
+            true,
+            "a",
+        )
+        .await?;
+        save_provider(
+            &state,
+            "prov-second",
+            &second.url(),
+            Protocol::OpenAi,
+            true,
+            "b",
+        )
+        .await?;
+        combo_with_steps(
+            &state,
+            &[("prov-first", "claude"), ("prov-second", "model")],
+        )
+        .await?;
+        let response = send(
+            &state,
+            chat_request(&json!({
+                "model":"combo/coding", "stream":true,
+                "messages":[{"role":"user","content":"hi"}]
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), expected_status, "{error_type}");
+        let bytes = body_bytes(response).await;
+        if fallback {
+            assert_eq!(
+                String::from_utf8_lossy(&bytes),
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"
+            );
+        }
+        assert_eq!(first.hits.count(), 1);
+        assert_eq!(second.hits.count(), usize::from(fallback));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_sse_errors_after_message_start_do_not_fall_back() -> TestResult {
+    for error_type in ["authentication_error", "not_found_error"] {
+        let state = test_state().await;
+        let event = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg-1\",\"model\":\"claude\"}}}}\n\nevent: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{error_type}\",\"message\":\"no\"}}}}\n\n"
+        );
+        let first = spawn_upstream(Router::new().route(
+            "/messages",
+            post(move || {
+                let event = event.clone();
+                async move { ([(header::CONTENT_TYPE, "text/event-stream")], event) }
+            }),
+        ))
+        .await;
+        let second = spawn_upstream(openai_echo_router("must not be used")).await;
+        save_provider(
+            &state,
+            "prov-first",
+            &first.url(),
+            Protocol::Anthropic,
+            true,
+            "a",
+        )
+        .await?;
+        save_provider(
+            &state,
+            "prov-second",
+            &second.url(),
+            Protocol::OpenAi,
+            true,
+            "b",
+        )
+        .await?;
+        combo_with_steps(
+            &state,
+            &[("prov-first", "claude"), ("prov-second", "model")],
+        )
+        .await?;
+
+        let response = send(
+            &state,
+            chat_request(&json!({
+                "model":"combo/coding", "stream":true,
+                "messages":[{"role":"user","content":"hi"}]
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{error_type}");
+        assert!(
+            response.into_body().collect().await.is_err(),
+            "{error_type}"
+        );
+        assert_eq!(first.hits.count(), 1);
+        assert_eq!(second.hits.count(), 0);
+    }
     Ok(())
 }
 

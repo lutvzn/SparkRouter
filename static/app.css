@@ -315,6 +315,58 @@ input:disabled, select:disabled, textarea:disabled { opacity: .58; cursor: not-a
   .grid2, .grid3 { grid-template-columns: 1fr; }
 }
 
+/* Home overview: compact summary cards and a responsive provider ranking. */
+main.home-page { max-width: 86rem; }
+.home-hero {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 1.5rem;
+  padding: clamp(1.25rem, 3vw, 2rem); border: 1px solid var(--line); border-radius: var(--radius-card);
+  background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 10%, var(--card)), var(--card) 68%);
+}
+.home-hero h2 { margin: .2rem 0 .45rem; font-size: clamp(1.65rem, 4vw, 2.35rem); }
+.home-hero p:not(.home-eyebrow) { margin: 0; color: var(--muted); }
+.home-eyebrow { margin: 0; color: var(--accent); font-size: .72rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.home-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.home-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; }
+.home-stat { min-width: 0; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--card); }
+.home-stat > span { display: block; color: var(--muted); font-size: .8rem; font-weight: 600; }
+.home-unit { font-weight: 450; }
+.home-stat strong { display: block; margin: .55rem 0 .25rem; font-size: clamp(1.25rem, 2vw, 1.7rem); line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.home-stat small { display: block; color: var(--muted); font-size: .72rem; line-height: 1.4; }
+.home-section-head { display: flex; justify-content: space-between; align-items: end; gap: 1rem; margin: 1.8rem 0 .7rem; }
+.home-section-head h2 { margin: 0; }
+.home-section-head p { margin: .2rem 0 0; color: var(--muted); font-size: .82rem; }
+.home-provider-list { display: grid; gap: .65rem; }
+.home-provider { min-width: 0; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--card); }
+.home-provider-title { display: flex; align-items: center; gap: .7rem; min-width: 0; }
+.home-rank { display: grid; place-items: center; width: 1.8rem; height: 1.8rem; flex: 0 0 auto; border-radius: 50%; background: var(--soft); color: var(--muted); font-size: .78rem; font-weight: 700; }
+.home-provider-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; min-width: 0; }
+.home-provider-name strong { overflow-wrap: anywhere; }
+.home-provider-name code { color: var(--muted); }
+.home-provider-requests { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.home-provider-requests span { color: var(--muted); font-size: .75rem; font-weight: 500; }
+.home-meter { display: block; width: 100%; height: .32rem; margin: .7rem 0; border: 0; border-radius: 1rem; background: var(--soft); accent-color: var(--accent); }
+.home-meter::-webkit-progress-bar { border-radius: 1rem; background: var(--soft); }
+.home-meter::-webkit-progress-value { border-radius: 1rem; background: var(--accent); }
+.home-meter::-moz-progress-bar { border-radius: 1rem; background: var(--accent); }
+.home-provider-metrics { display: flex; flex-wrap: wrap; gap: .35rem 1.35rem; font-size: .78rem; }
+.home-provider-metrics span { color: var(--muted); }
+.home-provider-metrics b { margin-left: .2rem; color: var(--fg); font-variant-numeric: tabular-nums; }
+.home-coverage, .home-footnote { margin: .35rem 0 0; color: var(--muted); font-size: .75rem; }
+.home-footnote { max-width: 68rem; margin: 1.15rem 0 0; line-height: 1.55; }
+.home-empty { margin-top: 1rem; padding: 2.5rem 1.5rem; text-align: center; border: 1px dashed var(--line); border-radius: var(--radius-card); background: var(--card); }
+.home-empty h2 { margin: .5rem 0 .25rem; }
+.home-empty p { max-width: 32rem; margin: 0 auto 1rem; color: var(--muted); }
+.home-empty-mark { color: var(--accent); font-size: 1.5rem; }
+@media (max-width: 65rem) { .home-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 40rem) {
+  .home-hero { align-items: flex-start; flex-direction: column; }
+  .home-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
+  .home-stat { padding: .8rem; }
+  .home-section-head { align-items: flex-start; }
+  .home-provider { padding: .8rem; }
+  .home-provider-metrics { gap: .35rem .8rem; }
+}
+
 .form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-top: 1.25rem; }
 
 .btn {

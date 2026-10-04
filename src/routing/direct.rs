@@ -59,8 +59,8 @@ async fn route_inner(
         )));
     }
     for (index, provider_id) in provider_ids.into_iter().enumerate() {
-        let (provider, namespace) =
-            match provider_slugs::connection(&state.db, &provider_id).await? {
+        let (provider, namespace, group_name) =
+            match provider_slugs::connection_with_name(&state.db, &provider_id).await? {
                 Some(provider) => provider,
                 // A refresh snapshot can outlive a connection deleted mid-request.
                 None => continue,
@@ -76,13 +76,18 @@ async fn route_inner(
         }
         let started = std::time::Instant::now();
         if let Some(attempts) = attempts.as_deref_mut() {
-            attempts.push(super::combo::AttemptTrace::new(
+            let mut trace = super::combo::AttemptTrace::new(
                 provider.id.clone(),
                 provider.name.clone(),
                 model.clone(),
                 index as i64 + 1,
                 started,
-            ));
+            );
+            trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
+                slug: namespace,
+                name: group_name,
+            });
+            attempts.push(trace);
         }
         let attempt = tokio::time::timeout(
             std::time::Duration::from_secs(120),

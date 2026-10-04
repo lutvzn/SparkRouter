@@ -46,6 +46,7 @@ cargo test --locked -- --list
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
 | `tests/dashboard_auth.rs` | Optional admin login, cookie isolation/revocation, CSRF/origin protections, login limits |
 | `tests/request_history.rs`, `tests/history_dashboard.rs` | Metadata recording, fallback attempts, usage, streaming lifecycle, retention, escaping, protected clear |
+| `tests/usage_dashboard.rs` | Overview summary/leaderboard, cache and cost usage, streaming metrics, retained-window behavior and clearing statistics |
 | `tests/config_transfer.rs` | Credential-free transfer, preview, validation, atomic rollback, fresh disabled connections |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
@@ -117,8 +118,11 @@ executable following [BUILD.md](BUILD.md); never point an exploratory test at an
 existing installation's database.
 
 1. Open `/providers`; verify navigation, empty states, local CSS, and HTMX load.
-   Verify Providers/Combos links are in the left sidebar, not the top toolbar;
-   check navigation and the compact layout on narrow screens.
+    Verify Providers/Combos links are in the left sidebar, not the top toolbar;
+    check navigation and the compact layout on narrow screens.
+    Open `/` and verify Overview is the default landing page and login
+    destination. Check its five usage cards and top-ten provider ranking using
+    disposable mock history; verify dark/light themes and mobile layout.
    Providers and Combos list titles/subtitles should appear in the top bar beside
    the theme toggle, without duplicate headings in the content area.
    With no saved preference, check that the theme and button match OS light/dark
@@ -220,6 +224,11 @@ For the new dashboard pages, also verify:
 - Make successful, fallback, and interrupted-stream requests using local mocks;
   inspect History outcomes, attempts, usage (unknown if omitted), pagination, and
   Clear. Confirm conversation text is absent, including after restarting.
+- In `tests/usage_dashboard.rs` and the browser smoke test, cover cache-read and
+  explicit USD cost extraction, stream usage, unknown versus explicit-zero values,
+  retry selected-attempt-only accounting, provider ranking and retained-window
+  clearing. Verify cache reads remain a subset of input and unknown/non-USD costs
+  are not estimated; coverage counts must make partial totals apparent.
 - Export configuration, preview it in a second disposable instance using a
   different master key, and confirm import. Check empty/custom provider groups,
   named connections, combo strategies and ordering; connections must be disabled

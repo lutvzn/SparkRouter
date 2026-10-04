@@ -41,10 +41,20 @@ pub async fn call(
     } else {
         let status = response.status();
         let bytes = read_bounded(response).await?;
-        // Validate completeness, but return the original bytes, including all
-        // provider-specific fields and formatting.
-        serde_json::from_slice::<serde::de::IgnoredAny>(&bytes)
-            .map_err(|_| AttemptError::Retryable)?;
+        // Validate the completion envelope, but preserve original bytes and
+        // unknown fields rather than enforcing a full provider response schema.
+        let completion: Value =
+            serde_json::from_slice(&bytes).map_err(|_| AttemptError::Retryable)?;
+        if completion
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_none()
+            || completion
+                .get("error")
+                .is_some_and(|error| !error.is_null())
+        {
+            return Err(AttemptError::Retryable);
+        }
         Ok(json_response(status, bytes))
     }
 }

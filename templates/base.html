@@ -15,6 +15,7 @@
   <aside class="sidebar">
     <div class="brand"><a href="/">{{ app_name }}</a></div>
     <nav aria-label="Dashboard">
+      <a href="/"{% block nav_home %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#chart"></use></svg>Overview</a>
       <a href="/providers"{% block nav_providers %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#server"></use></svg>Providers</a>
       <a href="/combos"{% block nav_combos %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#layers"></use></svg>Combos</a>
       <a href="/api-keys"{% block nav_api_keys %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#key"></use></svg>API keys</a>

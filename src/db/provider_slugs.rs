@@ -146,19 +146,34 @@ pub async fn for_connections(pool: &SqlitePool) -> Result<HashMap<String, String
 
 /// Read configuration and its namespace in a single SQLite snapshot. The
 /// returned provider is the exact configuration whose namespace was checked.
+#[cfg(test)]
 pub(crate) async fn connection(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<(super::providers::Provider, String)>, AppError> {
-    let row = sqlx::query("SELECT p.id, p.name, p.base_url, p.protocol, p.encrypted_api_key, p.enabled, m.group_id, s.slug FROM providers p LEFT JOIN provider_group_connections m ON m.provider_id = p.id LEFT JOIN provider_slugs s ON s.group_id = m.group_id WHERE p.id = ?")
+    Ok(connection_with_name(pool, id)
+        .await?
+        .map(|(provider, slug, _)| (provider, slug)))
+}
+
+/// Provider display identity is snapshotted with the attempted configuration,
+/// so renaming or deleting a connection cannot rewrite its usage attribution.
+pub(crate) async fn connection_with_name(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<Option<(super::providers::Provider, String, String)>, AppError> {
+    let row = sqlx::query("SELECT p.id, p.name, p.base_url, p.protocol, p.encrypted_api_key, p.enabled, m.group_id, s.slug, g.name AS group_name FROM providers p LEFT JOIN provider_group_connections m ON m.provider_id = p.id LEFT JOIN provider_slugs s ON s.group_id = m.group_id LEFT JOIN custom_provider_groups g ON g.id = m.group_id WHERE p.id = ?")
         .bind(id).fetch_optional(pool).await?;
     let Some(row) = row else {
         return Ok(None);
     };
-    Ok(Some((
-        super::providers::provider_from_row(&row)?,
-        namespace(&row, id)?,
-    )))
+    let provider = super::providers::provider_from_row(&row)?;
+    let name = match row.try_get::<Option<String>, _>("group_name")? {
+        Some(name) => name,
+        None => provider_catalog::matching(&provider.base_url, &provider.protocol)
+            .map_or_else(|| provider.name.clone(), |preset| preset.name.to_owned()),
+    };
+    Ok(Some((provider, namespace(&row, id)?, name)))
 }
 
 fn namespace(row: &SqliteRow, id: &str) -> Result<String, AppError> {

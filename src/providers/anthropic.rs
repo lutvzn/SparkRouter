@@ -13,6 +13,12 @@ use super::{
 };
 use crate::{crypto::Crypto, db::providers::Provider, error::AppError};
 
+/// Anthropic requires `max_tokens`. Requests that omit both OpenAI budgets get
+/// this ceiling instead of a silent 1024-token cut. 8192 matches the output
+/// limit of current Claude models that reject a higher value with a permanent
+/// 400. Set `max_tokens` or `max_completion_tokens` for a different ceiling.
+const DEFAULT_MAX_TOKENS: u64 = 8192;
+
 pub async fn call(
     client: &reqwest::Client,
     crypto: &Crypto,
@@ -220,7 +226,7 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
         .filter(|value| !value.is_null())
         .or_else(|| body.get("max_tokens").filter(|value| !value.is_null()))
         .cloned()
-        .unwrap_or(json!(1024));
+        .unwrap_or(json!(DEFAULT_MAX_TOKENS));
     if !max_tokens.as_u64().is_some_and(|value| value > 0) {
         return Err(invalid("max_tokens must be a positive integer"));
     }
@@ -432,19 +438,36 @@ fn finish_reason(reason: Option<&str>) -> &'static str {
     }
 }
 
-fn usage(input: u64, output: u64) -> Value {
-    json!({"prompt_tokens":input, "completion_tokens":output, "total_tokens":input.saturating_add(output)})
+fn usage_with_cache(input: Option<u64>, output: Option<u64>, cached: Option<u64>) -> Value {
+    let mut value = json!({});
+    if let Some(input) = input {
+        value["prompt_tokens"] = json!(input);
+    }
+    if let Some(output) = output {
+        value["completion_tokens"] = json!(output);
+    }
+    if let Some((input, output)) = input.zip(output) {
+        value["total_tokens"] = json!(input.saturating_add(output));
+    }
+    if let Some(cached) = cached {
+        value["prompt_tokens_details"] = json!({"cached_tokens":cached});
+    }
+    value
 }
 
-fn input_tokens(value: &Value) -> u64 {
-    [
-        "input_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-    ]
-    .into_iter()
-    .map(|key| value.get(key).and_then(Value::as_u64).unwrap_or(0))
-    .fold(0u64, u64::saturating_add)
+fn cache_read_tokens(value: &Value) -> Option<u64> {
+    value.get("cache_read_input_tokens").and_then(Value::as_u64)
+}
+
+fn input_tokens(value: &Value) -> Option<u64> {
+    let mut input = value.get("input_tokens")?.as_u64()?;
+    // Cache counters are optional, but a missing base count is not zero.
+    for key in ["cache_creation_input_tokens", "cache_read_input_tokens"] {
+        if let Some(tokens) = value.get(key) {
+            input = input.checked_add(tokens.as_u64()?)?;
+        }
+    }
+    Some(input)
 }
 
 fn translate_response(message: &Value) -> Result<Value, AttemptError> {
@@ -498,7 +521,7 @@ fn translate_response(message: &Value) -> Result<Value, AttemptError> {
     Ok(json!({
         "id":id, "object":"chat.completion", "created":created(), "model":model,
         "choices":[{"index":0, "message":assistant, "finish_reason":finish_reason(message.get("stop_reason").and_then(Value::as_str))}],
-        "usage":usage(input_tokens(tokens), tokens.get("output_tokens").and_then(Value::as_u64).unwrap_or(0))
+        "usage":usage_with_cache(input_tokens(tokens), tokens.get("output_tokens").and_then(Value::as_u64), cache_read_tokens(tokens))
     }))
 }
 
@@ -518,7 +541,11 @@ fn upstream_error(event: &Value) -> AttemptError {
         Some("request_too_large") => StatusCode::PAYLOAD_TOO_LARGE,
         _ => return AttemptError::Retryable,
     };
-    AttemptError::Permanent(AppError::Upstream(status))
+    if crate::routing::combo::is_retryable_status(status) {
+        AttemptError::Retryable
+    } else {
+        AttemptError::Permanent(AppError::Upstream(status))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -535,8 +562,9 @@ struct StreamState {
     started: bool,
     finished: bool,
     stopped: bool,
-    input_tokens: u64,
-    output_tokens: u64,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
     tool_count: usize,
     blocks: HashMap<u64, Block>,
     include_usage: bool,
@@ -551,8 +579,9 @@ impl StreamState {
             started: false,
             finished: false,
             stopped: false,
-            input_tokens: 0,
-            output_tokens: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
             tool_count: 0,
             blocks: HashMap::new(),
             include_usage,
@@ -598,10 +627,10 @@ impl StreamState {
                 .ok_or(AttemptError::Retryable)?
                 .to_owned();
             self.input_tokens = input_tokens(&message["usage"]);
+            self.cached_tokens = cache_read_tokens(&message["usage"]);
             self.output_tokens = message
                 .pointer("/usage/output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+                .and_then(Value::as_u64);
             self.started = true;
             output.push(self.chunk(json!({"role":"assistant", "content":""}), None));
             return Ok(output);
@@ -725,10 +754,16 @@ impl StreamState {
             }
             "message_delta" => {
                 if let Some(tokens) = value
+                    .pointer("/usage/cache_read_input_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    self.cached_tokens = Some(tokens);
+                }
+                if let Some(tokens) = value
                     .pointer("/usage/output_tokens")
                     .and_then(Value::as_u64)
                 {
-                    self.output_tokens = tokens;
+                    self.output_tokens = Some(tokens);
                 }
                 if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
                     if self.finished || !self.blocks.is_empty() {
@@ -745,7 +780,7 @@ impl StreamState {
                 self.stopped = true;
                 if self.include_usage {
                     output.push(sse_json(json!({"id":self.id, "object":"chat.completion.chunk", "created":self.created, "model":self.model,
-                        "choices":[], "usage":usage(self.input_tokens, self.output_tokens)})));
+                        "choices":[], "usage":usage_with_cache(self.input_tokens, self.output_tokens, self.cached_tokens)})));
                 }
                 output.push(Bytes::from_static(b"data: [DONE]\n\n"));
             }
@@ -785,6 +820,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_token_budget_uses_the_documented_default() {
+        let translated = translate_request(
+            &json!({"model":"combo", "messages":[{"role":"user", "content":"hi"}]}),
+            "claude",
+        )
+        .unwrap();
+        assert_eq!(translated["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(DEFAULT_MAX_TOKENS, 8192);
+    }
 
     #[test]
     fn translates_system_images_tools_and_preserves_extensions() {
@@ -886,6 +932,109 @@ mod tests {
             "{\"city\":\"Paris\"}"
         );
         assert_eq!(value["usage"]["total_tokens"], 13);
+        assert_eq!(value["usage"]["prompt_tokens_details"]["cached_tokens"], 8);
+        assert_eq!(value["usage"]["prompt_tokens"], 10);
+    }
+
+    #[test]
+    fn cache_usage_preserves_zero_and_absence() {
+        let response = |usage| {
+            translate_response(&json!({"id":"m", "model":"c", "content":[], "usage":usage}))
+                .unwrap()
+        };
+        assert_eq!(
+            response(json!({"input_tokens":10,"cache_read_input_tokens":0,"output_tokens":3}))["usage"]
+                ["prompt_tokens_details"]["cached_tokens"],
+            0
+        );
+        assert!(
+            response(json!({"input_tokens":10,"output_tokens":3}))["usage"]
+                .get("prompt_tokens_details")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_token_counts_are_not_reported_as_zero() {
+        for (tokens, expected) in [
+            (Value::Null, json!({})),
+            (json!({}), json!({})),
+            (json!({"input_tokens":4}), json!({"prompt_tokens":4})),
+            (json!({"output_tokens":2}), json!({"completion_tokens":2})),
+            (
+                json!({"input_tokens":0,"output_tokens":0}),
+                json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            ),
+            (
+                json!({"cache_read_input_tokens":3}),
+                json!({"prompt_tokens_details":{"cached_tokens":3}}),
+            ),
+            (json!({"input_tokens":-1,"output_tokens":"2"}), json!({})),
+            (
+                json!({"input_tokens":4,"cache_creation_input_tokens":-1}),
+                json!({}),
+            ),
+            (
+                json!({"input_tokens":u64::MAX,"cache_creation_input_tokens":1}),
+                json!({}),
+            ),
+            (
+                json!({"input_tokens":4,"cache_creation_input_tokens":3,"cache_read_input_tokens":2,"output_tokens":1}),
+                json!({"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2}}),
+            ),
+        ] {
+            let translated =
+                translate_response(&json!({"id":"m","model":"claude","content":[],"usage":tokens}))
+                    .unwrap();
+            assert_eq!(translated["usage"], expected, "upstream usage: {tokens}");
+        }
+        let absent = translate_response(&json!({"id":"m","model":"claude","content":[]})).unwrap();
+        assert_eq!(absent["usage"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn streamed_usage_preserves_missing_partial_and_zero_counts() {
+        for (start, delta, expected) in [
+            (Value::Null, Value::Null, json!({})),
+            (
+                json!({"input_tokens":4}),
+                json!({"output_tokens":2}),
+                json!({"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}),
+            ),
+            (
+                Value::Null,
+                json!({"output_tokens":0}),
+                json!({"completion_tokens":0}),
+            ),
+            (
+                json!({"input_tokens":0,"output_tokens":0}),
+                json!({}),
+                json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+            ),
+        ] {
+            let wire: String = [
+                json!({"type":"message_start","message":{"id":"m","model":"claude","usage":start}}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":delta}),
+                json!({"type":"message_stop"}),
+            ]
+            .into_iter()
+            .map(event)
+            .collect();
+            let chunks = translate_stream(
+                futures_util::stream::iter(vec![Ok(Bytes::from(wire))]),
+                true,
+            )
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+            assert_eq!(chunks.last().unwrap().as_ref(), b"data: [DONE]\n\n");
+            let usage_chunk = std::str::from_utf8(&chunks[chunks.len() - 2]).unwrap();
+            let translated: Value =
+                serde_json::from_str(usage_chunk.strip_prefix("data: ").unwrap().trim()).unwrap();
+            assert_eq!(translated["usage"], expected);
+        }
     }
 
     fn event(value: Value) -> String {
@@ -897,7 +1046,7 @@ mod tests {
 
     fn tool_stream() -> String {
         [
-            json!({"type":"message_start", "message":{"id":"msg_1", "model":"claude", "usage":{"input_tokens":7,"output_tokens":0}}}),
+            json!({"type":"message_start", "message":{"id":"msg_1", "model":"claude", "usage":{"input_tokens":7,"cache_read_input_tokens":8,"output_tokens":0}}}),
             json!({"type":"content_block_start", "index":0, "content_block":{"type":"text", "text":""}}),
             json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta", "text":"Héllo 🦀"}}),
             json!({"type":"content_block_stop", "index":0}),
@@ -957,7 +1106,10 @@ mod tests {
             whole[3]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
             "{\"city\":"
         );
-        assert_eq!(whole.last().unwrap()["usage"], usage(7, 12));
+        assert_eq!(
+            whole.last().unwrap()["usage"],
+            usage_with_cache(Some(15), Some(12), Some(8))
+        );
     }
 
     #[tokio::test]

@@ -73,6 +73,8 @@ on process restart and dashboard deletion removes the combo's cursor.
 | `provider_slugs` | Custom group ID with cascading deletion; unique saved public slug (1–64 lowercase letters/digits/hyphens) |
 | `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope, restricted flag, optional Unix expiry timestamp |
 | `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
+| `request_history` | Bounded metadata snapshots for routed API/test-chat requests, including usage/cost and retained provider identity |
+| `request_attempts` | Ordered attempt snapshots with provider slug/group name; cascade with history deletion |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
 reference it. An index supports provider-reference lookups. There is no models
@@ -159,10 +161,12 @@ For chat requests:
    again. Random uses OS randomness with rejection sampling to avoid modulo bias.
    Both visit remaining steps cyclically from the selected start, at most once.
 
-The explicit retryable HTTP statuses are **408, 429, 500, 502, 503, 504**.
+The explicit retryable HTTP statuses are **401, 402, 404, 408, 429, 500, 502, 503, 504, 529**.
 Transport failures, timeouts, and invalid/incomplete upstream success payloads
 can also fail over before commitment. Local credential/configuration failures
-are permanent. Most malformed-request and authorization statuses stop the chain.
+are permanent. Malformed-request statuses, including 400 and 422, stop the chain.
+403 stays permanent because it can reject the request itself. Upstream 401, 402,
+404, and 529 describe that target and try the next connection or combo step.
 There are no repeated attempts, hedged requests, cooldowns, or adaptive routing.
 
 Unknown combos and model IDs that no connection lists return `404`. Exhausted,
@@ -194,7 +198,7 @@ Both protocols test connectivity with `GET {base_url}/models`. That is not a
 generation test or a guarantee of access to a particular model.
 
 Anthropic translation deliberately rejects unsupported semantics rather than
-pretending to provide full OpenAI parity. Its default token budget is 1024.
+pretending to provide full OpenAI parity. Its default token budget is 8192.
 Unknown extension fields can pass through, while known bookkeeping fields are
 omitted. Thinking blocks are not exposed as answer text. See the README for the
 current supported subset.
@@ -256,6 +260,17 @@ Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matchin
 combo pages. POST actions handle create/edit/delete, connection tests, model-list refresh, and step
 add/edit/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
 forms generally use 303 redirects back to GET pages. There is no SPA state store.
+The `/` Overview is the default dashboard landing and login destination. It reads
+only retained history and displays five summary cards (requests, input/output/
+cache-read tokens, USD spend) plus the ten providers ranked by distinct requests.
+It performs summary and leaderboard reads in SQL read transactions; it does not
+call providers or use a worker. Pending streams are excluded. Only the selected
+successful attempt contributes usage, preventing fallback retries from being
+double-counted. Cache-read tokens are a subset of input tokens, not additive to
+them. Missing metrics remain unknown; coverage counts make partial totals visible.
+Only explicitly reported USD costs are summed; non-USD costs and missing costs
+are unknown, with no estimated pricing. Clearing retained history clears these
+statistics, not lifetime totals.
 The shared shell renders page headings and the current navigation section on the
 server. One embedded stylesheet supplies light/dark design tokens, reusable
 controls, focus indicators, and responsive layout; no frontend build is needed.
@@ -366,13 +381,29 @@ carry best-effort usage metadata in internal response extensions. The streaming
 observer frames bounded SSE events and reads usage without re-encoding events;
 malformed observer data never alters forwarding. Terminal body errors record
 interruption; dropped bodies record cancellation (or success if `[DONE]` was
-already observed). Drop finalization is a bounded asynchronous database write,
-not a recurring worker. Recording failures are logged only as fixed categories
-and never fail generation. Startup marks orphaned streaming rows interrupted.
+already observed). The insert is spawned and does not delay the response. Streaming finalization
+waits for that insert before writing the terminal outcome, including before a
+terminal body error is forwarded. Drop finalization is a bounded asynchronous
+database write, not a recurring worker. Recording failures are logged only as
+fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.
 The `request_history` and `request_attempts` tables contain metadata snapshots
 only, with no foreign keys to live configuration that could block deletion.
-Inserts prune to 10,000 requests; attempts cascade with history deletion. The
-dashboard lists 50 rows per page with aggregates and a protected clear action.
+Inserts prune to the newest 10,000 requests; attempts cascade with history
+deletion. A new additive migration stores cache-token and cost fields on request
+history and provider-slug/group-name snapshots on attempts, captured from the
+same SQL configuration snapshot used for each attempt. These identities survive
+provider rename/deletion and history remains independent of live configuration.
+Older rows and attempts without identity retain unknown values; the dashboard
+does not fabricate cache/cost or assign a provider identity per connection.
+OpenAI cache-read usage is recognized from `prompt_tokens_details.cached_tokens`,
+`input_tokens_details.cached_tokens`, or `cache_read_input_tokens`; Anthropic
+cache-read usage is translated from its read-token usage, including streams when
+usage events are requested. Cost is accepted only from explicit `usage.cost`
+(OpenRouter-style USD) or `usage.cost_usd`; explicitly non-USD costs are ignored.
+Missing usage and cost stay NULL/unknown, while explicit zero is valid. Summary
+coverage counts surface partial totals rather than implying invoice accuracy.
+The dashboard lists 50 rows per page with aggregates and a protected clear action;
+Overview aggregates the same retained window.
 
 Configuration transfer uses a strict versioned JSON schema and consistent export
 snapshot, excluding all secret material, API keys, cached models, and history.

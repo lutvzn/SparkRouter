@@ -9,6 +9,7 @@ pub mod provider_groups;
 pub mod provider_slugs;
 pub mod providers;
 pub mod request_history;
+pub mod usage;
 
 use std::{str::FromStr, time::Duration};
 

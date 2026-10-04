@@ -159,11 +159,16 @@ pub async fn list_models(
     let mut seen = std::collections::HashSet::new();
     let mut after: Option<String> = None;
     let mut truncated = false;
+    let mut pages_fetched = 0;
+    let mut pending_cursor = false;
     for _ in 0..MAX_MODEL_PAGES {
         if models.len() >= MAX_LISTED_MODELS {
             truncated = true;
+            pending_cursor = false;
             break;
         }
+        pages_fetched += 1;
+        pending_cursor = false;
         let endpoint = match &after {
             Some(cursor) => format!("models?limit=100&after_id={}", query_component(cursor)),
             None => "models".to_owned(),
@@ -190,7 +195,10 @@ pub async fn list_models(
             }
         }
         match next {
-            Some(cursor) if !truncated && models.len() < MAX_LISTED_MODELS => after = Some(cursor),
+            Some(cursor) if !truncated && models.len() < MAX_LISTED_MODELS => {
+                after = Some(cursor);
+                pending_cursor = true;
+            }
             Some(_) => {
                 truncated = true;
                 break;
@@ -198,7 +206,16 @@ pub async fn list_models(
             None => break,
         }
     }
-    Ok(ListedModels { models, truncated })
+    Ok(ListedModels {
+        models,
+        truncated: model_list_truncated(truncated, pages_fetched, pending_cursor),
+    })
+}
+
+/// A page cap with a leftover cursor is an incomplete catalog. Falling off the
+/// fetch loop used to leave `truncated` false unless the count cap was also hit.
+fn model_list_truncated(already: bool, pages_fetched: usize, pending_cursor: bool) -> bool {
+    already || (pending_cursor && pages_fetched >= MAX_MODEL_PAGES)
 }
 
 /// Reads one OpenAI- or Anthropic-shaped models page. Unknown entries are
@@ -698,6 +715,14 @@ mod tests {
         ] {
             assert!(normalize_base_url(url).is_err());
         }
+    }
+
+    #[test]
+    fn page_cap_with_a_leftover_cursor_is_truncated() {
+        assert!(!model_list_truncated(false, 1, false));
+        assert!(!model_list_truncated(false, MAX_MODEL_PAGES - 1, true));
+        assert!(model_list_truncated(false, MAX_MODEL_PAGES, true));
+        assert!(model_list_truncated(true, 1, false));
     }
 
     #[test]

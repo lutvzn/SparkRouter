@@ -114,7 +114,7 @@ struct LoginPage {
 
 pub async fn page(State(state): State<AppState>) -> Result<Response, AppError> {
     if state.dashboard_auth.is_none() {
-        return Ok(super::see_other("/providers"));
+        return Ok(super::see_other("/"));
     }
     Ok(super::render(LoginPage {
         app_name: crate::APP_NAME,
@@ -144,7 +144,7 @@ pub async fn login(
 ) -> Result<Response, AppError> {
     super::check_csrf(&state, &form._csrf)?;
     let Some(auth) = &state.dashboard_auth else {
-        return Ok(super::see_other("/providers"));
+        return Ok(super::see_other("/"));
     };
     let now = Instant::now();
     // Trust the actual socket peer, never attacker-supplied forwarding headers.
@@ -218,7 +218,7 @@ pub async fn login(
         sessions.tokens.insert(token.clone(), now + LIFETIME);
         token
     };
-    let mut response = super::see_other("/providers");
+    let mut response = super::see_other("/");
     response.headers_mut().insert(
         header::SET_COOKIE,
         auth.cookie_header(&token, LIFETIME.as_secs()),
@@ -235,7 +235,7 @@ struct LogoutPage {
 
 pub async fn logout_page(State(state): State<AppState>) -> Result<Response, AppError> {
     if state.dashboard_auth.is_none() {
-        return Ok(super::see_other("/providers"));
+        return Ok(super::see_other("/"));
     }
     Ok(super::render(LogoutPage {
         app_name: crate::APP_NAME,

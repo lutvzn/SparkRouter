@@ -45,9 +45,16 @@ fn random_start(count: usize, mut draw: impl FnMut() -> u64) -> usize {
 }
 
 /// Deliberately small policy: transient transport failures are handled separately.
-/// Authentication, permissions, not-found and malformed requests stop the chain.
+///
+/// 401, 402, 404, and 529 describe that target (bad credential, billing, missing
+/// model, Anthropic overload), so another connection or combo step may still
+/// succeed. 400 and 422 are properties of the request. 403 stays permanent
+/// because it can be a policy rejection rather than a missing credential.
 pub fn is_retryable_status(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+    matches!(
+        status.as_u16(),
+        401 | 402 | 404 | 408 | 429 | 500 | 502 | 503 | 504 | 529
+    )
 }
 
 pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Response, AppError> {
@@ -64,6 +71,8 @@ pub(crate) struct AttemptTrace {
     pub position: i64,
     pub outcome: &'static str,
     pub latency_ms: u128,
+    #[serde(skip)]
+    pub provider_snapshot: Option<crate::db::request_history::ProviderSnapshot>,
     #[serde(skip)]
     started: std::time::Instant,
 }
@@ -83,6 +92,7 @@ impl AttemptTrace {
             position,
             outcome: "in_progress",
             latency_ms: 0,
+            provider_snapshot: None,
             started,
         }
     }
@@ -135,13 +145,15 @@ async fn route_inner(
         steps.rotate_left(start);
     }
     for step in steps {
-        let provider = match provider_db::get(&state.db, &step.provider_id).await {
-            Ok(provider) => provider,
-            // A dashboard edit can remove this snapshotted step and then its
-            // provider while an earlier upstream attempt is still in progress.
-            Err(AppError::NotFound(_)) => continue,
-            Err(error) => return Err(error),
-        };
+        let (provider, slug, group_name) =
+            match crate::db::provider_slugs::connection_with_name(&state.db, &step.provider_id)
+                .await?
+            {
+                Some(provider) => provider,
+                // A dashboard edit can remove this snapshotted step and then its
+                // provider while an earlier upstream attempt is still in progress.
+                None => continue,
+            };
         if !provider.enabled {
             tracing::debug!(combo = name, provider = %provider.id, "disabled provider skipped");
             continue;
@@ -155,6 +167,10 @@ async fn route_inner(
                 position: step.position + 1,
                 outcome: "in_progress",
                 latency_ms: 0,
+                provider_snapshot: Some(crate::db::request_history::ProviderSnapshot {
+                    slug,
+                    name: group_name,
+                }),
                 started,
             });
         }
@@ -206,6 +222,7 @@ mod tests {
             position: 2,
             outcome: "in_progress",
             latency_ms: 0,
+            provider_snapshot: None,
             started: std::time::Instant::now(),
         };
         trace.finish("timed_out");
@@ -260,10 +277,10 @@ mod tests {
 
     #[test]
     fn retry_policy_is_explicit() {
-        for status in [408, 429, 500, 502, 503, 504] {
+        for status in [401, 402, 404, 408, 429, 500, 502, 503, 504, 529] {
             assert!(is_retryable_status(StatusCode::from_u16(status).unwrap()));
         }
-        for status in [200, 301, 400, 401, 403, 404, 422, 501] {
+        for status in [200, 301, 400, 403, 422, 501] {
             assert!(!is_retryable_status(StatusCode::from_u16(status).unwrap()));
         }
     }

@@ -63,6 +63,18 @@ pub struct Attempt {
     pub latency_ms: i64,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct UsageMetrics {
+    pub cached_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Clone)]
+pub struct ProviderSnapshot {
+    pub slug: String,
+    pub name: String,
+}
+
 /// A stored [`Record`] plus the `created_at` timestamp the database assigned
 /// on save; timestamps are never supplied by the caller.
 pub struct StoredRecord {
@@ -91,6 +103,37 @@ pub struct HistoryStats {
 /// [`MAX_RETAINED`] rows is deleted; attempt rows follow through
 /// `ON DELETE CASCADE`.
 pub async fn save(pool: &SqlitePool, record: &Record) -> Result<(), AppError> {
+    save_with_usage(pool, record, UsageMetrics::default(), &[]).await
+}
+
+pub async fn save_with_usage(
+    pool: &SqlitePool,
+    record: &Record,
+    usage: UsageMetrics,
+    snapshots: &[Option<ProviderSnapshot>],
+) -> Result<(), AppError> {
+    validate_usage(usage)?;
+    if !snapshots.is_empty() && snapshots.len() != record.attempts.len() {
+        return Err(AppError::InvalidRequest(
+            "provider snapshots must match attempts".into(),
+        ));
+    }
+    for snapshot in snapshots.iter().flatten() {
+        if snapshot.slug.is_empty()
+            || snapshot.slug.len() > 64
+            || !snapshot
+                .slug
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(AppError::InvalidRequest("invalid provider snapshot".into()));
+        }
+        validate(
+            "provider group name",
+            &snapshot.name,
+            MAX_PROVIDER_NAME_CHARS,
+        )?;
+    }
     validate("source", &record.source, MAX_SOURCE_CHARS)?;
     validate("model", &record.model, MAX_PUBLIC_MODEL_CHARS)?;
     validate("outcome", &record.outcome, MAX_OUTCOME_CHARS)?;
@@ -113,8 +156,8 @@ pub async fn save(pool: &SqlitePool, record: &Record) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO request_history
              (id, source, model, streaming, outcome, status, latency_ms,
-              input_tokens, output_tokens)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              input_tokens, output_tokens, cached_tokens, cost_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&record.id)
     .bind(&record.source)
@@ -125,14 +168,16 @@ pub async fn save(pool: &SqlitePool, record: &Record) -> Result<(), AppError> {
     .bind(record.latency_ms)
     .bind(record.input_tokens)
     .bind(record.output_tokens)
+    .bind(usage.cached_tokens)
+    .bind(usage.cost_usd)
     .execute(&mut *transaction)
     .await?;
     for (ordinal, attempt) in record.attempts.iter().enumerate() {
         sqlx::query(
             "INSERT INTO request_attempts
                  (request_id, ordinal, position, provider_id, provider_name,
-                  model, outcome, latency_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  model, outcome, latency_ms, provider_slug, provider_group_name)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&record.id)
         .bind(ordinal as i64)
@@ -142,6 +187,18 @@ pub async fn save(pool: &SqlitePool, record: &Record) -> Result<(), AppError> {
         .bind(&attempt.model)
         .bind(&attempt.outcome)
         .bind(attempt.latency_ms)
+        .bind(
+            snapshots
+                .get(ordinal)
+                .and_then(Option::as_ref)
+                .map(|s| &s.slug),
+        )
+        .bind(
+            snapshots
+                .get(ordinal)
+                .and_then(Option::as_ref)
+                .map(|s| &s.name),
+        )
         .execute(&mut *transaction)
         .await?;
     }
@@ -173,19 +230,56 @@ pub async fn finish(
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
 ) -> Result<(), AppError> {
+    finish_with_usage(
+        pool,
+        id,
+        outcome,
+        latency_ms,
+        input_tokens,
+        output_tokens,
+        UsageMetrics::default(),
+    )
+    .await
+}
+
+pub async fn finish_with_usage(
+    pool: &SqlitePool,
+    id: &str,
+    outcome: &str,
+    latency_ms: i64,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    usage: UsageMetrics,
+) -> Result<(), AppError> {
     validate("outcome", outcome, MAX_OUTCOME_CHARS)?;
+    validate_usage(usage)?;
     sqlx::query(
         "UPDATE request_history
-         SET outcome = ?, latency_ms = ?, input_tokens = ?, output_tokens = ?
+         SET outcome = ?, latency_ms = ?, input_tokens = ?, output_tokens = ?, cached_tokens = ?, cost_usd = ?
          WHERE id = ?",
     )
     .bind(outcome)
     .bind(latency_ms)
     .bind(input_tokens)
     .bind(output_tokens)
+    .bind(usage.cached_tokens)
+    .bind(usage.cost_usd)
     .bind(id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+fn validate_usage(usage: UsageMetrics) -> Result<(), AppError> {
+    if usage
+        .cached_tokens
+        .is_some_and(|v| !(0..=1_000_000_000).contains(&v))
+        || usage
+            .cost_usd
+            .is_some_and(|v| !v.is_finite() || !(0.0..=1_000_000.0).contains(&v))
+    {
+        return Err(AppError::InvalidRequest("invalid usage metrics".into()));
+    }
     Ok(())
 }
 

@@ -9,9 +9,10 @@
 //!
 //! History is metadata only: rows, schema, and the dashboard history page must
 //! never contain prompts, completions, credentials, endpoint URLs, or upstream
-//! error bodies. Stream finalization is observed deterministically — awaiting
-//! the body for success/interrupted, and a bounded yield-and-query loop for the
-//! task spawned when an unpolled body is dropped — with no sleeps anywhere.
+//! error bodies. The insert is asynchronous, so readers yield until the expected
+//! row exists. Stream finalization is observed deterministically — awaiting the
+//! body for success/interrupted, and a bounded yield-and-query loop for the task
+//! spawned when an unpolled body is dropped — with no sleeps anywhere.
 
 use std::{
     net::SocketAddr,
@@ -131,6 +132,7 @@ async fn rotated_combo_history_preserves_actual_attempt_order() -> TestResult {
     let response = send(&state, chat_request(&body)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let _ = body_bytes(response).await;
+    let _ = single_record(&state).await;
     sqlx::query("DELETE FROM request_history")
         .execute(&state.db)
         .await?;
@@ -449,11 +451,38 @@ async fn history(state: &AppState) -> Vec<Record> {
         .collect()
 }
 
+async fn wait_for_count(state: &AppState, count: usize) -> Vec<Record> {
+    for _ in 0..2_000 {
+        let records = history(state).await;
+        if records.len() == count {
+            return records;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "expected {count} history records, found {}",
+        history(state).await.len()
+    );
+}
+
 /// The single record recorded so far, asserting there is exactly one.
+///
+/// The insert no longer blocks the response, so this yields until that row
+/// appears instead of racing the background write.
 async fn single_record(state: &AppState) -> Record {
-    let records = history(state).await;
-    assert_eq!(records.len(), 1, "expected exactly one history record");
-    records.into_iter().next().unwrap()
+    for _ in 0..2_000 {
+        let records = history(state).await;
+        if records.len() == 1 {
+            return records.into_iter().next().unwrap();
+        }
+        assert!(
+            records.is_empty(),
+            "expected exactly one history record, found {}",
+            records.len()
+        );
+        tokio::task::yield_now().await;
+    }
+    panic!("expected exactly one history record, found none");
 }
 
 /// Drives the runtime with yields (never sleeps) while re-reading the record,
@@ -520,7 +549,8 @@ async fn json_fallback_records_success_usage_attempts_and_exact_bytes() -> TestR
         "\"content\":\"",
         "mock-reply-marker-246810",
         "\"},\"finish_reason\":\"stop\"}],",
-        "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}"
+        "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,",
+        "\"prompt_tokens_details\":{\"cached_tokens\":80},\"cost_usd\":0.012}}"
     );
     let (second_router, captured) = captured_json_router(StatusCode::OK, success_body);
     let second = spawn_upstream(second_router).await;
@@ -589,8 +619,20 @@ async fn json_fallback_records_success_usage_attempts_and_exact_bytes() -> TestR
     assert_eq!(row.outcome, "success");
     assert_eq!(row.status, 200);
     assert!(row.latency_ms >= 0);
-    assert_eq!(row.input_tokens, Some(11));
-    assert_eq!(row.output_tokens, Some(7));
+    assert_eq!(row.input_tokens, Some(100));
+    assert_eq!(row.output_tokens, Some(20));
+    let (cached, cost): (Option<i64>, Option<f64>) =
+        sqlx::query_as("SELECT cached_tokens, cost_usd FROM request_history WHERE id = ?")
+            .bind(&row.id)
+            .fetch_one(&state.db)
+            .await?;
+    assert_eq!(cached, Some(80));
+    assert_eq!(cost, Some(0.012));
+    let overview = sparkrouter::db::usage::overview(&state.db).await?;
+    assert_eq!(overview.input_tokens, Some(100));
+    assert_eq!(overview.output_tokens, Some(20));
+    assert_eq!(overview.cached_tokens, Some(80));
+    assert_eq!(overview.cost_usd, Some(0.012));
 
     // Attempt snapshots: both steps, in request order, with configured
     // positions, display names, models, outcomes, and latencies.
@@ -877,9 +919,10 @@ async fn streaming_records_streaming_then_success_with_fragmented_usage() -> Tes
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"conte",
         "nt\":\"He\"}}]}\n",
         "\ndata: {\"choices\":[],\"usage\":{\"prom",
-        "pt_tokens\":9}}\n\n",
+        "pt_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":5},\"cost\":0.001}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":5},\"cost\":0.001}}\n\n",
         "data: {\"choices\":[],\"usage\":{\"compl",
-        "etion_tokens\":6,\"total_tokens\":15}}\n",
+        "etion_tokens\":6,\"total_tokens\":15,\"cost\":0.002}}\n",
         "\ndata: [DONE]",
         "\n\n",
     ];
@@ -959,6 +1002,15 @@ async fn streaming_records_streaming_then_success_with_fragmented_usage() -> Tes
     assert_eq!(done.status, 200);
     assert_eq!(done.input_tokens, Some(9));
     assert_eq!(done.output_tokens, Some(6));
+    let totals = sparkrouter::db::usage::overview(&state.db).await?;
+    assert_eq!(totals.cached_tokens, Some(5));
+    assert_eq!(
+        totals.cost_usd,
+        Some(0.002),
+        "stream usage snapshots are not cumulative charges"
+    );
+    assert_eq!(totals.providers[0].cached_tokens, Some(5));
+    assert_eq!(totals.providers[0].cost_usd, Some(0.002));
     assert!(done.latency_ms >= open.latency_ms);
 
     // The unknown stream_options field survived to the upstream untouched.
@@ -978,8 +1030,10 @@ async fn streaming_records_streaming_then_success_with_fragmented_usage() -> Tes
 #[tokio::test]
 async fn midstream_truncation_records_interrupted_without_failover() -> TestResult {
     let state = test_state().await;
-    // One frame and then a clean EOF without [DONE]: a truncated generation.
-    let first = spawn_upstream(sse_router(vec!["data: {\"first\":true}\n\n"])).await;
+    // Usage observed before a truncated EOF is still retained, without turning
+    // the interruption into a success or attempting a fallback.
+    const FIRST_FRAME: &str = "data: {\"first\":true,\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":8},\"cost\":0.001}}\n\n";
+    let first = spawn_upstream(sse_router(vec![FIRST_FRAME])).await;
     let second = spawn_upstream(captured_json_router(StatusCode::OK, "{\"usage\":{}}").0).await;
 
     save_provider(
@@ -1023,7 +1077,7 @@ async fn midstream_truncation_records_interrupted_without_failover() -> TestResu
         .expect("first frame within timeout")
         .expect("stream contains a first frame")
         .expect("first frame is data");
-    assert_eq!(frame, Bytes::from_static(b"data: {\"first\":true}\n\n"));
+    assert_eq!(frame, Bytes::from_static(FIRST_FRAME.as_bytes()));
 
     // The truncation surfaces as a body error; the finalization write is
     // awaited before that error frame is forwarded, so the row is already
@@ -1040,8 +1094,11 @@ async fn midstream_truncation_records_interrupted_without_failover() -> TestResu
     assert!(row.streaming);
     assert_eq!(row.outcome, "interrupted");
     assert_eq!(row.status, 200);
-    assert_eq!(row.input_tokens, None);
+    assert_eq!(row.input_tokens, Some(10));
     assert_eq!(row.output_tokens, None);
+    let totals = sparkrouter::db::usage::overview(&state.db).await?;
+    assert_eq!(totals.cached_tokens, Some(8));
+    assert_eq!(totals.cost_usd, Some(0.001));
 
     let attempts = &row.attempts;
     assert_eq!(attempts.len(), 1);
@@ -1191,7 +1248,7 @@ async fn history_rows_schema_and_page_store_metadata_only() -> TestResult {
     let _ = body_bytes(response).await;
     assert_eq!(bad.hits.count(), 1);
 
-    let rows = history(&state).await;
+    let rows = wait_for_count(&state, 2).await;
     assert_eq!(rows.len(), 2, "both requests must be recorded");
     assert_eq!(rows[0].model, "combo/failing", "newest record first");
     assert_eq!(rows[1].model, "combo/coding");

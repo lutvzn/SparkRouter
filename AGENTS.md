@@ -59,6 +59,7 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   at most once per request. Round robin advances once per request, not per retry.
   Permanent client/upstream request
   errors stop the chain; retry classification belongs in the routing helper.
+  Target-specific 401, 402, 404, and 529 are retryable. 400, 403, and 422 are not.
   `combo/<name>` is always a combo. Direct public IDs are
   `<provider-slug>/<upstream-model-id>`; strip only the first prefix and preserve
   the complete upstream suffix. Try enabled connections within that provider

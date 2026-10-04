@@ -191,11 +191,9 @@ async fn without_a_password_the_dashboard_stays_open() {
     let state = auth_state(None, false, None).await;
     let router = app::router(state.clone());
 
-    // Every dashboard page renders without any cookie; `/` is the index
-    // redirect and simply forwards to the open providers page.
+    // The dashboard home renders directly without any cookie.
     let index = get(&router, "/", &[]).await;
-    assert_eq!(index.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&index), "/providers");
+    assert_eq!(index.status(), StatusCode::OK);
     for path in ["/providers", "/combos", "/api-keys"] {
         let response = get(&router, path, &[]).await;
         assert_eq!(
@@ -210,11 +208,11 @@ async fn without_a_password_the_dashboard_stays_open() {
     // session to create, clear, or confirm.
     let page = get(&router, "/login", &[]).await;
     assert_eq!(page.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&page), "/providers");
+    assert_eq!(location(&page), "/");
 
     let posted = login(&router, &state, "anything-at-all").await;
     assert_eq!(posted.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&posted), "/providers");
+    assert_eq!(location(&posted), "/");
     assert!(
         session_cookie(&posted).is_none(),
         "no session cookie without a password"
@@ -222,7 +220,7 @@ async fn without_a_password_the_dashboard_stays_open() {
 
     let logout = get(&router, "/logout", &[]).await;
     assert_eq!(logout.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&logout), "/providers");
+    assert_eq!(location(&logout), "/");
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +433,7 @@ async fn successful_login_sets_a_strict_random_cookie_that_unlocks_the_dashboard
 
     let first = login(&router, &state, PASSWORD).await;
     assert_eq!(first.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&first), "/providers");
+    assert_eq!(location(&first), "/");
 
     let set_cookie = session_cookie(&first).expect("login sets the session cookie");
     let token = token_of(&set_cookie);
@@ -475,6 +473,7 @@ async fn successful_login_sets_a_strict_random_cookie_that_unlocks_the_dashboard
     // unsafe requests.
     let cookie = cookie_header(token);
     for path in [
+        "/",
         "/providers",
         "/combos",
         "/api-keys",
@@ -810,7 +809,7 @@ async fn throttling_is_per_socket_peer_and_forwarded_headers_do_not_bypass_it() 
         "peer2 must not inherit peer1's failures"
     );
     assert!(session_cookie(&other_peer).is_some());
-    assert_eq!(location(&other_peer), "/providers");
+    assert_eq!(location(&other_peer), "/");
 
     // Peer2's success does not reset peer1's bucket either.
     let still_throttled =

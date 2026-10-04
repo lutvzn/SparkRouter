@@ -11,6 +11,7 @@ pub(crate) mod auth;
 mod combos;
 mod config_transfer;
 mod history;
+mod home;
 pub(crate) use crate::provider_catalog;
 mod providers;
 mod test;
@@ -20,7 +21,7 @@ use axum::{
     Router,
     extract::Path,
     http,
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use rust_embed::RustEmbed;
@@ -45,7 +46,7 @@ pub fn router() -> Router<AppState> {
         .route("/configuration/export", post(config_transfer::export))
         .route("/configuration/preview", post(config_transfer::preview))
         .route("/configuration/import", post(config_transfer::import))
-        .route("/", get(|| async { Redirect::to("/providers") }))
+        .route("/", get(home::page))
         .route("/providers", get(providers::list).post(providers::create))
         .route("/providers/new", get(providers::new))
         .route("/providers/custom", post(providers::custom_create))
