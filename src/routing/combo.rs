@@ -2,7 +2,7 @@ use crate::{
     app::AppState,
     db::{combos, providers as provider_db},
     error::AppError,
-    providers::{self, AttemptError},
+    providers::AttemptError,
 };
 use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use axum::{http::StatusCode, response::Response};
@@ -159,34 +159,19 @@ async fn route_inner(
             continue;
         }
         let started = std::time::Instant::now();
-        if let Some(attempts) = attempts.as_deref_mut() {
-            attempts.push(AttemptTrace {
-                provider_id: provider.id.clone(),
-                provider_name: provider.name.clone(),
-                model: step.model.clone(),
-                position: step.position + 1,
-                outcome: "in_progress",
-                latency_ms: 0,
-                provider_snapshot: Some(crate::db::request_history::ProviderSnapshot {
-                    slug,
-                    name: group_name,
-                }),
-                started,
-            });
-        }
-        let attempt = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            providers::call(&state.client, &state.crypto, &provider, &step.model, body),
-        )
-        .await
-        .unwrap_or(Err(AttemptError::Retryable));
-        if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
-            trace.finish(match &attempt {
-                Ok(_) => "selected",
-                Err(AttemptError::Retryable) => "retryable_failure",
-                Err(AttemptError::Permanent(_)) => "permanent_failure",
-            });
-        }
+        let mut trace = AttemptTrace::new(
+            provider.id.clone(),
+            provider.name.clone(),
+            step.model.clone(),
+            step.position + 1,
+            started,
+        );
+        trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
+            slug,
+            name: group_name,
+        });
+        let attempt =
+            super::attempt(state, &provider, &step.model, body, trace, &mut attempts).await;
         match attempt {
             Ok(response) => {
                 tracing::info!(combo = name, provider = %provider.id, model = %step.model,

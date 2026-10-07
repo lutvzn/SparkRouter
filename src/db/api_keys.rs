@@ -25,6 +25,34 @@ pub struct ApiKey {
     pub access: KeyAccess,
     pub expires_at: Option<String>,
     pub expired: bool,
+    pub limits: KeyLimits,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct KeyLimits {
+    pub requests_per_minute: Option<u32>,
+    pub max_concurrent: Option<u32>,
+}
+impl KeyLimits {
+    pub fn validate(self) -> Result<Self, AppError> {
+        if self
+            .requests_per_minute
+            .is_some_and(|n| !(1..=1_000_000).contains(&n))
+            || self
+                .max_concurrent
+                .is_some_and(|n| !(1..=10_000).contains(&n))
+        {
+            return Err(AppError::InvalidRequest("Requests per minute must be 1–1000000 and concurrency 1–10000; blank means unlimited".into()));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone)]
+pub struct AuthenticatedKey {
+    pub id: String,
+    pub access: KeyAccess,
+    pub limits: KeyLimits,
 }
 
 /// Exact public model IDs, not upstream targets inside an allowed combo.
@@ -59,7 +87,7 @@ pub struct IssuedKey {
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKey>, AppError> {
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query(
-        "SELECT id, name, key_prefix, created_at, restricted,
+        "SELECT id, name, key_prefix, created_at, restricted, requests_per_minute, max_concurrent,
          strftime('%Y-%m-%dT%H:%M:%SZ', expires_at, 'unixepoch') AS expires_at,
          expires_at IS NOT NULL AND expires_at <= unixepoch() AS expired
          FROM api_keys ORDER BY created_at, id",
@@ -92,6 +120,10 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKey>, AppError> {
                 created_at: row.try_get("created_at")?,
                 expires_at: row.try_get("expires_at")?,
                 expired: row.try_get("expired")?,
+                limits: KeyLimits {
+                    requests_per_minute: row.try_get("requests_per_minute")?,
+                    max_concurrent: row.try_get("max_concurrent")?,
+                },
             })
         })
         .collect();
@@ -110,6 +142,18 @@ pub async fn create_with_policy(
     access: KeyAccess,
     expiry: Expiry,
 ) -> Result<IssuedKey, AppError> {
+    create_with_limits(pool, crypto, name, access, expiry, KeyLimits::default()).await
+}
+
+pub async fn create_with_limits(
+    pool: &SqlitePool,
+    crypto: &Crypto,
+    name: &str,
+    access: KeyAccess,
+    expiry: Expiry,
+    limits: KeyLimits,
+) -> Result<IssuedKey, AppError> {
+    let limits = limits.validate()?;
     let name = validate_name(name)?;
     let access = validate_access(access)?;
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -120,8 +164,8 @@ pub async fn create_with_policy(
     let key_hash = crypto.gateway_key_fingerprint(secret.expose_secret())?;
     let reveal_envelope = crypto.encrypt_api_key(&id, &secret)?;
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_prefix, key_hash, reveal_envelope, restricted, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, name, key_prefix, key_hash, reveal_envelope, restricted, expires_at, requests_per_minute, max_concurrent)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
@@ -130,6 +174,8 @@ pub async fn create_with_policy(
     .bind(reveal_envelope)
     .bind(matches!(access, KeyAccess::Selected(_)))
     .bind(expires_at)
+    .bind(limits.requests_per_minute)
+    .bind(limits.max_concurrent)
     .execute(&mut *transaction)
     .await?;
     write_models(&mut transaction, &id, &access).await?;
@@ -144,6 +190,18 @@ pub async fn update_policy(
     access: KeyAccess,
     expiry: Expiry,
 ) -> Result<(), AppError> {
+    update_policy_with_limits(pool, id, access, expiry, None).await
+}
+
+/// `None` preserves limits for callers editing only scopes/expiry.
+pub async fn update_policy_with_limits(
+    pool: &SqlitePool,
+    id: &str,
+    access: KeyAccess,
+    expiry: Expiry,
+    limits: Option<KeyLimits>,
+) -> Result<(), AppError> {
+    let limits = limits.map(KeyLimits::validate).transpose()?;
     let access = validate_access(access)?;
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let existing: Option<i64> = sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE id = ?")
@@ -158,6 +216,14 @@ pub async fn update_policy(
         .bind(id)
         .execute(&mut *transaction)
         .await?;
+    if let Some(limits) = limits {
+        sqlx::query("UPDATE api_keys SET requests_per_minute = ?, max_concurrent = ? WHERE id = ?")
+            .bind(limits.requests_per_minute)
+            .bind(limits.max_concurrent)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     sqlx::query("DELETE FROM api_key_models WHERE key_id = ?")
         .bind(id)
         .execute(&mut *transaction)
@@ -293,26 +359,48 @@ pub async fn authenticate(
     crypto: &Crypto,
     secret: &str,
 ) -> Result<Option<KeyAccess>, AppError> {
+    Ok(authenticate_key(pool, crypto, secret)
+        .await?
+        .map(|key| key.access))
+}
+
+pub async fn authenticate_key(
+    pool: &SqlitePool,
+    crypto: &Crypto,
+    secret: &str,
+) -> Result<Option<AuthenticatedKey>, AppError> {
     if secret.is_empty() || secret.len() > 256 {
         return Ok(None);
     }
     let fingerprint = crypto.gateway_key_fingerprint(secret)?;
     let mut transaction = pool.begin().await?;
-    let found = sqlx::query("SELECT id, restricted FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
+    let found = sqlx::query("SELECT id, restricted, requests_per_minute, max_concurrent FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
         .bind(fingerprint)
         .fetch_optional(&mut *transaction)
         .await?;
     let access = match found {
         None => None,
-        Some(row) if !row.try_get::<bool, _>("restricted")? => Some(KeyAccess::All),
         Some(row) => {
-            let models = sqlx::query_scalar(
-                "SELECT model FROM api_key_models WHERE key_id = ? ORDER BY model",
-            )
-            .bind(row.try_get::<String, _>("id")?)
-            .fetch_all(&mut *transaction)
-            .await?;
-            Some(KeyAccess::Selected(models))
+            let id: String = row.try_get("id")?;
+            let access = if !row.try_get::<bool, _>("restricted")? {
+                KeyAccess::All
+            } else {
+                let models = sqlx::query_scalar(
+                    "SELECT model FROM api_key_models WHERE key_id = ? ORDER BY model",
+                )
+                .bind(&id)
+                .fetch_all(&mut *transaction)
+                .await?;
+                KeyAccess::Selected(models)
+            };
+            Some(AuthenticatedKey {
+                id,
+                access,
+                limits: KeyLimits {
+                    requests_per_minute: row.try_get("requests_per_minute")?,
+                    max_concurrent: row.try_get("max_concurrent")?,
+                },
+            })
         }
     };
     transaction.commit().await?;
@@ -376,6 +464,10 @@ mod tests {
         let hash = crypto().gateway_key_fingerprint("legacy-secret").unwrap();
         sqlx::query("INSERT INTO api_keys (id,name,key_prefix,key_hash,reveal_envelope) VALUES ('legacy','Legacy','legacy',?,NULL)").bind(&hash).execute(&pool).await.unwrap();
         sqlx::raw_sql(include_str!("../../migrations/0008_scoped_api_keys.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/0012_api_key_limits.sql"))
             .execute(&pool)
             .await
             .unwrap();
@@ -477,6 +569,8 @@ mod tests {
             .unwrap();
         assert!(!stored.contains(&secret));
         let listed = list(&pool).await.unwrap();
+        assert!(listed[0].limits.requests_per_minute.is_none());
+        assert!(listed[0].limits.max_concurrent.is_none());
         assert_eq!(listed[0].name, "laptop");
         assert_eq!(
             listed[0].prefix,
@@ -503,6 +597,78 @@ mod tests {
                 .unwrap();
         assert!(envelope.is_none());
         assert!(matches(&pool, &crypto, &secret).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn limits_are_persisted_and_invalid_edits_roll_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", directory.path().join("limits.db").display());
+        let pool = crate::db::connect(&url).await.unwrap();
+        let issued = create_with_limits(
+            &pool,
+            &crypto(),
+            "App",
+            KeyAccess::All,
+            Expiry::Never,
+            KeyLimits {
+                requests_per_minute: Some(20),
+                max_concurrent: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            update_policy_with_limits(
+                &pool,
+                &issued.id,
+                KeyAccess::Selected(vec!["combo/other".into()]),
+                Expiry::AfterDays(1),
+                Some(KeyLimits {
+                    requests_per_minute: Some(0),
+                    max_concurrent: None
+                })
+            )
+            .await
+            .is_err()
+        );
+        pool.close().await;
+        let pool = crate::db::connect(&url).await.unwrap();
+        let key = authenticate_key(&pool, &crypto(), issued.secret.expose_secret())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.limits.requests_per_minute, Some(20));
+        assert_eq!(key.limits.max_concurrent, Some(2));
+        assert!(matches!(key.access, KeyAccess::All));
+        update_policy(&pool, &issued.id, KeyAccess::All, Expiry::Keep)
+            .await
+            .unwrap();
+        assert_eq!(
+            list(&pool).await.unwrap()[0].limits.requests_per_minute,
+            Some(20)
+        );
+        update_policy_with_limits(
+            &pool,
+            &issued.id,
+            KeyAccess::All,
+            Expiry::Keep,
+            Some(KeyLimits::default()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            list(&pool).await.unwrap()[0]
+                .limits
+                .requests_per_minute
+                .is_none()
+        );
+        assert!(
+            list(&pool).await.unwrap()[0]
+                .limits
+                .max_concurrent
+                .is_none()
+        );
+        pool.close().await;
     }
 
     #[tokio::test]

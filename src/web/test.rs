@@ -12,7 +12,7 @@ use crate::{
     app::{self, AppState},
     db::{api_keys, combos},
     error::AppError,
-    routing::combo,
+    routing,
 };
 
 #[derive(Template)]
@@ -54,7 +54,7 @@ pub async fn chat(
         .filter(|name| !name.is_empty())
         .ok_or_else(|| AppError::InvalidRequest("Select a combo to test".into()))?
         .to_owned();
-    if !access.allows(&format!("combo/{name}")) {
+    if !access.access.allows(&format!("combo/{name}")) {
         return Err(AppError::Forbidden);
     }
     let messages = body
@@ -80,33 +80,16 @@ pub async fn chat(
         .ok_or_else(|| AppError::InvalidRequest("Request must be a JSON object".into()))?;
     object.remove("_csrf");
     object.insert("stream".into(), Value::Bool(false));
+    let _permit = access.admit(&state)?;
     let mut attempts = Vec::new();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        combo::route_with_trace(&state, &name, &body, &mut attempts),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        if let Some(trace) = attempts
-            .last_mut()
-            .filter(|trace| trace.outcome == "in_progress")
-        {
-            trace.finish("timed_out");
-        }
-        Err(AppError::Routing)
-    });
+    let model = format!("combo/{name}");
+    let result = routing::route_with_trace(&state, &model, &body, &mut attempts).await;
     let response = match result {
         Ok(response) => response,
         Err(error) => error.into_response(),
     };
     let response = crate::history::record_response(
-        &state,
-        "test",
-        &format!("combo/{name}"),
-        false,
-        started,
-        &attempts,
-        response,
+        &state, "test", &model, false, started, &attempts, response,
     )
     .await;
     let status = response.status();

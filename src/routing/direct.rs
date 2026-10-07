@@ -9,7 +9,7 @@ use crate::{
     app::AppState,
     db::{connection_models, provider_slugs},
     error::AppError,
-    providers::{self, AttemptError},
+    providers::AttemptError,
 };
 use axum::response::Response;
 use serde_json::Value;
@@ -75,33 +75,18 @@ async fn route_inner(
             continue;
         }
         let started = std::time::Instant::now();
-        if let Some(attempts) = attempts.as_deref_mut() {
-            let mut trace = super::combo::AttemptTrace::new(
-                provider.id.clone(),
-                provider.name.clone(),
-                model.clone(),
-                index as i64 + 1,
-                started,
-            );
-            trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
-                slug: namespace,
-                name: group_name,
-            });
-            attempts.push(trace);
-        }
-        let attempt = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            providers::call(&state.client, &state.crypto, &provider, &model, body),
-        )
-        .await
-        .unwrap_or(Err(AttemptError::Retryable));
-        if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
-            trace.finish(match &attempt {
-                Ok(_) => "selected",
-                Err(AttemptError::Retryable) => "retryable_failure",
-                Err(AttemptError::Permanent(_)) => "permanent_failure",
-            });
-        }
+        let mut trace = super::combo::AttemptTrace::new(
+            provider.id.clone(),
+            provider.name.clone(),
+            model.clone(),
+            index as i64 + 1,
+            started,
+        );
+        trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
+            slug: namespace,
+            name: group_name,
+        });
+        let attempt = super::attempt(state, &provider, &model, body, trace, &mut attempts).await;
         match attempt {
             Ok(response) => {
                 tracing::info!(

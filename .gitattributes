@@ -1,0 +1,2 @@
+# Keep Unix shell scripts on LF line endings, even after Windows checkout.
+*.sh text eol=lf

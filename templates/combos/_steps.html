@@ -36,12 +36,14 @@
       <details class="step-editor"><summary>Edit step {{ loop.index }}</summary>
         <form method="post" action="/combos/{{ combo_id }}/steps/{{ s.id }}/edit" data-step-picker hx-post="/combos/{{ combo_id }}/steps/{{ s.id }}/edit" hx-target="#combo-steps" hx-swap="innerHTML">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-          <div class="grid3">
-            <div><label for="group-{{ s.id }}">Provider</label><select id="group-{{ s.id }}" data-step-provider required>{% for group in provider_groups %}<option value="{{ group.id }}"{% if group.id == s.group_id %} selected{% endif %}>{{ group.name }}</option>{% endfor %}</select></div>
-            <div><label for="connection-{{ s.id }}">Connection</label><select id="connection-{{ s.id }}" name="provider_id" data-step-connection required>{% for p in providers %}<option value="{{ p.id }}" data-provider="{{ p.group_id }}"{% if p.id == s.provider_id %} selected{% endif %}>{{ p.connection_name }}{% if p.disabled %} (disabled){% endif %}</option>{% endfor %}</select></div>
-            <div><label for="model-{{ s.id }}">Model</label><input id="model-{{ s.id }}" name="model" data-step-model type="text" maxlength="256" required value="{{ s.model }}" autocomplete="off">
-            {% for p in providers %}<datalist id="models-{{ s.id }}-{{ p.id }}" data-models-for="{{ p.id }}">{% for model in p.models %}<option value="{{ model }}"></option>{% endfor %}</datalist>{% endfor %}</div>
-          </div>
+          {% let group_control_id = "group-{}"|format(s.id) %}
+          {% let connection_control_id = "connection-{}"|format(s.id) %}
+          {% let model_control_id = "model-{}"|format(s.id) %}
+          {% let model_list_prefix = "models-{}-"|format(s.id) %}
+          {% let selected_group = s.group_id.as_str() %}
+          {% let selected_connection = s.provider_id.as_str() %}
+          {% let selected_model = s.model.as_str() %}
+          {% include "combos/_picker.html" %}
           <p class="hint">Saving preserves this step's order. Typed model IDs need not appear in the refreshed list. Disabled connections can be saved but are skipped by routing.</p>
           <button class="btn small primary" type="submit">Save step</button>
         </form>

@@ -12,11 +12,14 @@ use serde::Deserialize;
 
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
-use crate::db::combos::Strategy;
+use crate::db::{
+    combos::{self, Strategy},
+    provider_groups::ConnectionGroup,
+    providers::Provider,
+};
 use crate::error::AppError;
 
-const NAME_MAX_CHARS: usize = 64;
-const MODEL_MAX_CHARS: usize = 256;
+const NAME_MAX_CHARS: usize = combos::MAX_NAME_LENGTH;
 
 #[derive(Template)]
 #[template(path = "combos/list.html")]
@@ -157,8 +160,7 @@ pub(crate) async fn edit(
     Path(id): Path<String>,
 ) -> Result<Html<String>, AppError> {
     let combo = crate::db::combos::get(&state.db, &id).await?;
-    let steps = step_rows(&state, &combo.id).await?;
-    let (provider_groups, providers) = provider_options(&state).await?;
+    let (steps, provider_groups, providers) = editor_data(&state, &combo.id).await?;
     render(ComboEditPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
@@ -224,16 +226,17 @@ pub(crate) async fn add_step(
     if provider_id.is_empty() {
         return Err(AppError::InvalidRequest("provider is required".into()));
     }
-    let model = form.model.trim();
-    if model.is_empty() {
-        return Err(AppError::InvalidRequest("model is required".into()));
-    }
-    if model.chars().count() > MODEL_MAX_CHARS {
-        return Err(AppError::InvalidRequest(format!(
-            "model must be at most {MODEL_MAX_CHARS} characters"
-        )));
-    }
-    crate::db::combos::add_step(&state.db, &id, provider_id, model).await?;
+    let model = combos::validate_model(&form.model).map_err(|_| {
+        AppError::InvalidRequest(if form.model.trim().is_empty() {
+            "model is required".into()
+        } else {
+            format!(
+                "model must be at most {} characters",
+                combos::MAX_MODEL_LENGTH
+            )
+        })
+    })?;
+    combos::add_step(&state.db, &id, provider_id, &model).await?;
     step_mutation_response(&state, &headers, &id).await
 }
 
@@ -317,8 +320,7 @@ async fn step_mutation_response(
 }
 
 async fn steps_fragment(state: &AppState, combo_id: &str) -> Result<Html<String>, AppError> {
-    let steps = step_rows(state, combo_id).await?;
-    let (provider_groups, providers) = provider_options(state).await?;
+    let (steps, provider_groups, providers) = editor_data(state, combo_id).await?;
     render(ComboStepsFragment {
         csrf_token: state.csrf_token.as_str().to_owned(),
         combo_id: combo_id.to_string(),
@@ -328,26 +330,34 @@ async fn steps_fragment(state: &AppState, combo_id: &str) -> Result<Html<String>
     })
 }
 
+async fn editor_data(
+    state: &AppState,
+    combo_id: &str,
+) -> Result<(Vec<StepRow>, Vec<ProviderGroup>, Vec<ProviderOption>), AppError> {
+    let providers = crate::db::providers::list(&state.db).await?;
+    let memberships = crate::db::provider_groups::connection_groups(&state.db).await?;
+    let steps = step_rows(state, combo_id, &providers, &memberships).await?;
+    let (groups, options) = provider_options(state, providers, &memberships).await?;
+    Ok((steps, groups, options))
+}
+
 /// Resolves each step's provider id to a display name (flagged when the
 /// provider is disabled and therefore skipped by routing), falling back to the
 /// id if the referenced provider no longer exists.
-async fn step_rows(state: &AppState, combo_id: &str) -> Result<Vec<StepRow>, AppError> {
+async fn step_rows(
+    state: &AppState,
+    combo_id: &str,
+    providers: &[Provider],
+    memberships: &HashMap<String, ConnectionGroup>,
+) -> Result<Vec<StepRow>, AppError> {
     let steps = crate::db::combos::steps(&state.db, combo_id).await?;
-    let providers = crate::db::providers::list(&state.db).await?;
-    let group_names = crate::db::provider_groups::connection_group_names(&state.db).await?;
-    let memberships = crate::db::provider_groups::connection_groups(&state.db).await?;
     let groups: HashMap<&str, String> = providers
         .iter()
-        .map(|p| (p.id.as_str(), provider_group(p, &memberships).0))
+        .map(|p| (p.id.as_str(), provider_group(p, memberships).0))
         .collect();
     let names: HashMap<&str, (String, bool)> = providers
         .iter()
-        .map(|p| {
-            (
-                p.id.as_str(),
-                (connection_label(p, &group_names), p.enabled),
-            )
-        })
+        .map(|p| (p.id.as_str(), (connection_label(p, memberships), p.enabled)))
         .collect();
     Ok(steps
         .into_iter()
@@ -373,9 +383,9 @@ async fn step_rows(state: &AppState, combo_id: &str) -> Result<Vec<StepRow>, App
 
 async fn provider_options(
     state: &AppState,
+    stored: Vec<Provider>,
+    memberships: &HashMap<String, ConnectionGroup>,
 ) -> Result<(Vec<ProviderGroup>, Vec<ProviderOption>), AppError> {
-    let memberships = crate::db::provider_groups::connection_groups(&state.db).await?;
-    let stored = crate::db::providers::list(&state.db).await?;
     let ids: Vec<String> = stored.iter().map(|provider| provider.id.clone()).collect();
     let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
     let mut groups = HashMap::new();
@@ -386,7 +396,7 @@ async fn provider_options(
                 .get(&p.id)
                 .map(|list| list.ids.clone())
                 .unwrap_or_default();
-            let (group_id, group_name) = provider_group(&p, &memberships);
+            let (group_id, group_name) = provider_group(&p, memberships);
             groups.entry(group_id.clone()).or_insert(group_name);
             ProviderOption {
                 id: p.id,
@@ -449,11 +459,14 @@ fn disambiguate_group_names(groups: &mut [ProviderGroup]) {
 
 fn connection_label(
     provider: &crate::db::providers::Provider,
-    group_names: &HashMap<String, String>,
+    memberships: &HashMap<String, ConnectionGroup>,
 ) -> String {
-    let group_name = group_names.get(&provider.id).cloned().unwrap_or_else(|| {
-        super::provider_catalog::display_name(&provider.base_url, &provider.protocol)
-    });
+    let group_name = memberships
+        .get(&provider.id)
+        .map(|group| group.name.clone())
+        .unwrap_or_else(|| {
+            super::provider_catalog::display_name(&provider.base_url, &provider.protocol)
+        });
     format!("{} / {}", group_name, provider.name)
 }
 
@@ -470,17 +483,12 @@ fn parse_strategy(raw: Option<&str>) -> Result<Option<Strategy>, AppError> {
 /// Mirrors the DB constraint so obvious mistakes fail fast with a clear message.
 fn validate_combo_name(raw: &str) -> Result<String, AppError> {
     let name = raw.trim();
-    let valid = (1..=NAME_MAX_CHARS).contains(&name.chars().count())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if valid {
-        Ok(name.to_string())
-    } else {
-        Err(AppError::InvalidRequest(format!(
+    combos::validate_name(name).map_err(|_| {
+        AppError::InvalidRequest(format!(
             "combo name must be 1-{NAME_MAX_CHARS} characters of letters, digits, '_', '.', '-'"
-        )))
-    }
+        ))
+    })?;
+    Ok(name.to_owned())
 }
 
 #[cfg(test)]

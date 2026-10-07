@@ -91,6 +91,116 @@ handle SIGTERM for graceful shutdown.
 rotation: an old database requires its original key to decrypt provider keys.
 Back up that key separately from the database.
 
+## Convenience scripts
+
+The repository includes matching command helpers:
+
+- **Linux/macOS/WSL:** `bash scripts/sparkrouter.sh COMMAND [options]`
+- **Windows:** `.\scripts\sparkrouter.ps1 COMMAND [options]` (Windows PowerShell
+  5.1 or PowerShell 7). Git Bash users should use the PowerShell helper for native
+  Windows lifecycle management.
+
+If your execution policy blocks a downloaded script, review it and follow your
+organization's policy; the helper does not change execution policy for you.
+
+| Command | Behavior |
+| --- | --- |
+| `start` | Start in the background; build the selected binary if missing; repeated starts are idempotent |
+| `run` | Run in the foreground, with Ctrl+C shutdown; not managed by `stop`/`status` |
+| `stop` | Stop only the verified background process started by this helper |
+| `restart` | Stop then start, using the supplied environment/settings |
+| `status` | Report managed process identity; exit 1 if stopped or identity no longer matches |
+| `logs` | Print the last 100 lines of both stdout and stderr logs |
+| `health` | Call `/readyz`, with a five-second timeout; fails if not ready |
+| `build` | `cargo build --release --locked` (or debug when requested) |
+| `check` | Formatting check, `cargo check --locked`, and strict all-target/all-feature Clippy |
+| `test` | `cargo test --locked` |
+| `keygen` | Print a new random 32-byte Base64 master key; does not save or rotate keys |
+| `help` | List commands/options |
+
+`start` only verifies that the process survives initial startup; use `health` to
+check readiness. An existing binary is reused, so run `build` after source changes.
+The scripts resolve their repository root and run the server there, regardless
+of the caller's working directory. Thus the default SQLite URL still uses the
+repository's `router.db`; use an explicit URL for another installation.
+
+### Configuration and examples
+
+Supply process environment variables as usual, or explicitly opt into an env file:
+
+```sh
+# Generate ONCE for a new database; save the result securely.
+bash scripts/sparkrouter.sh keygen
+# Prepare .env using .env.example and the saved key. Do not overwrite an existing .env.
+bash scripts/sparkrouter.sh build
+bash scripts/sparkrouter.sh start --env-file .env
+bash scripts/sparkrouter.sh status
+bash scripts/sparkrouter.sh health --env-file .env
+bash scripts/sparkrouter.sh logs
+bash scripts/sparkrouter.sh restart --env-file .env
+bash scripts/sparkrouter.sh stop
+```
+
+```powershell
+.\scripts\sparkrouter.ps1 keygen
+# Prepare .env using .env.example and the saved key. Do not overwrite an existing .env.
+.\scripts\sparkrouter.ps1 build
+.\scripts\sparkrouter.ps1 start -EnvFile .env
+.\scripts\sparkrouter.ps1 status
+.\scripts\sparkrouter.ps1 health -EnvFile .env
+.\scripts\sparkrouter.ps1 logs
+.\scripts\sparkrouter.ps1 restart -EnvFile .env
+.\scripts\sparkrouter.ps1 stop
+# For graceful Windows shutdown: run in the foreground and press Ctrl+C.
+.\scripts\sparkrouter.ps1 run -EnvFile .env
+```
+
+Env files are UTF-8 (use no BOM for Bash), with `KEY=value` lines, optional matching
+single/double quotes around literal values, blank lines, and full-line `#` comments.
+They are **data, not executable shell code**: no `export`, variable expansion,
+command substitution, multiline values, escape decoding, or inline comments.
+Only the seven documented `ROUTER_*`/`RUST_LOG` variables from `.env.example` are
+accepted. Empty values are rejected; omit optional unset variables instead.
+File values override inherited environment values for the command. PowerShell
+restores the caller's environment afterward. Errors do not echo submitted values.
+Protect env files using restrictive filesystem permissions and never commit them.
+
+Both helpers default to release builds. Use `--debug` / `-DebugBuild` for debug.
+Bash `keygen` requires OpenSSL; Bash `health` requires curl. PowerShell uses built-in
+cryptography and HTTP commands. Other lifecycle commands require only the selected
+executable (and Cargo if it must be built).
+
+### Process state and shutdown limits
+
+PID/creation-time/executable identity and stdout/stderr logs live in the ignored
+`.sparkrouter/` directory. Use `--state-dir DIR` / `-StateDir DIR` to choose another
+location, and supply the same directory to every lifecycle command. A state
+directory tracks one background instance. Env-file and state-directory relative
+paths resolve from the caller's working directory. Logs are replaced on each
+start and may contain configuration metadata; keep the directory private.
+
+A short-lived lock serializes start/stop/restart. If a helper is forcibly killed,
+an abandoned lock may remain: first confirm that no helper is running, then remove
+only `.sparkrouter/lock` (a directory on Bash, a file on PowerShell). Never remove
+state or lock files while a lifecycle operation is active. PID identity mismatch
+causes status/stop to refuse ownership rather than terminate another process.
+These checks protect against stale/reused PIDs; state files are not a security
+boundary against someone with permission to edit your files or control processes.
+
+On Unix, `stop` sends SIGTERM and waits up to 30 seconds for graceful shutdown.
+Active streams may keep it draining; timeout leaves the process/state intact and
+never escalates to SIGKILL. Adjust with `--timeout SECONDS`. On Windows, background
+`stop` forcibly terminates the verified process and interrupts requests/streams;
+`-TimeoutSeconds N` controls the wait for exit, not a graceful drain. Use foreground
+`run` and Ctrl+C for graceful Windows shutdown. Forced shutdown does not provide a
+clean database-backup window: use SQLite online backup or graceful shutdown.
+
+`health` derives its URL from `ROUTER_BIND` (default loopback), mapping wildcard
+binds to loopback. Override with `--url URL` / `-Url URL` for HTTPS/reverse proxies.
+Pass the same env file when using a nondefault port. These helpers are conveniences,
+not a service manager: no boot registration, recovery supervisor, log rotation,
+backup automation, or master-key rotation is installed.
+
 ## SQLite and deployment layout
 
 The database file is created and pending embedded migrations run at startup.

@@ -34,6 +34,8 @@ pub enum AppError {
     Unauthorized,
     #[error("API key does not allow this model")]
     Forbidden,
+    #[error("API key request or concurrency limit exceeded")]
+    RateLimited(u64),
     #[error("upstream rejected the request (HTTP {0})")]
     Upstream(StatusCode),
 }
@@ -63,6 +65,11 @@ impl IntoResponse for AppError {
                 "authentication_error",
             ),
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string(), "permission_error"),
+            Self::RateLimited(_) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                self.to_string(),
+                "rate_limit_error",
+            ),
             Self::Upstream(status) => (
                 if status.is_client_error() || status.is_server_error() {
                     *status
@@ -86,10 +93,17 @@ impl IntoResponse for AppError {
         if status.is_server_error() {
             tracing::error!(error = %self, "request failed");
         }
-        (
+        let mut response = (
             status,
             Json(json!({"error": {"message": message, "type": kind, "code": status.as_u16()}})),
         )
-            .into_response()
+            .into_response();
+        if let Self::RateLimited(seconds) = self {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                seconds.to_string().parse().expect("integer header"),
+            );
+        }
+        response
     }
 }

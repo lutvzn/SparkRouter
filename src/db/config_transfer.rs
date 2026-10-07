@@ -45,8 +45,6 @@ const MAX_TOTAL_STEPS: usize = 2000;
 /// Length limits mirroring the live forms and table constraints.
 const NAME_MAX_CHARS: usize = 100;
 const ID_MAX_CHARS: usize = 128;
-const COMBO_NAME_MAX_CHARS: usize = 64;
-const MODEL_MAX_CHARS: usize = 256;
 
 /// The transfer document. Strict deserialization (`deny_unknown_fields`)
 /// rejects unknown keys, so a document carrying credentials or future fields
@@ -621,39 +619,27 @@ fn parse_protocol(value: &str) -> Result<Protocol, AppError> {
 /// letters, digits, `-`, `_`, and `.`.
 fn validate_combo_name(value: &str) -> Result<String, AppError> {
     let name = value.trim();
-    let valid = (1..=COMBO_NAME_MAX_CHARS).contains(&name.chars().count())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if valid {
-        Ok(name.to_owned())
-    } else {
-        Err(AppError::InvalidRequest(format!(
-            "combo name must be 1-{COMBO_NAME_MAX_CHARS} characters of letters, digits, '_', '.', '-'"
-        )))
-    }
+    super::combos::validate_name(name).map_err(|_| {
+        AppError::InvalidRequest(format!(
+            "combo name must be 1-{} characters of letters, digits, '_', '.', '-'",
+            super::combos::MAX_NAME_LENGTH,
+        ))
+    })?;
+    Ok(name.to_owned())
 }
 
 /// Step models mirror the stored rule: trimmed, nonempty, bounded, and free
 /// of control characters.
 fn validate_model(value: &str) -> Result<String, AppError> {
-    let model = value.trim();
-    if model.is_empty() {
-        return Err(AppError::InvalidRequest(
-            "step model must not be empty".into(),
-        ));
-    }
-    if model.chars().count() > MODEL_MAX_CHARS {
-        return Err(AppError::InvalidRequest(format!(
-            "step model must be at most {MODEL_MAX_CHARS} characters"
-        )));
-    }
+    let model = super::combos::validate_model(value)?;
+    // Import deliberately rejects controls; existing stored-step validation
+    // permits arbitrary upstream strings. Keep that compatibility distinction.
     if model.chars().any(char::is_control) {
         return Err(AppError::InvalidRequest(
             "step model must not contain control characters".into(),
         ));
     }
-    Ok(model.to_owned())
+    Ok(model)
 }
 
 #[cfg(test)]

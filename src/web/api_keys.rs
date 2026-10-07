@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
-use crate::db::api_keys::{Expiry, KeyAccess};
+use crate::db::api_keys::{Expiry, KeyAccess, KeyLimits};
 use crate::error::AppError;
 
 #[derive(Template)]
@@ -31,6 +31,10 @@ struct KeyRow {
     models: String,
     expiry: String,
     expired: bool,
+    rpm: String,
+    concurrency: String,
+    active: u32,
+    rejected: u64,
 }
 
 #[derive(Template)]
@@ -60,6 +64,8 @@ pub(crate) struct PolicyForm {
     expiry: String,
     #[serde(default)]
     expires_days: String,
+    requests_per_minute: Option<String>,
+    max_concurrent: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +75,29 @@ pub(crate) struct UpdateForm {
     policy: PolicyForm,
 }
 
-fn policy(form: PolicyForm, editing: bool) -> Result<(KeyAccess, Expiry), AppError> {
+fn policy(
+    form: PolicyForm,
+    editing: bool,
+) -> Result<(KeyAccess, Expiry, Option<KeyLimits>), AppError> {
+    fn number(value: Option<&str>) -> Result<Option<u32>, AppError> {
+        match value.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Ok(None),
+            Some(value) => value.parse().map(Some).map_err(|_| {
+                AppError::InvalidRequest("Limits must be positive whole numbers or blank".into())
+            }),
+        }
+    }
+    let limits = if form.requests_per_minute.is_none() && form.max_concurrent.is_none() {
+        None
+    } else {
+        Some(
+            KeyLimits {
+                requests_per_minute: number(form.requests_per_minute.as_deref())?,
+                max_concurrent: number(form.max_concurrent.as_deref())?,
+            }
+            .validate()?,
+        )
+    };
     // Never silently discard submitted scopes on an unrestricted key.
     let access = match form.access.as_str() {
         "" if !editing && form.models.trim().is_empty() => KeyAccess::All,
@@ -109,7 +137,7 @@ fn policy(form: PolicyForm, editing: bool) -> Result<(KeyAccess, Expiry), AppErr
                 ));
             }
         };
-    Ok((access, expiry))
+    Ok((access, expiry, limits))
 }
 
 pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, AppError> {
@@ -121,7 +149,20 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
                 KeyAccess::All => (false, String::new()),
                 KeyAccess::Selected(models) => (true, models.join("\n")),
             };
+            let stats = state.key_limits.snapshot(&key.id);
             KeyRow {
+                rpm: key
+                    .limits
+                    .requests_per_minute
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                concurrency: key
+                    .limits
+                    .max_concurrent
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                active: stats.active,
+                rejected: stats.rejected,
                 id: key.id,
                 name: key.name,
                 prefix: key.prefix,
@@ -152,13 +193,14 @@ pub(crate) async fn create(
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
-    let (access, expiry) = policy(form.policy, false)?;
-    let issued = crate::db::api_keys::create_with_policy(
+    let (access, expiry, limits) = policy(form.policy, false)?;
+    let issued = crate::db::api_keys::create_with_limits(
         &state.db,
         &state.crypto,
         &form.name,
         access,
         expiry,
+        limits.unwrap_or_default(),
     )
     .await?;
     Ok(see_other(&format!("/api-keys/{}", issued.id)))
@@ -170,8 +212,8 @@ pub(crate) async fn update_policy(
     Form(form): Form<UpdateForm>,
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
-    let (access, expiry) = policy(form.policy, true)?;
-    crate::db::api_keys::update_policy(&state.db, &id, access, expiry).await?;
+    let (access, expiry, limits) = policy(form.policy, true)?;
+    crate::db::api_keys::update_policy_with_limits(&state.db, &id, access, expiry, limits).await?;
     Ok(see_other("/api-keys"))
 }
 

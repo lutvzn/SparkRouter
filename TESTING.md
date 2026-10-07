@@ -36,7 +36,7 @@ cargo test --locked -- --list
 | --- | --- |
 | `src/crypto.rs` tests | Encryption round-trip, unique nonces, wrong key/provider context, tampering, invalid master-key lengths |
 | `src/db/` tests | Migrations, foreign keys, WAL persistence, CRUD, validation, ordering, transactional swaps/removals, delete constraints, timestamps |
-| `src/routing/combo.rs` tests | Retry classification, per-combo/concurrent round-robin turns, unbiased random index selection |
+| `src/routing/` tests | Retry classification, per-combo/concurrent round-robin turns, unbiased random index selection, and pre-commit cancellation retaining attempt traces |
 | `src/providers/` tests | URL normalization, unknown-field preservation, model replacement, response translation, fragmented UTF-8/CRLF SSE, tools, usage, truncation, limits, stream commitment |
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
@@ -48,14 +48,44 @@ cargo test --locked -- --list
 | `tests/request_history.rs`, `tests/history_dashboard.rs` | Metadata recording, fallback attempts, usage, streaming lifecycle, retention, escaping, protected clear |
 | `tests/usage_dashboard.rs` | Overview summary/leaderboard, cache and cost usage, streaming metrics, retained-window behavior and clearing statistics |
 | `tests/config_transfer.rs` | Credential-free transfer, preview, validation, atomic rollback, fresh disabled connections |
+| `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
 | `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
 | `src/db/provider_slugs.rs` tests | Readable unique slugs, reserved names, transactional conflicts/concurrency, stable legacy initialization |
 
+`tests/common/mod.rs` shares the counted local upstream server, RAII task cleanup,
+and response readers used by the gateway, test-chat, and request-history suites.
+
 Library tests sit next to their implementation. Integration tests use the exported
 library and `tower::ServiceExt::oneshot` to call the assembled Axum router. They
 still use real HTTP for upstream requests, exercising Reqwest and protocol wiring.
+
+## Convenience-script checks
+
+The helpers' `check` and `test` commands run the same Cargo checks documented above.
+For helper changes, additionally run:
+
+```sh
+bash -n scripts/sparkrouter.sh
+shellcheck scripts/sparkrouter.sh # Optional development tool, not a runtime requirement
+cargo build --release --locked
+python scripts/tests/smoke.py    # Optional Python 3 stdlib-only smoke harness
+```
+
+The smoke harness chooses PowerShell on Windows and Bash on Unix. It runs the
+actual release executable against a temporary database with a saved temporary
+master key; it never loads a user's `.env` or contacts providers. It covers key
+generation, start/status/idempotency, readiness, logs, restart/stop, process
+identity mismatch, lock conflicts, failed startup, empty-key rejection, and
+literal env-file parsing. A native release binary is required for the host OS.
+On Windows it captures helper output to files, because detached children can
+inherit unused pipe handles and delay captured-pipe EOF.
+
+Manually verify foreground Ctrl+C shutdown on each target OS. Unix stop must not
+escalate to SIGKILL on timeout; Windows background stop is explicitly forced.
+MacOS and Windows PowerShell 5.1 compatibility require checks on those environments,
+not just Bash syntax or PowerShell 7 execution.
 
 ## Focused commands
 
@@ -200,6 +230,13 @@ both API endpoints. Generate an unrestricted API key and confirm it can call eve
    upstream attempts. Edit scopes/expiry without changing its secret. Expire a
    disposable test key: it must return 401, not reopen the gateway. Confirm
    environment and legacy unrestricted keys remain unrestricted.
+   Set a generated key's requests/minute and concurrency limits using local
+   mocks. Confirm over-limit chat/test-chat receives 429 with Retry-After and no
+   upstream attempt, while model listing still works. Keep one mock stream open
+   and confirm its concurrency slot remains held until completion/cancellation.
+   Reload API keys to inspect active counts and current-window rejections. Blank
+   both fields to remove limits; edits must not change the key secret or interrupt
+   active requests. Restart: limits persist but counters reset.
 7. Verify ordered fallback using a controlled local mock that returns `503` for
    its first step and success for its second. A `400` must stop the chain. Do not
    deliberately generate rate-limit traffic against real providers.

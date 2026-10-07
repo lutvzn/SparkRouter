@@ -357,6 +357,29 @@ async fn htmx_edit_returns_escaped_independent_forms_and_refreshed_model_suggest
         assert!(html.contains(&format!("id=\"models-{}-b\"", step.id)));
     }
     assert!(html.contains("value=\"b\" data-provider=\"preset:openai\" selected"));
+    let page = app::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/combos/{}", combo.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let page = text(page).await;
+    assert_eq!(page.matches("data-step-picker").count(), 3);
+    for control in ["provider_group", "provider_id", "model"] {
+        assert_eq!(page.matches(&format!("id=\"{control}\"")).count(), 1);
+        assert!(page.contains(&format!("for=\"{control}\"")));
+    }
+    for step in &steps {
+        for prefix in ["group", "connection", "model"] {
+            let id = format!("{prefix}-{}", step.id);
+            assert_eq!(page.matches(&format!("id=\"{id}\"")).count(), 1);
+            assert!(page.contains(&format!("for=\"{id}\"")));
+        }
+    }
+    assert!(page.contains("id=\"models-b\""));
     let kept = combos::steps(&state.db, &combo.id).await.unwrap();
     assert_eq!(kept[0].model, "one");
     assert_eq!(kept[1].provider_id, "b");

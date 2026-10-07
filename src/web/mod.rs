@@ -198,6 +198,7 @@ mod tests {
             api_key: None,
             dashboard_auth: None,
             csrf_token: Arc::new("expected-token".to_string()),
+            key_limits: Arc::default(),
             round_robin: Arc::default(),
         };
         assert!(super::check_csrf(&state, "expected-token").is_ok());

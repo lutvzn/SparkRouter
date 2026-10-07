@@ -67,7 +67,7 @@ pub struct ComboStep {
 
 /// Validate a combo name: non-empty, at most [`MAX_NAME_LENGTH`]
 /// characters, restricted to ASCII letters, digits, `-`, `_`, and `.`.
-fn validate_name(name: &str) -> Result<(), AppError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), AppError> {
     if name.is_empty() {
         return Err(AppError::InvalidRequest(
             "combo name must not be empty".into(),
@@ -91,7 +91,7 @@ fn validate_name(name: &str) -> Result<(), AppError> {
 }
 
 /// Validate a step model identifier, returning the trimmed value.
-fn validate_model(model: &str) -> Result<String, AppError> {
+pub(crate) fn validate_model(model: &str) -> Result<String, AppError> {
     let model = model.trim();
     if model.is_empty() {
         return Err(AppError::InvalidRequest(

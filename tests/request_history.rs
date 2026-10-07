@@ -14,27 +14,22 @@
 //! body for success/interrupted, and a bounded yield-and-query loop for the task
 //! spawned when an unpolled body is dropped — with no sleeps anywhere.
 
-use std::{
-    net::SocketAddr,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+mod common;
+use common::{body_bytes, json_body, spawn_upstream};
+
+use std::sync::Arc;
 
 use axum::{
     Router,
     body::Body,
     extract::Request,
     http::{Method, StatusCode, header},
-    middleware::Next,
     response::Response,
     routing::post,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use http_body_util::BodyExt;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -269,59 +264,6 @@ async fn remember_model(state: &AppState, provider_id: &str, model_id: &str) -> 
 // Mock upstream servers (RAII: dropping aborts the server task)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct Hits(Arc<AtomicUsize>);
-
-impl Hits {
-    fn new() -> Self {
-        Self(Arc::new(AtomicUsize::new(0)))
-    }
-
-    fn count(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-struct MockUpstream {
-    addr: SocketAddr,
-    hits: Hits,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl MockUpstream {
-    fn url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-}
-
-impl Drop for MockUpstream {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn spawn_upstream(router: Router) -> MockUpstream {
-    let hits = Hits::new();
-    let counted = hits.clone();
-    let app = router.layer(axum::middleware::from_fn(
-        move |request: Request, next: Next| {
-            let counted = counted.clone();
-            async move {
-                counted.0.fetch_add(1, Ordering::SeqCst);
-                next.run(request).await
-            }
-        },
-    ));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind mock upstream");
-    let addr = listener.local_addr().expect("mock upstream local address");
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    MockUpstream { addr, hits, task }
-}
-
 /// OpenAI-compatible JSON upstream that replies with the exact given body
 /// bytes and records the request it received for unknown-field assertions.
 fn captured_json_router(
@@ -415,25 +357,6 @@ async fn send(state: &AppState, request: Request<Body>) -> Response {
         .oneshot(request)
         .await
         .expect("router call is infallible")
-}
-
-async fn body_bytes(response: Response) -> Bytes {
-    response
-        .into_body()
-        .collect()
-        .await
-        .expect("read gateway response body")
-        .to_bytes()
-}
-
-async fn json_body(response: Response) -> Value {
-    let bytes = body_bytes(response).await;
-    serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-        panic!(
-            "gateway response is not JSON ({error}): {}",
-            String::from_utf8_lossy(&bytes)
-        )
-    })
 }
 
 // ---------------------------------------------------------------------------

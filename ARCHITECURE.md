@@ -31,8 +31,9 @@ state, cache, queue, or routing worker is involved.
 | `db/providers.rs` | Provider CRUD and ciphertext persistence |
 | `db/combos.rs` | Combo CRUD, step order, transactional mutations |
 | `web/` | Form validation, CSRF verification, rendering and dashboard actions |
-| `api/chat.rs` | JSON boundary validation, combo-or-direct dispatch, and overall routing deadline |
+| `api/chat.rs` | JSON boundary validation, authorization/admission, and response history/permit wrapping |
 | `api/models.rs` | Combos and refreshed connection models listed as OpenAI models |
+| `routing/mod.rs` | Combo-or-direct dispatch, shared attempt execution/traces, and pre-commit deadlines |
 | `routing/combo.rs` | Sequential combo fallback loop and retryable status helper |
 | `routing/direct.rs` | Direct model lookup and the same pre-commit fallback policy |
 | `providers/mod.rs` | Protocol selection, authentication, bounded HTTP bodies and stream commitment |
@@ -71,7 +72,7 @@ on process restart and dashboard deletion removes the combo's cursor.
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
 | `provider_slugs` | Custom group ID with cascading deletion; unique saved public slug (1–64 lowercase letters/digits/hyphens) |
-| `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope, restricted flag, optional Unix expiry timestamp |
+| `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope, restricted flag, optional Unix expiry timestamp, optional requests/minute and concurrency limits |
 | `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
 | `request_history` | Bounded metadata snapshots for routed API/test-chat requests, including usage/cost and retained provider identity |
 | `request_attempts` | Ordered attempt snapshots with provider slug/group name; cascade with history deletion |
@@ -136,6 +137,24 @@ connections' last refresh. Preset namespaces use OmniRoute's default aliases;
 custom namespaces are persisted independently of credentials or connection names.
 Model listings, dashboard Copy buttons, and key scopes use these same public IDs.
 Old raw direct scopes are not rewritten; operators must update them explicitly.
+
+Generated-key authentication also snapshots the key ID and optional traffic
+limits in the same read transaction. After boundary validation and model-scope
+checks, API and test chat reserve admission in one short process-local mutex
+operation. Fixed 60-second windows count gateway requests, not fallback attempts;
+rejected admissions do not consume quota or start routing/history. `/v1/models`,
+the environment key, and unauthenticated access are exempt. All generated-key
+admissions track active requests even when unlimited, so enabling a concurrency
+limit accounts for already-active requests. A drop guard releases reservations
+on handler cancellation/error and owns successful streaming bodies until EOF,
+body error, or drop. There is no queue, post-commit fallback, or background work.
+
+The dashboard displays active counts and current-window rejections. Idle entries
+are pruned during admission after their window expires; active entries are never
+pruned. Configuration is stored in SQLite through an additive migration, while
+accounting resets on restart and is not shared across processes. Updates preserve
+counters and never cancel existing streams. Local limit failures are sanitized
+429 responses with Retry-After, distinct from upstream 429 fallback decisions.
 
 For chat requests:
 

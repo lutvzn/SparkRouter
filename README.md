@@ -99,6 +99,36 @@ curl http://127.0.0.1:8080/v1/models \
 
 Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. The environment key is unrestricted; generated keys can be unrestricted or scoped to selected model IDs. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
 
+### Per-key traffic limits
+
+Generated API keys optionally support **Requests per minute** (1–1,000,000) and
+**Maximum concurrent requests** (1–10,000). Set these when generating a key or
+under **Edit access / expiry / limits**; blank means unlimited. Existing keys
+remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions and
+test chat together; `/v1/models` is exempt.
+
+Rate accounting uses fixed 60-second windows beginning with the first admitted
+request for that key. Each admitted gateway request counts once, including
+routing failures; fallback attempts do not consume additional quota. Invalid
+boundary requests, denied models, and traffic-limit rejections do not consume
+quota. A fixed window may allow a burst across its boundary; this is not a
+rolling-window or token/spending budget.
+
+Concurrent accounting covers upstream preparation and fallback. Successful
+non-streaming requests release their slot when the handler finishes; streams
+hold a slot until the response body finishes, errors, or is dropped. There is
+no queue: exceeded limits return an OpenAI-shaped `429` with
+`error.type: "rate_limit_error"` and `Retry-After` in seconds. Rate rejection
+reports the remaining window time; concurrency rejection suggests one second,
+not a guarantee that a slot will then be free. Rejections never call providers
+or enter routed request history.
+
+The API keys page shows configured limits, active requests, and rejection counts
+in the current 60-second window; reload to refresh. Configuration persists in
+SQLite, but counters are process-local and reset on restart. Multiple gateway
+processes do not share counters. Editing limits does not reset existing counters
+or cancel active requests; new admissions use the updated limits.
+
 ### Scoped gateway API keys
 
 Choose **Only selected model IDs** when generating a key, then enter one exact
@@ -140,6 +170,31 @@ The gateway removes only the provider prefix before sending the request.
 settings and exact API-key allowlists using `/v1/models` or the model-card Copy
 button. Existing scopes are not automatically rewritten or broadened. Combos
 and their upstream step model IDs are unchanged.
+
+## Convenience scripts
+
+Use `scripts/sparkrouter.sh` on Linux/macOS/WSL or `scripts/sparkrouter.ps1` on
+Windows. Both offer `start`, `run`, `stop`, `restart`, `status`, `logs`, `health`,
+`build`, `check`, `test`, and `keygen`. See [the helper guide](BUILD.md#convenience-scripts)
+for setup and options.
+
+```sh
+# Explicitly load a prepared .env; never replace an existing master key.
+bash scripts/sparkrouter.sh start --env-file .env
+bash scripts/sparkrouter.sh health --env-file .env
+bash scripts/sparkrouter.sh stop
+```
+
+```powershell
+.\scripts\sparkrouter.ps1 start -EnvFile .env
+.\scripts\sparkrouter.ps1 health -EnvFile .env
+.\scripts\sparkrouter.ps1 stop
+```
+
+**Windows background stop is forced and interrupts active requests.** For
+graceful Windows shutdown, use `run` instead of `start` and press Ctrl+C.
+Scripts never load `.env` implicitly. The executable itself still reads only
+process environment variables.
 
 ## Configuration
 

@@ -23,6 +23,7 @@ pub struct AppState {
     pub api_key: Option<Arc<SecretString>>,
     pub csrf_token: Arc<String>,
     pub dashboard_auth: Option<Arc<crate::web::auth::DashboardAuth>>,
+    pub(crate) key_limits: Arc<crate::key_limits::Limiter>,
     pub(crate) round_robin: Arc<crate::routing::combo::RoundRobin>,
 }
 
@@ -61,6 +62,7 @@ impl AppState {
                     config.dashboard_secure_cookie,
                 ))
             }),
+            key_limits: Arc::default(),
             round_robin: Arc::default(),
         })
     }
@@ -95,15 +97,30 @@ async fn authenticate(
     next: Next,
 ) -> Result<Response, AppError> {
     let access = authorize(&state, request.headers()).await?;
+    request.extensions_mut().insert(access.access.clone());
     request.extensions_mut().insert(access);
     Ok(next.run(request).await)
+}
+
+#[derive(Clone)]
+pub(crate) struct Authorization {
+    pub access: crate::db::api_keys::KeyAccess,
+    pub key: Option<crate::db::api_keys::AuthenticatedKey>,
+}
+impl Authorization {
+    pub fn admit(&self, state: &AppState) -> Result<Option<crate::key_limits::Permit>, AppError> {
+        self.key
+            .as_ref()
+            .map(|key| state.key_limits.admit(&key.id, key.limits))
+            .transpose()
+    }
 }
 
 /// Shared by the public API and the dashboard's billable chat test action.
 pub(crate) async fn authorize(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<crate::db::api_keys::KeyAccess, AppError> {
+) -> Result<Authorization, AppError> {
     let supplied = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -117,17 +134,26 @@ pub(crate) async fn authorize(
         )
     });
     if env_match {
-        return Ok(crate::db::api_keys::KeyAccess::All);
+        return Ok(Authorization {
+            access: crate::db::api_keys::KeyAccess::All,
+            key: None,
+        });
     }
-    if let Some(access) =
-        crate::db::api_keys::authenticate(&state.db, &state.crypto, supplied).await?
+    if let Some(key) =
+        crate::db::api_keys::authenticate_key(&state.db, &state.crypto, supplied).await?
     {
-        return Ok(access);
+        return Ok(Authorization {
+            access: key.access.clone(),
+            key: Some(key),
+        });
     }
     // Open only when neither the environment key nor a generated key exists.
     // Expired keys still keep authentication enabled until explicitly revoked.
     if state.api_key.is_none() && !crate::db::api_keys::any(&state.db).await? {
-        return Ok(crate::db::api_keys::KeyAccess::All);
+        return Ok(Authorization {
+            access: crate::db::api_keys::KeyAccess::All,
+            key: None,
+        });
     }
     Err(AppError::Unauthorized)
 }

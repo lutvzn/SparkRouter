@@ -37,6 +37,11 @@
       <input id="expires-days" name="expires_days" type="number" min="1" max="3650" placeholder="e.g. 30">
     </div>
   </div>
+  <div class="grid2">
+    <div><label for="rpm">Requests per minute</label><input id="rpm" name="requests_per_minute" type="number" min="1" max="1000000" placeholder="Unlimited"></div>
+    <div><label for="concurrency">Maximum concurrent requests</label><input id="concurrency" name="max_concurrent" type="number" min="1" max="10000" placeholder="Unlimited"></div>
+  </div>
+  <p class="hint">Blank means unlimited. Chat and test chat share limits; model listing is exempt. Fixed 60-second windows and active counts reset on restart. Streams count until finished or dropped.</p>
   <div class="form-actions">
     <button class="btn primary" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>
   </div>
@@ -54,7 +59,8 @@
       </div>
       <span class="hint"><code>{{ key.prefix }}&hellip;</code> &middot; {{ key.created_at }}</span>
       <p class="hint">{% if key.restricted %}Selected models{% else %}All combos and models{% endif %} &middot; Expires: {{ key.expiry }} {% if key.expired %}<span class="badge fail">Expired</span>{% endif %}</p>
-      <details class="key-policy"><summary>Edit access / expiry</summary>
+      <p class="hint">Requests/min: {% if key.rpm.is_empty() %}Unlimited{% else %}{{ key.rpm }}{% endif %} &middot; Concurrent limit: {% if key.concurrency.is_empty() %}Unlimited{% else %}{{ key.concurrency }}{% endif %} &middot; Active: {{ key.active }} &middot; Rejections in current 60-second window: {{ key.rejected }}</p>
+      <details class="key-policy"><summary>Edit access / expiry / limits</summary>
         <form method="post" action="/api-keys/{{ key.id }}/policy">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <label for="access-{{ key.id }}">Access</label>
@@ -66,6 +72,10 @@
           <select id="expiry-{{ key.id }}" name="expiry"><option value="keep">Keep current expiry</option><option value="never">Never (remove expiry)</option><option value="days">Set days from now</option></select>
           <label for="days-{{ key.id }}">Days from now (when resetting expiry)</label>
           <input id="days-{{ key.id }}" name="expires_days" type="number" min="1" max="3650">
+          <label for="rpm-{{ key.id }}">Requests per minute (blank: unlimited)</label>
+          <input id="rpm-{{ key.id }}" name="requests_per_minute" type="number" min="1" max="1000000" value="{{ key.rpm }}">
+          <label for="concurrency-{{ key.id }}">Maximum concurrent requests (blank: unlimited)</label>
+          <input id="concurrency-{{ key.id }}" name="max_concurrent" type="number" min="1" max="10000" value="{{ key.concurrency }}">
           <button class="btn small" type="submit">Save policy</button>
         </form>
       </details>
