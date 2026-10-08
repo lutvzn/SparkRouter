@@ -11,11 +11,12 @@ URL=''
 TIMEOUT=30
 usage() {
   printf '%s\n' 'Usage: bash scripts/sparkrouter.sh COMMAND [options]' \
-    'Commands: start, run, stop, restart, status, logs, health, build, check, test, keygen, help' \
+    'Commands: start, run, stop, restart, rebuild, status, logs, health, build, check, test, keygen, help' \
     'Options: --env-file FILE  --state-dir DIR  --debug  --url URL  --timeout SECONDS' \
     'Defaults: release build, .sparkrouter state directory, 30-second stop timeout.' \
     'Environment files are opt-in; only plain KEY=value or quoted literal values are supported.' \
     'start builds if the binary is missing. run stays in the foreground (Ctrl+C to stop).' \
+    'rebuild stops, builds, and starts again; a failed build leaves the server stopped.' \
     'stop sends SIGTERM; it never escalates to SIGKILL. Windows: use the PowerShell helper.'
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -32,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     *) fail "Unknown option: $1";;
   esac
 done
-case "$ACTION" in start|run|stop|restart|status|logs|health|build|check|test|keygen|help) ;; *) fail "Unknown command: $ACTION";; esac
+case "$ACTION" in start|run|stop|restart|rebuild|status|logs|health|build|check|test|keygen|help) ;; *) fail "Unknown command: $ACTION";; esac
 [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || fail 'Timeout must be a positive integer'
 # Resolve user paths before switching to the repository working directory.
 [[ "$STATE_DIR" = /* ]] || STATE_DIR="$PWD/$STATE_DIR"
@@ -113,7 +114,7 @@ stop() {
   rm -f -- "$PID_FILE"
   printf 'Stopped.\n'
 }
-case "$ACTION" in start|stop|restart|run|status)
+case "$ACTION" in start|stop|restart|rebuild|run|status)
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) fail 'Use scripts/sparkrouter.ps1 for native Windows lifecycle management';; esac;;
 esac
 case "$ACTION" in
@@ -122,9 +123,9 @@ case "$ACTION" in
   build) build;;
   check) cargo fmt --check; cargo check --locked; cargo clippy --all-targets --all-features --locked -- -D warnings;;
   test) cargo test --locked;;
-  start|stop|restart)
+  start|stop|restart|rebuild)
     lock
-    case "$ACTION" in start) start;; stop) stop;; restart) stop; start;; esac;;
+    case "$ACTION" in start) start;; stop) stop;; restart) stop; start;; rebuild) stop; build; start;; esac;;
   run) [[ -n "${ROUTER_MASTER_KEY:-}" ]] || fail 'Set ROUTER_MASTER_KEY or pass --env-file FILE'; ensure_binary; exec "$BINARY";;
   status) if identity; then printf 'Running (PID %s).\n' "$PID"; else printf 'Not running (or process identity no longer matches).\n'; exit 1; fi;;
   logs) for file in "$OUT" "$ERR"; do if [[ -f "$file" ]]; then printf '\n== %s ==\n' "$file"; tail -n 100 -- "$file"; fi; done;;

@@ -405,10 +405,10 @@ async fn history_page_escapes_metadata_and_inlines_attempts() {
     // Attempts render inline on the same page via a details disclosure...
     assert!(html.contains("<details>"));
     assert!(html.contains("2 attempts"));
-    // ...with no per-request endpoints or record ids anywhere.
-    assert!(!html.contains("req-1"));
-    // The page states its metadata-only, bounded retention up front.
-    assert!(html.contains("Metadata only"));
+    // A per-request inspection page exposes opt-in Extended bodies.
+    assert!(html.contains("/history/req-1/payload"));
+    // The page states Basic/Extended semantics and bounded retention up front.
+    assert!(html.contains("Basic stores metadata only"));
     assert!(html.contains("10000"));
     assert!(html.contains("Retained requests"));
     // Stats cover the finished request.
@@ -540,7 +540,7 @@ async fn clearing_history_requires_csrf_and_a_same_origin_submission() {
     let html = get_page(&router, "/history").await;
     assert!(html.contains("No requests recorded yet."));
     assert!(
-        html.contains("Metadata only"),
+        html.contains("Basic stores metadata only"),
         "the empty page keeps its note"
     );
 }

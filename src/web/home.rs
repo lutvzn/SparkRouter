@@ -16,6 +16,10 @@ struct Home {
     app_name: &'static str,
     requests: String,
     successes: String,
+    failures: String,
+    database_status: &'static str,
+    memory: String,
+    usage_available: bool,
     input_tokens: String,
     output_tokens: String,
     cached_tokens: String,
@@ -42,8 +46,40 @@ struct ProviderView {
 }
 
 pub(crate) async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    let overview = usage::overview(&state.db).await?;
-    render(build_home(overview))
+    let database_ready = crate::health::database_ready(&state.db).await;
+    let overview = if database_ready {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            usage::overview(&state.db),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    } else {
+        None
+    };
+    let mut home = match overview {
+        Some(data) => build_home(data),
+        None => {
+            let mut home = build_home(Overview::default());
+            home.usage_available = false;
+            home.requests = "—".into();
+            home.successes = "—".into();
+            home.failures = "—".into();
+            home.input_coverage = "Usage unavailable".into();
+            home.output_coverage = "Usage unavailable".into();
+            home.cache_coverage = "Usage unavailable".into();
+            home.cost_coverage = "Usage unavailable".into();
+            home
+        }
+    };
+    home.database_status = if database_ready {
+        "Connected"
+    } else {
+        "Unavailable"
+    };
+    home.memory = process_memory().await;
+    render(home)
 }
 
 fn build_home(data: Overview) -> Home {
@@ -53,6 +89,10 @@ fn build_home(data: Overview) -> Home {
         app_name: crate::APP_NAME,
         requests,
         successes: number(data.successes),
+        failures: number(total - data.successes),
+        database_status: "Unavailable",
+        memory: "Unavailable".into(),
+        usage_available: true,
         input_tokens: optional_number(data.input_tokens),
         output_tokens: optional_number(data.output_tokens),
         cached_tokens: optional_number(data.cached_tokens),
@@ -69,6 +109,28 @@ fn build_home(data: Overview) -> Home {
             .map(|p| provider_view(p, total))
             .collect(),
     }
+}
+
+// Linux exposes current resident memory without inspecting other processes or
+// adding a platform monitoring dependency. Unsupported platforms stay unknown.
+pub(super) async fn process_memory() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = tokio::fs::read_to_string("/proc/self/status").await
+        && let Some(kib) = resident_kib(&status)
+    {
+        return format!("{:.1} MiB", kib as f64 / 1024.0);
+    }
+    "Unavailable".into()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resident_kib(status: &str) -> Option<u64> {
+    let mut fields = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace();
+    let kib = fields.next()?.parse().ok()?;
+    (fields.next()? == "kB" && fields.next().is_none()).then_some(kib)
 }
 
 fn provider_view(p: ProviderTotals, total: i64) -> ProviderView {
@@ -125,6 +187,20 @@ fn coverage(known: i64, total: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_current_resident_memory_without_guessing() {
+        assert_eq!(resident_kib("Name: router\nVmRSS:\t2048 kB\n"), Some(2048));
+        assert_eq!(resident_kib("VmRSS: 0 kB"), Some(0));
+        for status in [
+            "VmSize: 2048 kB",
+            "VmRSS: unknown kB",
+            "VmRSS: 2048 MB",
+            "VmRSS: -1 kB",
+        ] {
+            assert_eq!(resident_kib(status), None);
+        }
+    }
 
     #[test]
     fn formats_counts_and_small_costs_without_losing_unknowns() {

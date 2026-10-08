@@ -91,6 +91,14 @@ handle SIGTERM for graceful shutdown.
 rotation: an old database requires its original key to decrypt provider keys.
 Back up that key separately from the database.
 
+Request logging is configured in **Settings**, not `RUST_LOG`: Basic is
+metadata-only (default), Off skips new history, and Extended requires confirmation
+and stores bounded sensitive request/response bodies unencrypted in SQLite/WAL.
+Use Extended only with test data and protected dashboard access. Body captures
+are included in database backups, not configuration exports; clearing history
+is not a secure wipe of WAL/free pages/backups. Mode and retention persist across
+restart. See [request history](README.md#request-history-and-configuration-transfer).
+
 ## Convenience scripts
 
 The repository includes matching command helpers:
@@ -109,6 +117,7 @@ organization's policy; the helper does not change execution policy for you.
 | `run` | Run in the foreground, with Ctrl+C shutdown; not managed by `stop`/`status` |
 | `stop` | Stop only the verified background process started by this helper |
 | `restart` | Stop then start, using the supplied environment/settings |
+| `rebuild` | Stop, build the selected profile, then start with the supplied settings; a failed build leaves it stopped |
 | `status` | Report managed process identity; exit 1 if stopped or identity no longer matches |
 | `logs` | Print the last 100 lines of both stdout and stderr logs |
 | `health` | Call `/readyz`, with a five-second timeout; fails if not ready |
@@ -119,7 +128,8 @@ organization's policy; the helper does not change execution policy for you.
 | `help` | List commands/options |
 
 `start` only verifies that the process survives initial startup; use `health` to
-check readiness. An existing binary is reused, so run `build` after source changes.
+check readiness. An existing binary is reused; use `rebuild` after source changes
+to stop, compile, and restart (or `build` followed by `restart`).
 The scripts resolve their repository root and run the server there, regardless
 of the caller's working directory. Thus the default SQLite URL still uses the
 repository's `router.db`; use an explicit URL for another installation.
@@ -138,6 +148,7 @@ bash scripts/sparkrouter.sh status
 bash scripts/sparkrouter.sh health --env-file .env
 bash scripts/sparkrouter.sh logs
 bash scripts/sparkrouter.sh restart --env-file .env
+bash scripts/sparkrouter.sh rebuild --env-file .env
 bash scripts/sparkrouter.sh stop
 ```
 
@@ -150,6 +161,7 @@ bash scripts/sparkrouter.sh stop
 .\scripts\sparkrouter.ps1 health -EnvFile .env
 .\scripts\sparkrouter.ps1 logs
 .\scripts\sparkrouter.ps1 restart -EnvFile .env
+.\scripts\sparkrouter.ps1 rebuild -EnvFile .env
 .\scripts\sparkrouter.ps1 stop
 # For graceful Windows shutdown: run in the foreground and press Ctrl+C.
 .\scripts\sparkrouter.ps1 run -EnvFile .env
@@ -179,7 +191,10 @@ directory tracks one background instance. Env-file and state-directory relative
 paths resolve from the caller's working directory. Logs are replaced on each
 start and may contain configuration metadata; keep the directory private.
 
-A short-lived lock serializes start/stop/restart. If a helper is forcibly killed,
+A lock serializes start/stop/restart/rebuild, including the entire rebuild.
+`rebuild` starts the server even if it was already stopped. Pass the same env file
+and state directory used for `start`; settings are not saved in the process state.
+A stop failure aborts before building, and a build failure prevents startup. If a helper is forcibly killed,
 an abandoned lock may remain: first confirm that no helper is running, then remove
 only `.sparkrouter/lock` (a directory on Bash, a file on PowerShell). Never remove
 state or lock files while a lifecycle operation is active. PID identity mismatch

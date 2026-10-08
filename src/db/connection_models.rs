@@ -43,25 +43,17 @@ impl StoredModel {
             })
     }
 
-    /// Fields worth showing on a card. Older snapshots may still contain dates,
-    /// owners, and pricing; those stay stored but are not displayed. Plain
-    /// context numbers are grouped here so an old refresh still reads 1.000.000.
+    /// Only context size is shown on a card; other fields stay in the popup.
+    /// Context counts are abbreviated here, including previously saved lists.
     pub fn display_fields(&self) -> Vec<ModelField> {
         self.fields
             .iter()
             .filter(|field| useful_card_label(&field.label))
-            .take(2)
             .filter(|field| !field.value.contains("->"))
+            .take(1)
             .cloned()
             .map(|mut field| {
-                field.value = group_plain_number(&field.value);
-                if field.label.to_ascii_lowercase().contains("context") {
-                    if let Some(number) = field.value.strip_suffix(" context") {
-                        field.value = format!("{number} ctx");
-                    } else if !field.value.to_ascii_lowercase().contains("ctx") {
-                        field.value.push_str(" ctx");
-                    }
-                }
+                field.value = format_context_tag(&field.value);
                 field
             })
             .collect()
@@ -80,6 +72,17 @@ impl StoredModel {
             .collect()
     }
 
+    /// Exact cached token limits for discovery, not the rounded card tags.
+    pub fn token_limits(&self) -> (Option<u64>, Option<u64>) {
+        let limit = |label: &str, suffix: &str| {
+            self.fields
+                .iter()
+                .filter(|field| field.label.eq_ignore_ascii_case(label))
+                .find_map(|field| parse_token_count(&field.value, suffix))
+        };
+        (limit("Context", " ctx"), limit("Output", " output"))
+    }
+
     /// Text the dashboard search box matches: name, id, and the visible chips.
     pub fn search_text(&self) -> String {
         let mut text = format!("{} {}", self.name, self.id);
@@ -91,6 +94,63 @@ impl StoredModel {
             text.push_str(" free");
         }
         text
+    }
+}
+
+fn parse_token_count(value: &str, suffix: &str) -> Option<u64> {
+    let text = value.trim();
+    let number = text.strip_suffix(suffix).unwrap_or(text);
+    let parts: Vec<_> = number.split(['.', ',']).collect();
+    if !parts
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        || (parts.len() > 1
+            && (parts[0].len() > 3 || parts[1..].iter().any(|part| part.len() != 3)))
+    {
+        return None;
+    }
+    parts
+        .concat()
+        .parse::<u64>()
+        .ok()
+        .filter(|count| *count > 0)
+}
+
+fn format_context_tag(value: &str) -> String {
+    let text = value.trim();
+    let number = text
+        .strip_suffix(" ctx")
+        .or_else(|| text.strip_suffix(" context"))
+        .unwrap_or(text);
+    let parts: Vec<_> = number.split(['.', ',']).collect();
+    let valid = parts
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && (parts.len() == 1
+            || (parts[0].len() <= 3 && parts[1..].iter().all(|part| part.len() == 3)));
+    if valid && let Ok(count) = parts.concat().parse::<u64>() {
+        let (divisor, suffix) = if count >= 1_000_000 {
+            (1_000_000, "M")
+        } else if count >= 1_000 {
+            (1_000, "k")
+        } else {
+            return format!("{count} ctx");
+        };
+        // Round to hundredths using integers, avoiding floating-point drift.
+        let hundredth = divisor / 100;
+        let rounded = count / hundredth + u64::from(count % hundredth >= hundredth / 2);
+        let whole = rounded / 100;
+        let remainder = rounded % 100;
+        if remainder == 0 {
+            return format!("{whole}{suffix} ctx");
+        }
+        let fraction = format!("{remainder:02}");
+        return format!("{whole}.{}{suffix} ctx", fraction.trim_end_matches('0'));
+    }
+    if text.to_ascii_lowercase().contains("ctx") {
+        text.to_owned()
+    } else {
+        format!("{number} ctx")
     }
 }
 
@@ -150,7 +210,7 @@ fn format_money(amount: f64) -> String {
 
 fn useful_card_label(label: &str) -> bool {
     let label = label.to_ascii_lowercase();
-    label != "modality" && (label.contains("context") || label.contains("output"))
+    label.contains("context")
 }
 
 fn truthy(value: &str) -> bool {
@@ -292,6 +352,52 @@ pub async fn routable_model_ids(pool: &SqlitePool) -> Result<Vec<String>, AppErr
     Ok(ids.into_iter().collect())
 }
 
+/// Cached details for public direct IDs, using the oldest enabled connection
+/// listing each ID, exactly as direct routing chooses its first attempt.
+pub async fn public_model_details(
+    pool: &SqlitePool,
+) -> Result<std::collections::BTreeMap<String, StoredModel>, AppError> {
+    let namespaces = super::provider_slugs::for_connections(pool).await?;
+    let rows = sqlx::query(
+        "SELECT m.provider_id, m.model_id, m.details FROM connection_models m
+         JOIN providers p ON p.id = m.provider_id WHERE p.enabled != 0 ORDER BY p.rowid, m.position"
+    ).fetch_all(pool).await?;
+    let mut models = std::collections::BTreeMap::new();
+    for row in rows {
+        let provider_id: String = row.try_get("provider_id")?;
+        let id: String = row.try_get("model_id")?;
+        let details: String = row.try_get("details")?;
+        if let Some(slug) = namespaces.get(&provider_id) {
+            models
+                .entry(format!("{slug}/{id}"))
+                .or_insert_with(|| stored_model(&id, &details));
+        }
+    }
+    Ok(models)
+}
+
+/// First configured step only, including disabled connections. Missing cached
+/// details never borrow another step's limits or affect combo routability.
+pub async fn first_combo_model_details(
+    pool: &SqlitePool,
+) -> Result<HashMap<String, StoredModel>, AppError> {
+    let rows = sqlx::query(
+        "SELECT s.combo_id, m.model_id, m.details FROM combo_steps s
+         JOIN connection_models m ON m.provider_id = s.provider_id AND m.model_id = s.model
+         WHERE NOT EXISTS (SELECT 1 FROM combo_steps earlier
+             WHERE earlier.combo_id = s.combo_id AND earlier.position < s.position)",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut models = HashMap::new();
+    for row in rows {
+        let id: String = row.try_get("model_id")?;
+        let details: String = row.try_get("details")?;
+        models.insert(row.try_get("combo_id")?, stored_model(&id, &details));
+    }
+    Ok(models)
+}
+
 /// Lists for the given connections. Missing keys were never refreshed.
 pub async fn for_connections(
     pool: &SqlitePool,
@@ -391,6 +497,43 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn context_tags_abbreviate_without_changing_info_counts() {
+        for (value, expected) in [
+            ("100000", "100k ctx"),
+            ("100.000 context", "100k ctx"),
+            ("128.000 ctx", "128k ctx"),
+            ("1.000.000", "1M ctx"),
+            ("1,000,000 ctx", "1M ctx"),
+            ("1.050.000 ctx", "1.05M ctx"),
+            ("1500", "1.5k ctx"),
+            ("1048576", "1.05M ctx"),
+            ("1051235", "1.05M ctx"),
+            ("1055000", "1.06M ctx"),
+            ("1999999", "2M ctx"),
+            ("123456", "123.46k ctx"),
+            ("123450", "123.45k ctx"),
+            ("1004999", "1M ctx"),
+            ("1100000", "1.1M ctx"),
+            ("512", "512 ctx"),
+            ("unknown", "unknown ctx"),
+            ("1.5M ctx", "1.5M ctx"),
+        ] {
+            let model = StoredModel {
+                id: "test".into(),
+                name: "Test".into(),
+                fields: vec![ModelField {
+                    label: "Context".into(),
+                    value: value.into(),
+                }],
+                free: false,
+            };
+            assert_eq!(model.display_fields()[0].value, expected, "{value}");
+            assert_eq!(model.info_fields()[0].value, group_plain_number(value));
+            assert_eq!(model.fields[0].value, value);
+        }
+    }
+
     #[tokio::test]
     async fn replace_keeps_order_and_cascades_with_the_connection() {
         let pool = pool().await;
@@ -456,7 +599,7 @@ mod tests {
             free: false,
         };
         assert!(legacy.is_free());
-        assert_eq!(legacy.display_fields()[0].value, "1.000.000 ctx");
+        assert_eq!(legacy.display_fields()[0].value, "1M ctx");
         let priced = StoredModel {
             id: "priced".into(),
             name: "Priced".into(),

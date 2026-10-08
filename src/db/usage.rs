@@ -17,7 +17,7 @@ pub struct ProviderTotals {
     pub usage_requests: i64,
     pub cost_known: i64,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Overview {
     pub requests: i64,
     pub successes: i64,

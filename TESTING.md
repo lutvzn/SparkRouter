@@ -41,12 +41,13 @@ cargo test --locked -- --list
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
 | `tests/test_chat.rs` | Test chat rendering, authenticated/CSRF-protected combo calls, actual fallback traces, sanitized failures, and shared routing strategy state |
-| `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models, optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
+| `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models with exact cached context/output discovery (configured-first combo step, reorder, disabled/missing details, oldest enabled direct connection, scoped visibility), optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
 | `tests/dashboard_auth.rs` | Optional admin login, cookie isolation/revocation, CSRF/origin protections, login limits |
-| `tests/request_history.rs`, `tests/history_dashboard.rs` | Metadata recording, fallback attempts, usage, streaming lifecycle, retention, escaping, protected clear |
-| `tests/usage_dashboard.rs` | Overview summary/leaderboard, cache and cost usage, streaming metrics, retained-window behavior and clearing statistics |
+| `tests/request_history.rs`, `tests/history_dashboard.rs` | Off/Basic/Extended, opt-in bounded body captures, JSON/SSE byte preservation, mode snapshot, partial/cancelled capture, escaping/no-store, metadata recording, fallback attempts, usage, streaming lifecycle, retention, escaping, protected clear |
+| `tests/usage_dashboard.rs` | Overview summary/leaderboard, database connectivity/failure rendering, success/failure counts, memory parsing, cache and cost usage, streaming metrics, retained-window behavior and clearing statistics |
+| `tests/settings.rs`, `scripts/tests/theme.cjs` | Settings navigation/sections, sanitized status, login/CSRF/origin, retention bounds and persistence, immediate/cascading pruning, confirmed clear, browser-local theme/system selection |
 | `tests/config_transfer.rs` | Credential-free transfer, preview, validation, atomic rollback, fresh disabled connections |
 | `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
@@ -76,7 +77,8 @@ python scripts/tests/smoke.py    # Optional Python 3 stdlib-only smoke harness
 The smoke harness chooses PowerShell on Windows and Bash on Unix. It runs the
 actual release executable against a temporary database with a saved temporary
 master key; it never loads a user's `.env` or contacts providers. It covers key
-generation, start/status/idempotency, readiness, logs, restart/stop, process
+generation, start/status/idempotency, readiness, logs, restart/stop,
+rebuild from running/stopped states, failed-build shutdown and lock cleanup, process
 identity mismatch, lock conflicts, failed startup, empty-key rejection, and
 literal env-file parsing. A native release binary is required for the host OS.
 On Windows it captures helper output to files, because detached children can
@@ -86,6 +88,20 @@ Manually verify foreground Ctrl+C shutdown on each target OS. Unix stop must not
 escalate to SIGKILL on timeout; Windows background stop is explicitly forced.
 MacOS and Windows PowerShell 5.1 compatibility require checks on those environments,
 not just Bash syntax or PowerShell 7 execution.
+
+For clipboard JavaScript changes, optionally run the dependency-free development
+test (Node.js is not required to build or run SparkRouter):
+
+```sh
+node scripts/tests/clipboard.cjs
+node scripts/tests/theme.cjs
+node scripts/tests/test-chat.cjs
+```
+
+It covers modern clipboard copying, plain-HTTP fallback, failure feedback,
+temporary textarea cleanup, focus restoration, and toast dismissal/reset. Also manually check Copy on
+an HTTP LAN address and HTTPS/localhost in a browser; mocked DOM tests do not
+prove browser clipboard permissions.
 
 ## Focused commands
 
@@ -151,7 +167,9 @@ existing installation's database.
     Verify Providers/Combos links are in the left sidebar, not the top toolbar;
     check navigation and the compact layout on narrow screens.
     Open `/` and verify Overview is the default landing page and login
-    destination. Check its five usage cards and top-ten provider ranking using
+    destination. Check database status, successful/failed request counts, and process
+    RAM (Linux only); reload to refresh. Pending streams must not count as finished,
+    and unavailable history must not appear as zero. Check its five usage cards and top-ten provider ranking using
     disposable mock history; verify dark/light themes and mobile layout.
    Providers and Combos list titles/subtitles should appear in the top bar beside
    the theme toggle, without duplicate headings in the content area.
@@ -195,11 +213,15 @@ existing installation's database.
    Combo titles should be near-white in dark mode and dark in light mode, with
    no underline on hover. Check local SVG icons on navigation and action buttons;
    Copy feedback and theme toggling must preserve their icons and text labels.
-5. Open **Test chat** in the sidebar. Choose a combo, enter a gateway key if required,
+5. Open **Test** in the sidebar. Choose a combo, enter a gateway key if required,
    and send a message. Verify the assistant reply and ordered attempt details,
    including a controlled retryable failure and a permanent failure with local
    mocks. Repeated requests should follow the combo strategy. Check multi-turn
    history, reset, combo changes, errors, and narrow layouts in both themes.
+   Check the centered empty state, right-aligned user bubbles, assistant replies,
+   single-line bottom composer with Send on its right, New chat, and collapsed
+   Routing attempts panel. Enter sends; modified Enter and IME composition must
+   not submit. Failed requests retain the draft for retry.
    Refreshing or leaving the page should discard the chat and entered key.
    These are real upstream generations when using real connections.
 
@@ -258,6 +280,25 @@ both API endpoints. Generate an unrestricted API key and confirm it can call eve
 
 For the new dashboard pages, also verify:
 
+- In a disposable database, check request logging defaults to Basic. Off must
+  stop new API and Test chat history/Overview increments, but not erase old rows.
+  Extended must require the sensitive-content checkbox. Inspect JSON and SSE
+  bodies via History, including large/truncated bodies and interrupted streams;
+  content must be escaped, headers and Test chat CSRF excluded. Verify mode
+  persistence/restart, clear/prune cascading, and dashboard authentication on
+  inspection pages. Do not use production prompts or credentials; captures are
+  unencrypted and may remain in WAL/backups after clear.
+- Open Settings via the sidebar; verify its active state and five sections in
+  light/dark themes and at mobile widths. Select System and check OS changes;
+  preferences should survive reload in the same browser only. With blocked
+  browser storage, check the page-only warning. Reduce retention in a disposable
+  database and verify irreversible pruning, History's displayed cap, Overview
+  totals, and persistence after restart. Confirm clearing requires the checkbox.
+  Export/import and preview should stay within Settings and reuse credential-free
+  transfer, with no separate Configuration sidebar entry or page. Check Refresh updates
+  uptime and status; deployment secrets must not appear in HTML. Check ordinary
+  retention/clear forms with JavaScript disabled.
+
 - Make successful, fallback, and interrupted-stream requests using local mocks;
   inspect History outcomes, attempts, usage (unknown if omitted), pagination, and
   Clear. Confirm conversation text is absent, including after restarting.
@@ -271,7 +312,7 @@ For the new dashboard pages, also verify:
   named connections, combo strategies and ordering; connections must be disabled
   and credential-free. Add keys and enable explicitly. Conflicting combo names
   or invalid references must leave the database unchanged.
-- Check Login, History, Configuration, and Logout in both themes and on narrow
+- Check Login, History, Settings (including import preview), and Logout in both themes and on narrow
    screens, including ordinary forms with JavaScript disabled.
 - Check one highlighted current navigation section on list and nested edit pages,
   a single page heading in the shared header, keyboard-visible focus rings and

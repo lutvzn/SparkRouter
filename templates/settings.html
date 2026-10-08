@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block nav_settings %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>Settings</h1><p class="topbar-subtitle">Appearance, history, configuration transfer, and system information.</p></div>{% endblock %}
+{% block content %}
+{% if !notice.is_empty() %}<p class="test ok" role="status">{{ notice }}</p>{% endif %}
+<div class="settings-grid">
+<section class="settings-card" aria-labelledby="appearance-heading">
+  <h2 id="appearance-heading">Appearance</h2>
+  <label for="settings-theme">Theme</label>
+  <select id="settings-theme" disabled><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+  <p class="hint">Saved in this browser only. System follows your device’s appearance.</p>
+  <p id="theme-storage-status" class="hint" role="status"></p>
+  <noscript><p class="hint">Enable JavaScript to change the theme.</p></noscript>
+</section>
+<section class="settings-card" aria-labelledby="history-heading">
+  <h2 id="history-heading">Request history</h2>
+  <p class="hint">Basic records outcomes, models, attempts, latency, tokens and reported cost. Extended also captures gateway request and response bodies for development.</p>
+  {% if logging_mode.is_empty() %}<p class="test fail">Request logging preference unavailable.</p>{% else %}
+  <form method="post" action="/settings/logging">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <label for="logging-mode">Request logging mode</label>
+    <select id="logging-mode" name="logging_mode">
+      <option value="off"{% if logging_mode == "off" %} selected{% endif %}>Off — no new history</option>
+      <option value="basic"{% if logging_mode == "basic" %} selected{% endif %}>Basic — metadata only (default)</option>
+      <option value="extended"{% if logging_mode == "extended" %} selected{% endif %}>Extended — metadata and bodies</option>
+    </select>
+    <p class="hint">Off stops new history and usage totals, not operational server logs. Existing records remain. Mode is sampled before routing; changes do not alter in-flight requests. Inspect Extended bodies from History.</p>
+    <p class="test fail">Extended stores sensitive prompts, completions and tool data as plaintext in SQLite and backups. Body content may include secrets. HTTP headers, configured transport credentials and raw upstream errors are not captured. Each body is capped at 64 KiB. Secure dashboard access and use only with test data.</p>
+    <label><input type="checkbox" name="confirm_extended" value="yes"> I accept sensitive body storage (required to save Extended).</label>
+    <button class="btn primary" type="submit">Save logging mode</button>
+  </form>
+  {% endif %}
+  {% if retention.is_empty() %}<p class="test fail" role="status">History settings unavailable. Reload to try again.</p>{% else %}
+  <form method="post" action="/settings">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <label for="history-retention">Maximum retained requests</label>
+    <input id="history-retention" name="history_retention" type="number" min="1" max="10000" step="1" value="{{ retention }}" required>
+    <p class="hint">1–10,000; default 10,000. Lowering the limit immediately deletes older records and their attempts. This cannot be undone and changes dashboard totals. Increasing it does not restore deleted records.</p>
+    <button class="btn primary" type="submit">Save retention</button>
+  </form>
+  {% endif %}
+  <details><summary>Clear all history</summary>
+    <form method="post" action="/settings/history/clear">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <p class="hint">Permanently deletes retained requests and attempts, resetting dashboard usage totals. Providers, combos and API keys are unchanged. In-flight requests may still record new history.</p>
+      <label><input type="checkbox" name="confirm" value="yes" required> I understand this cannot be undone.</label>
+      <button class="btn danger" type="submit">Clear history</button>
+    </form>
+  </details>
+  <p><a href="/history">View request history →</a></p>
+</section>
+<section class="settings-card configuration-transfer" aria-labelledby="backup-heading">
+  <h2 id="backup-heading">Backup &amp; restore</h2>
+  <p>Export or import providers, connections, and combos.</p>
+  <p class="hint">Configuration transfer is not a full backup: it excludes provider credentials, gateway keys, history, cached models, and settings. Imported connections start disabled; review endpoints and add credentials before enabling.</p>
+  {% include "config_transfer.html" %}
+  <p class="hint">For a full backup, stop SparkRouter cleanly before copying SQLite, or use SQLite’s online backup facility. Save your existing master key separately and securely. Do not copy a live database file alone or generate a replacement master key.</p>
+</section>
+<section class="settings-card" aria-labelledby="security-heading">
+  <h2 id="security-heading">Security</h2>
+  <dl class="settings-facts"><dt>Dashboard authentication</dt><dd>{{ dashboard_auth }}</dd><dt>Gateway API authentication</dt><dd>{{ api_auth }}</dd></dl>
+  <p class="hint">API keys do not protect the dashboard. Expired generated keys keep API authentication enabled until revoked. Protect network access with HTTPS and dashboard authentication or an authenticated reverse proxy.</p>
+  <a class="btn" href="/api-keys">Manage API keys</a>
+  <p class="hint">Passwords, the master encryption key, bind address, database location and environment keys stay in deployment configuration. Change them outside this UI and restart. Existing encrypted credentials require their original master key.</p>
+</section>
+<section class="settings-card" aria-labelledby="system-heading">
+  <div class="home-section-head"><h2 id="system-heading">System</h2><a class="btn" href="/settings">Refresh</a></div>
+  <dl class="settings-facts"><dt>Version</dt><dd>{{ version }}</dd><dt>Uptime</dt><dd>{{ uptime }}</dd><dt>Database status</dt><dd>{{ database_status }}</dd><dt>Memory usage</dt><dd>{{ memory }}</dd></dl>
+  <p class="hint">Sampled on page load. Database status checks read connectivity, not write access or provider health. Memory is current process resident RAM on Linux; unavailable on other platforms.</p>
+</section>
+</div>
+{% endblock %}

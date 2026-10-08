@@ -1,9 +1,9 @@
-//! Dashboard page for request history: metadata-only rows, aggregate stats,
-//! and a clear action, with the retention cap stated up front.
+//! Dashboard request history: metadata rows, aggregate stats, bounded opt-in
+//! Extended body inspection, and a clear action with retention stated up front.
 
 use askama::Template;
 use axum::{
-    extract::{Form, Query, State},
+    extract::{Form, Path, Query, State},
     response::{Html, Response},
 };
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
 use crate::db::request_history::{
-    self, HistoryStats, MAX_RETAINED, OUTCOME_STREAMING, OUTCOME_SUCCESS, StoredRecord,
+    self, HistoryStats, OUTCOME_STREAMING, OUTCOME_SUCCESS, StoredRecord,
 };
 use crate::error::AppError;
 
@@ -33,6 +33,7 @@ struct HistoryPage {
 /// One rendered table row. Display strings are prepared here so the template
 /// only prints plain values; Askama still escapes every one of them.
 struct HistoryRow {
+    id: String,
     created_at: String,
     source: String,
     model: String,
@@ -81,11 +82,35 @@ pub(crate) async fn page(
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
         stats,
-        max_retained: MAX_RETAINED,
+        max_retained: crate::db::settings::history_retention(&state.db).await?,
         rows: stored.into_iter().map(HistoryRow::from_stored).collect(),
         page,
         total_pages,
     })
+}
+
+#[derive(Template)]
+#[template(path = "history_payload.html")]
+struct PayloadPage {
+    app_name: &'static str,
+    payload: Option<crate::db::request_payloads::Payload>,
+}
+
+pub(crate) async fn payload(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    use axum::response::IntoResponse;
+    let page = render(PayloadPage {
+        app_name: crate::APP_NAME,
+        payload: crate::db::request_payloads::get(&state.db, &id).await?,
+    })?;
+    let mut response = page.into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 pub(crate) async fn clear(
@@ -101,6 +126,7 @@ impl HistoryRow {
     fn from_stored(stored: StoredRecord) -> Self {
         let record = stored.record;
         Self {
+            id: record.id,
             created_at: stored.created_at,
             source: record.source,
             model: record.model,

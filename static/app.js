@@ -19,10 +19,11 @@ document.body.addEventListener("htmx:sendError", () => {
 });
 
 // Progressive copy buttons ship hidden in the markup and are only revealed
-// when the async Clipboard API is usable, so browsers without it never see a
-// dead control.
+// when a clipboard API is available. Plain HTTP LAN addresses need the legacy
+// copy fallback because the async Clipboard API requires a secure context.
 function revealCopyButtons() {
-  if (!(navigator.clipboard && typeof navigator.clipboard.writeText === "function")) return;
+  if (!(navigator.clipboard && typeof navigator.clipboard.writeText === "function")
+      && typeof document.execCommand !== "function") return;
   document.querySelectorAll("[data-copy-model]").forEach((button) => {
     button.hidden = false;
   });
@@ -39,20 +40,55 @@ function setCopyLabel(button, text) {
   }
 }
 
+function copyWithFallback(text) {
+  const previousFocus = document.activeElement;
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.readOnly = true;
+  input.className = "clipboard-fallback";
+  document.body.appendChild(input);
+  try {
+    input.focus({ preventScroll: true });
+    input.select();
+    if (!document.execCommand("copy")) throw new Error("Copy unavailable");
+  } finally {
+    input.remove();
+    if (previousFocus && typeof previousFocus.focus === "function") {
+      previousFocus.focus({ preventScroll: true });
+    }
+  }
+}
+
+let copyToastTimer;
+function showCopyStatus(status, message) {
+  if (!status) return;
+  window.clearTimeout(copyToastTimer);
+  status.textContent = message;
+  copyToastTimer = window.setTimeout(() => { status.textContent = ""; }, 2000);
+}
+
 async function copyModelId(button) {
   const modelId = button.dataset.copyModel;
   const status = document.getElementById("copy-status");
   button.disabled = true;
   try {
-    await navigator.clipboard.writeText(modelId);
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(modelId);
+      } catch (_) {
+        copyWithFallback(modelId);
+      }
+    } else {
+      copyWithFallback(modelId);
+    }
     setCopyLabel(button, "Copied");
     button.classList.add("is-copied");
     window.setTimeout(() => button.classList.remove("is-copied"), 1200);
-    if (status) status.textContent = "Copied " + modelId;
+    showCopyStatus(status, "Text copied");
   } catch (_) {
     // Never surface the raw rejection; the visible model ID is the recovery path.
     setCopyLabel(button, "Copy failed");
-    if (status) status.textContent = "Could not copy. Model ID: " + modelId;
+    showCopyStatus(status, "Could not copy. Copy the model ID manually.");
   } finally {
     button.disabled = false;
   }

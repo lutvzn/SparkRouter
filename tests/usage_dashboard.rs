@@ -102,6 +102,54 @@ async fn empty_overview_is_unknown_and_home_renders() {
 }
 
 #[tokio::test]
+async fn overview_shows_connectivity_memory_and_finished_outcomes() {
+    let state = state().await;
+    for outcome in ["success", "error", "interrupted", "cancelled", "streaming"] {
+        let mut row = record(outcome);
+        row.outcome = outcome.into();
+        history::save(&state.db, &row).await.unwrap();
+    }
+    let html = get_page(&app::router(state.clone()), "/").await;
+    assert!(html.contains("<span>Database status</span><strong>Connected</strong>"));
+    assert!(html.contains("<span>Successful requests</span><strong>1</strong>"));
+    assert!(html.contains("<span>Errors / failed requests</span><strong>3</strong>"));
+    assert!(html.contains("<span>Requests</span><strong>4</strong>"));
+    assert!(html.contains("<span>Memory usage</span><strong>"));
+    assert!(!html.contains("Usage unavailable"));
+    history::clear(&state.db).await.unwrap();
+    let html = get_page(&app::router(state), "/").await;
+    assert!(html.contains("<span>Successful requests</span><strong>0</strong>"));
+    assert!(html.contains("<span>Errors / failed requests</span><strong>0</strong>"));
+}
+
+#[tokio::test]
+async fn overview_still_renders_when_database_is_unavailable() {
+    let state = state().await;
+    state.db.close().await;
+    let html = get_page(&app::router(state), "/").await;
+    assert!(html.contains("<span>Database status</span><strong>Unavailable</strong>"));
+    assert!(html.contains("<span>Successful requests</span><strong>—</strong>"));
+    assert!(html.contains("<span>Errors / failed requests</span><strong>—</strong>"));
+    assert!(html.contains("Usage unavailable"));
+    assert!(!html.contains("No requests yet"));
+    assert!(!html.contains("pool closed"));
+}
+
+#[tokio::test]
+async fn overview_history_failure_does_not_invent_zero_counts() {
+    let state = state().await;
+    sqlx::query("DROP TABLE request_history")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let html = get_page(&app::router(state), "/").await;
+    assert!(html.contains("<span>Database status</span><strong>Connected</strong>"));
+    assert!(html.contains("Usage unavailable"));
+    assert!(html.contains("<span>Requests</span><strong>—</strong>"));
+    assert!(!html.contains("no such table"));
+}
+
+#[tokio::test]
 async fn usage_counts_finished_requests_once_and_uses_selected_provider_snapshots() {
     let pool = pool().await;
     // Two attempts at the same provider are still one request for that provider;

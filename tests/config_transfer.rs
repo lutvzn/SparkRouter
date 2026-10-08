@@ -1,5 +1,5 @@
 //! Integration tests for the credential-free configuration transfer pages
-//! (`GET /configuration`, `POST /configuration/export`, `/preview`, and
+//! (`GET /settings`, `POST /configuration/export`, `/preview`, and
 //! `/import`).
 //!
 //! These drive `app::router(state).oneshot(request)` so the dashboard CSRF
@@ -537,7 +537,7 @@ async fn preview_shows_counts_warnings_and_a_confirmation_form() {
     let target_router = app::router(target.clone());
 
     // The plain page carries both forms and no confirmation form.
-    let page = get_page(&target_router, "/configuration").await;
+    let page = get_page(&target_router, "/settings").await;
     assert!(page.contains("action=\"/configuration/export\""));
     assert!(page.contains("action=\"/configuration/preview\""));
     assert!(page.contains("name=\"_csrf\""));
@@ -555,6 +555,9 @@ async fn preview_shows_counts_warnings_and_a_confirmation_form() {
     assert_eq!(response.status(), StatusCode::OK);
     let page = body_string(response).await;
     assert!(page.contains("Import preview"));
+    assert!(page.contains("<title>SparkRouter :: Settings</title>"));
+    assert!(page.contains("href=\"/settings\" aria-current=\"page\""));
+    assert!(!page.contains("href=\"/configuration\""));
     assert!(page.contains("3 groups"));
     assert!(page.contains("4 connections"));
     assert!(page.contains("1 combos with 2 steps"));

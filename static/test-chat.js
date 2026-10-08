@@ -59,7 +59,7 @@
     resetButton.disabled = value;
     comboSelect.disabled = value;
     if (keyInput) keyInput.disabled = value;
-    // The textarea stays editable during a request, but a failing outcome
+    // The message field stays editable during a request, but a failing outcome
     // keeps whatever is typed there for an explicit retry.
     if (value) {
       log.setAttribute("aria-busy", "true");
@@ -181,9 +181,9 @@
   }
 
   async function send() {
-    // Capture the raw draft as typed: the textarea stays editable while the
+    // Capture the raw draft as typed: the field stays editable while the
     // request is in flight, so only this snapshot is sent and only an
-    // unchanged textarea is cleared afterwards.
+    // unchanged field is cleared afterwards.
     const originalDraft = draft.value;
     const text = originalDraft.trim();
     if (!text || busy) return;
@@ -244,6 +244,7 @@
           conversation.push({ role: "assistant", content: reply });
           if (draft.value === originalDraft) draft.value = "";
           setNote(statusNote, "Response received.");
+          log.lastElementChild.scrollIntoView({ block: "nearest" });
         }
       } else {
         setNote(errorNote, failureMessage(data, response.status));
@@ -270,6 +271,15 @@
   });
 
   draft.addEventListener("input", updateSendEnabled);
+  draft.addEventListener("keydown", (event) => {
+    // Do not submit an IME composition or steal modified keyboard shortcuts.
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      if (!event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        send();
+      }
+    }
+  });
 
   // A different combo is a different conversation: never mix messages or
   // traces across targets. The draft stays so the same question can be retried

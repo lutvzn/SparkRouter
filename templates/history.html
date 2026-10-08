@@ -5,7 +5,7 @@
 {% block topbar_heading %}
 <div class="topbar-heading">
   <h1>Request history</h1>
-  <p class="topbar-subtitle">Metadata only &mdash; no prompts, completions, credentials, endpoint URLs, or upstream error bodies are stored.</p>
+  <p class="topbar-subtitle">Basic stores metadata only. Extended captures sensitive gateway bodies; inspect below. Change request logging in Settings.</p>
 </div>
 {% endblock %}
 {% block content %}
@@ -44,6 +44,7 @@
       <th scope="col">Latency</th>
       <th scope="col">Tokens</th>
       <th scope="col">Attempts</th>
+      <th scope="col">Bodies</th>
     </tr>
   </thead>
   <tbody>
@@ -71,6 +72,7 @@
         </details>
         {% endif %}
       </td>
+      <td><a href="/history/{{ row.id }}/payload">Inspect</a></td>
     </tr>
     {% endfor %}
   </tbody>

@@ -46,17 +46,17 @@ with tempfile.TemporaryDirectory(prefix="sparkrouter-helper-test-") as directory
     env_file.write_text(good_config, encoding="utf-8")
     environment = {k: v for k, v in os.environ.items() if not k.startswith("ROUTER_")}
 
-    def run(command, *arguments, expected=0):
+    def run(command, *arguments, expected=0, env=None):
         # Detached Windows children can inherit unused pipe handles. Capture to a
         # file so communicate() cannot wait forever for the child's pipe EOF.
         with (temp / "helper-output.txt").open("w+", encoding="utf-8", errors="replace") as output:
             result = subprocess.run(
                 prefix + [command, state_flag, str(state), *arguments],
                 cwd=temp,
-                env=environment,
+                env=environment if env is None else env,
                 stdout=output,
                 stderr=subprocess.STDOUT,
-                timeout=60,
+                timeout=600 if command == "rebuild" else 60,
                 check=False,
             )
             output.seek(0)
@@ -106,9 +106,32 @@ with tempfile.TemporaryDirectory(prefix="sparkrouter-helper-test-") as directory
             lock.mkdir()
         try:
             run("restart", env_flag, str(env_file), expected=1)
+            run("rebuild", env_flag, str(env_file), expected=1)
         finally:
             lock.unlink() if WINDOWS else lock.rmdir()
         run("restart", env_flag, str(env_file))
+        run("health", env_flag, str(env_file))
+        before_rebuild = managed_id()
+        run("rebuild", env_flag, str(env_file))
+        assert managed_id() != before_rebuild, "rebuild must replace the running process"
+        run("health", env_flag, str(env_file))
+
+        # Fail Cargo without changing the repository or the real executable.
+        fake_bin = temp / "fake-bin"
+        fake_bin.mkdir()
+        fake_cargo = fake_bin / ("cargo.cmd" if WINDOWS else "cargo")
+        fake_cargo.write_text(
+            "@exit /b 1\n" if WINDOWS else "#!/bin/sh\nexit 1\n", encoding="utf-8"
+        )
+        if not WINDOWS:
+            fake_cargo.chmod(0o700)
+        failed_environment = dict(environment)
+        failed_environment["PATH"] = str(fake_bin) + os.pathsep + environment.get("PATH", "")
+        run("rebuild", env_flag, str(env_file), expected=1, env=failed_environment)
+        run("status", expected=1)
+        assert not process_file.exists(), "rebuild must stop before building"
+        assert not (state / "lock").exists(), "failed build must release its lock"
+        run("rebuild", env_flag, str(env_file))
         run("health", env_flag, str(env_file))
         run("stop")
         run("stop")
@@ -126,7 +149,7 @@ with tempfile.TemporaryDirectory(prefix="sparkrouter-helper-test-") as directory
         env_file.write_text("ROUTER_MASTER_KEY=invalid\nROUTER_BIND=127.0.0.1:0\n", encoding="utf-8")
         run("start", env_flag, str(env_file), expected=1)
         assert not (state / "lock").exists(), "failed startup must release its lock"
-        print("Helper smoke passed: lifecycle, health, identity, locking, and safe environment parsing.")
+        print("Helper smoke passed: lifecycle, rebuild/failure, health, identity, locking, and safe environment parsing.")
     finally:
         if original_state is not None:
             process_file.write_bytes(original_state)

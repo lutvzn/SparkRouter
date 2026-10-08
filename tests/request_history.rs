@@ -1,4 +1,4 @@
-//! Integration tests for metadata-only request-history recording.
+//! Integration tests for default Basic metadata and opt-in request-body recording.
 //!
 //! These drive `app::router(state).oneshot(request)` against real local Axum
 //! upstream mocks (bound to 127.0.0.1:0), following the gateway suite's RAII
@@ -7,9 +7,9 @@
 //! exactly the one production uses (`history::record_response` wrapping the
 //! routed response), not a unit-level call.
 //!
-//! History is metadata only: rows, schema, and the dashboard history page must
-//! never contain prompts, completions, credentials, endpoint URLs, or upstream
-//! error bodies. The insert is asynchronous, so readers yield until the expected
+//! Basic metadata rows/schema/pages exclude prompts, completions, credentials,
+//! endpoint URLs and upstream errors. Explicit Extended tests additionally check
+//! sensitive body capture, limits, and lifecycle without changing response bytes. The insert is asynchronous, so readers yield until the expected
 //! row exists. Stream finalization is observed deterministically — awaiting the
 //! body for success/interrupted, and a bounded yield-and-query loop for the task
 //! spawned when an unpolled body is dropped — with no sleeps anywhere.
@@ -186,6 +186,269 @@ async fn history_survives_restart_and_orphaned_streams_are_interrupted() -> Test
     assert_eq!(row.id, "orphan");
     assert_eq!(row.outcome, "interrupted");
     reopened.db.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn logging_modes_preserve_bytes_and_capture_only_when_extended() -> TestResult {
+    use sparkrouter::db::{
+        request_payloads,
+        settings::{self, LoggingMode},
+    };
+    let state = test_state().await;
+    let expected =
+        r#"{"choices":[{"message":{"content":"<script>reply</script>"}}],"unknown":true}"#;
+    let upstream = spawn_upstream(captured_json_router(StatusCode::OK, expected).0).await;
+    save_provider(
+        &state,
+        "p",
+        "p",
+        &upstream.url(),
+        Protocol::OpenAi,
+        true,
+        UPSTREAM_KEY_A,
+    )
+    .await?;
+    combo_with_steps(&state, "coding", &[("p", "upstream/model")]).await?;
+    let body = json!({"model":"combo/coding", "messages":[{"role":"user","content":PROMPT_MARKER}], "unknown":{"nested":true}});
+    assert!(settings::logging_mode(&state.db).await? == LoggingMode::Basic);
+    let response = send(&state, chat_request(&body)).await;
+    assert_eq!(body_bytes(response).await, expected);
+    let basic = single_record(&state).await;
+    assert!(request_payloads::get(&state.db, &basic.id).await?.is_none());
+    settings::set_logging_mode(&state.db, LoggingMode::Off).await?;
+    assert_eq!(
+        body_bytes(send(&state, chat_request(&body)).await).await,
+        expected
+    );
+    assert_eq!(request_history::count(&state.db).await?, 1);
+    settings::set_logging_mode(&state.db, LoggingMode::Extended).await?;
+    let reply = json_body(send(&state, test_chat_request(&state, &body)).await).await;
+    assert_eq!(
+        reply["completion"],
+        serde_json::from_str::<Value>(expected)?
+    );
+    let records = history(&state).await;
+    let record = records.iter().find(|r| r.source == "test").unwrap();
+    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
+    assert!(payload.response_complete);
+    assert!(!payload.response_truncated);
+    assert_eq!(payload.response_body, expected);
+    let captured: Value = serde_json::from_str(&payload.request_body)?;
+    assert_eq!(captured["model"], "combo/coding");
+    assert_eq!(captured["unknown"], body["unknown"]);
+    assert!(captured.get("_csrf").is_none());
+    assert!(!payload.request_body.contains(UPSTREAM_KEY_A));
+    let response = send(
+        &state,
+        Request::get(format!("/history/{}/payload", record.id))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let html = String::from_utf8(body_bytes(response).await.to_vec())?;
+    assert!(html.contains(PROMPT_MARKER));
+    assert!(html.contains("&#60;script&#62;"));
+    assert!(!html.contains("<script>reply</script>"));
+    settings::set_history_retention(&state.db, 1).await?;
+    assert!(request_payloads::get(&state.db, &basic.id).await?.is_none());
+    request_history::clear(&state.db).await?;
+    assert!(
+        request_payloads::get(&state.db, &record.id)
+            .await?
+            .is_none()
+    );
+    assert_eq!(upstream.hits.count(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_stream_capture_is_snapshot_based_and_byte_exact() -> TestResult {
+    use sparkrouter::db::{
+        request_payloads,
+        settings::{self, LoggingMode},
+    };
+    let state = test_state().await;
+    let chunks = vec![
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n",
+        "\ndata: [DO",
+        "NE]\n\n",
+    ];
+    let expected = chunks.concat();
+    let upstream = spawn_upstream(sse_router(chunks)).await;
+    save_provider(
+        &state,
+        "p",
+        "p",
+        &upstream.url(),
+        Protocol::OpenAi,
+        true,
+        UPSTREAM_KEY_A,
+    )
+    .await?;
+    combo_with_steps(&state, "coding", &[("p", "m")]).await?;
+    settings::set_logging_mode(&state.db, LoggingMode::Extended).await?;
+    let response = send(
+        &state,
+        chat_request(&json!({"model":"combo/coding","stream":true,"messages":[]})),
+    )
+    .await;
+    settings::set_logging_mode(&state.db, LoggingMode::Off).await?;
+    assert_eq!(body_bytes(response).await, expected);
+    let record = single_record(&state).await;
+    assert_eq!(record.outcome, "success");
+    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
+    assert!(payload.response_complete);
+    assert_eq!(payload.response_body, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_capture_is_bounded_without_truncating_client_response() -> TestResult {
+    use sparkrouter::db::{
+        request_payloads,
+        settings::{self, LoggingMode},
+    };
+    let state = test_state().await;
+    let expected = json!({"choices":[{"message":{"content":"x".repeat(100_000)}}]}).to_string();
+    let upstream = spawn_upstream(captured_json_router(StatusCode::OK, &expected).0).await;
+    save_provider(
+        &state,
+        "p",
+        "p",
+        &upstream.url(),
+        Protocol::OpenAi,
+        true,
+        UPSTREAM_KEY_A,
+    )
+    .await?;
+    combo_with_steps(&state, "coding", &[("p", "m")]).await?;
+    settings::set_logging_mode(&state.db, LoggingMode::Extended).await?;
+    let body =
+        json!({"model":"combo/coding","messages":[{"role":"user","content":"é".repeat(50_000)}]});
+    assert_eq!(
+        body_bytes(send(&state, chat_request(&body)).await).await,
+        expected
+    );
+    let record = single_record(&state).await;
+    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
+    assert!(payload.request_truncated && payload.response_truncated && payload.response_complete);
+    assert!(payload.request_body.len() <= request_payloads::BODY_LIMIT);
+    assert_eq!(payload.response_body.len(), request_payloads::BODY_LIMIT);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_cancelled_and_interrupted_streams_keep_partial_captures() -> TestResult {
+    use sparkrouter::db::{
+        request_payloads,
+        settings::{self, LoggingMode},
+    };
+    let state = test_state().await;
+    let upstream = spawn_upstream(sse_router(vec!["data: {\"choices\":[]}\n\n"])).await;
+    save_provider(
+        &state,
+        "p",
+        "p",
+        &upstream.url(),
+        Protocol::OpenAi,
+        true,
+        UPSTREAM_KEY_A,
+    )
+    .await?;
+    combo_with_steps(&state, "coding", &[("p", "m")]).await?;
+    settings::set_logging_mode(&state.db, LoggingMode::Extended).await?;
+    let body = json!({"model":"combo/coding","stream":true,"messages":[]});
+    let response = send(&state, chat_request(&body)).await;
+    let mut stream = response.into_body().into_data_stream();
+    assert!(stream.next().await.unwrap().is_ok());
+    assert!(stream.next().await.unwrap().is_err());
+    drop(stream);
+    let record = wait_until(&state, |r| r.outcome == "interrupted").await;
+    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
+    assert!(!payload.response_complete);
+    assert_eq!(payload.response_body, "data: {\"choices\":[]}\n\n");
+    request_history::clear(&state.db).await?;
+    drop(send(&state, chat_request(&body)).await);
+    let record = wait_until(&state, |r| r.outcome == "cancelled").await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(payload) = request_payloads::get(&state.db, &record.id).await.unwrap() {
+                assert!(!payload.response_complete);
+                assert!(payload.response_body.is_empty());
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(upstream.hits.count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_excludes_raw_upstream_errors_and_payload_failure_does_not_break_metadata()
+-> TestResult {
+    use sparkrouter::db::{
+        request_payloads,
+        settings::{self, LoggingMode},
+    };
+    let state = test_state().await;
+    let upstream = spawn_upstream(error_status_router(StatusCode::BAD_REQUEST)).await;
+    save_provider(
+        &state,
+        "p",
+        "p",
+        &upstream.url(),
+        Protocol::OpenAi,
+        true,
+        UPSTREAM_KEY_A,
+    )
+    .await?;
+    combo_with_steps(&state, "coding", &[("p", "m")]).await?;
+    settings::set_logging_mode(&state.db, LoggingMode::Extended).await?;
+    let response = send(
+        &state,
+        chat_request(&json!({"model":"combo/coding","messages":[]})),
+    )
+    .await;
+    assert!(!response.status().is_success());
+    let expected = String::from_utf8(body_bytes(response).await.to_vec())?;
+    let record = single_record(&state).await;
+    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
+    assert_eq!(payload.response_body, expected);
+    assert!(!payload.response_body.contains("mock status 400"));
+    assert!(!payload.response_body.contains("mock_error"));
+    assert!(!payload.response_body.contains(UPSTREAM_KEY_A));
+    request_history::clear(&state.db).await?;
+    let chunks = vec!["data: {\"choices\":[]}\n\n", "data: [DONE]\n\n"];
+    let expected = chunks.concat();
+    let healthy = spawn_upstream(sse_router(chunks)).await;
+    save_provider(
+        &state,
+        "p",
+        "p",
+        &healthy.url(),
+        Protocol::OpenAi,
+        true,
+        UPSTREAM_KEY_A,
+    )
+    .await?;
+    sqlx::query("CREATE TRIGGER reject_payload BEFORE INSERT ON request_payloads BEGIN SELECT RAISE(ABORT, 'payload unavailable'); END").execute(&state.db).await?;
+    let response = send(
+        &state,
+        chat_request(&json!({"model":"combo/coding","stream":true,"messages":[]})),
+    )
+    .await;
+    assert_eq!(body_bytes(response).await, expected);
+    let record = single_record(&state).await;
+    assert_eq!(record.outcome, "success");
+    assert!(
+        request_payloads::get(&state.db, &record.id)
+            .await?
+            .is_none()
+    );
     Ok(())
 }
 

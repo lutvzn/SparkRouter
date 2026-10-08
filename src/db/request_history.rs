@@ -10,7 +10,7 @@
 //!
 //! Retention is bounded inline by [`save`]: one transaction inserts the
 //! record with its attempts and then deletes everything older than the
-//! newest [`MAX_RETAINED`] requests (their attempts cascade). There is no
+//! newest configured number of requests (at most [`MAX_RETAINED`], attempts cascade). There is no
 //! background worker, and [`finish`] on a pruned record is a no-op.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
 
-/// Newest requests retained; older ones are deleted as new ones arrive.
+/// Default and maximum retained requests; Settings may select a lower cap.
 pub const MAX_RETAINED: i64 = 10_000;
 
 /// Outcome recorded while a request is still pending (in flight); the
@@ -100,7 +100,7 @@ pub struct HistoryStats {
 /// while its `position` stays the configured step-position snapshot, so a
 /// round-robin or random start records and displays the order actually
 /// tried. After the insert, every request beyond the newest
-/// [`MAX_RETAINED`] rows is deleted; attempt rows follow through
+/// configured retention limit is deleted; attempt rows follow through
 /// `ON DELETE CASCADE`.
 pub async fn save(pool: &SqlitePool, record: &Record) -> Result<(), AppError> {
     save_with_usage(pool, record, UsageMetrics::default(), &[]).await
@@ -202,7 +202,7 @@ pub async fn save_with_usage(
         .execute(&mut *transaction)
         .await?;
     }
-    // Retention: delete every request older than the newest MAX_RETAINED.
+    // Read the cap under the same write lock as the insert and pruning.
     sqlx::query(
         "DELETE FROM request_history
          WHERE id IN (
@@ -211,7 +211,13 @@ pub async fn save_with_usage(
              LIMIT -1 OFFSET ?
          )",
     )
-    .bind(MAX_RETAINED)
+    .bind(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT history_retention FROM dashboard_settings WHERE id = 1",
+        )
+        .fetch_one(&mut *transaction)
+        .await?,
+    )
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;

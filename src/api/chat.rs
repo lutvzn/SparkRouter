@@ -39,9 +39,11 @@ pub(crate) async fn complete(
         return Err(AppError::InvalidRequest("Use model: combo/<name>".into()));
     }
     let permit = auth.admit(&state)?;
+    let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();
     let result = routing::route_with_trace(&state, model, &body, &mut attempts).await;
-    let response = result.unwrap_or_else(IntoResponse::into_response);
+    let mut response = result.unwrap_or_else(IntoResponse::into_response);
+    response.extensions_mut().insert(capture);
     let response = crate::history::record_response(
         &state,
         "api",

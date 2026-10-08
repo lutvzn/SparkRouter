@@ -28,7 +28,6 @@
           </div>
           <div class="model-card-line">
             <span class="model-card-name">{{ model.name }}</span>
-            {% if model.is_free() %}<span class="model-card-free">free</span>{% endif %}
           </div>
           <div class="model-card-line">
             <span class="model-card-id">{{ provider.public_model_id(model.id) }}</span>
@@ -46,10 +45,11 @@
              <h2 id="model-info-heading-{{ provider.id }}-{{ loop.index }}">{{ model.name }}</h2>
              <p>Public ID: <code>{{ provider.public_model_id(model.id) }}</code></p>
              <p class="hint">Upstream ID (for combo steps): <code>{{ model.id }}</code></p>
-            {% if model.info_fields().is_empty() %}
+            {% if model.info_fields().is_empty() && !model.is_free() %}
             <p class="hint">This model did not include any extra fields.</p>
             {% else %}
             <dl>
+              {% if model.is_free() %}<div><dt>Free</dt><dd>Yes</dd></div>{% endif %}
               {% for field in model.info_fields() %}
               <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
               {% endfor %}

@@ -298,7 +298,21 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
         + page[topbar_start..]
             .find("</header>")
             .expect("topbar closing");
-    assert!(page[topbar_start..topbar_end].contains("<h1>Test chat</h1>"));
+    assert!(page[topbar_start..topbar_end].contains("<h1>Test</h1>"));
+    assert!(page.contains("<title>SparkRouter :: Test</title>"));
+    assert!(page.contains("class=\"test-chat-shell\""));
+    assert!(page.contains("What would you like to try?"));
+    assert!(page.contains("switching combos starts a new chat."));
+    assert!(!page.contains("Follow-up messages keep the context."));
+    assert!(page.contains("<details class=\"test-routing\">"));
+    assert!(!page.contains("Enter to send"));
+    assert!(!page.contains("test-compose-hint"));
+    assert!(!page.contains("<footer"));
+    assert!(!page.contains("self-hosted LLM gateway with ordered fallback combos"));
+    assert!(page.contains("<input id=\"test-draft\" type=\"text\""));
+    assert!(page.contains("class=\"test-compose-row\""));
+    assert!(!page.contains("<textarea"));
+    assert!(page.find("id=\"test-log\"").unwrap() < page.find("id=\"test-form\"").unwrap());
     let nav_start = page
         .find("<nav aria-label=\"Dashboard\">")
         .expect("dashboard nav");
@@ -306,7 +320,7 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
     let sidebar_nav = &page[nav_start..nav_end];
     assert_eq!(sidebar_nav.matches("aria-current=\"page\"").count(), 1);
 
-    // The sidebar links the playground with a visible "Test chat" label and the
+    // The sidebar links the playground with a visible "Test" label and the
     // local icon sprite.
     let sidebar_open = page
         .find("<aside class=\"sidebar\">")
@@ -319,10 +333,7 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
     let test_link = anchor_fragment(sidebar, "href=\"/test\"")
         .expect("the sidebar must link the test playground");
     let label = strip_tags(test_link);
-    assert!(
-        label.contains("Test chat"),
-        "sidebar link label was {label:?}"
-    );
+    assert!(label.trim() == "Test", "sidebar link label was {label:?}");
     assert!(
         test_link.contains("/static/icons.svg#flask-conical"),
         "the test link uses the bundled local sprite"
@@ -877,6 +888,25 @@ async fn test_chat_requires_gateway_authentication_even_though_it_lives_in_the_d
         page.contains("id=\"test-key\""),
         "an authenticated gateway shows the key field on the test page"
     );
+    let controls = &page[page.find("class=\"test-controls\"").unwrap()
+        ..page.find("id=\"test-target-hint\"").unwrap()];
+    assert!(
+        controls.find("id=\"test-combo\"").unwrap() < controls.find("id=\"test-key\"").unwrap()
+    );
+    assert!(
+        controls.find("id=\"test-key\"").unwrap() < controls.find("id=\"test-reset\"").unwrap()
+    );
+    assert_eq!(
+        page.matches("aria-describedby=\"test-target-hint\"")
+            .count(),
+        2
+    );
+    assert!(
+        page.contains("Gateway key required; sent with requests, never saved in browser storage.")
+    );
+    assert!(!page.contains("id=\"test-key-hint\""));
+    assert!(!page.contains("Gateway authentication"));
+    assert!(!page.contains("class=\"test-auth\""));
 
     let valid = chat_body(
         &state,

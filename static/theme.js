@@ -19,8 +19,9 @@
   function storePreference(preference) {
     try {
       window.localStorage.setItem(STORAGE_KEY, preference);
+      return true;
     } catch (_) {
-      /* Without storage the preference lasts for this page view only. */
+      return false; // Without storage the preference lasts for this page only.
     }
   }
 
@@ -58,6 +59,20 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    var select = document.getElementById("settings-theme");
+    var storageStatus = document.getElementById("theme-storage-status");
+    if (select) {
+      select.value = preference;
+      select.disabled = false;
+      select.addEventListener("change", function () {
+        if (["system", "light", "dark"].indexOf(select.value) === -1) return;
+        preference = select.value;
+        var saved = storePreference(preference);
+        document.documentElement.dataset.theme = preference;
+        if (storageStatus) storageStatus.textContent = saved ? "Theme saved in this browser." : "Browser storage unavailable; theme applies to this page only.";
+        if (toggle) render(toggle);
+      });
+    }
     var toggle = document.getElementById("theme-toggle");
     if (!toggle) return;
     toggle.addEventListener("click", function () {
@@ -65,6 +80,7 @@
       storePreference(preference);
       document.documentElement.dataset.theme = preference;
       render(toggle);
+      if (select) select.value = preference;
     });
     // CSS already follows the OS while the preference is "system"; only
     // refresh the button label, never a stored explicit choice.

@@ -1325,6 +1325,240 @@ async fn models_endpoint_lists_configured_combos() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn model_discovery_inherits_exact_first_step_limits_without_changing_ids() -> TestResult {
+    use connection_models::ModelField;
+    let state = test_state().await;
+    for id in ["first", "second"] {
+        save_provider(
+            &state,
+            id,
+            "http://127.0.0.1:1",
+            Protocol::OpenAi,
+            true,
+            "secret-not-listed",
+        )
+        .await?;
+    }
+    let first = StoredModel {
+        id: "deepseek-v4.1-flash".into(),
+        name: "DeepSeek".into(),
+        free: false,
+        fields: vec![
+            ModelField {
+                label: "Context".into(),
+                value: "1.048.576 ctx".into(),
+            },
+            ModelField {
+                label: "Output".into(),
+                value: "393.216 output".into(),
+            },
+        ],
+    };
+    let second = StoredModel {
+        id: "other/model".into(),
+        name: "Other".into(),
+        free: false,
+        fields: vec![ModelField {
+            label: "Context".into(),
+            value: "128000 ctx".into(),
+        }],
+    };
+    connection_models::replace(&state.db, "first", &[first], false).await?;
+    connection_models::replace(&state.db, "second", &[second], false).await?;
+    let combo = combo_with_strategy(
+        &state,
+        "limits",
+        &[("first", "deepseek-v4.1-flash"), ("second", "other/model")],
+        Strategy::RoundRobin,
+    )
+    .await?;
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    let entry = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "combo/limits")
+        .unwrap();
+    assert_eq!(entry["context_length"], 1_048_576);
+    assert_eq!(entry["max_output_tokens"], 393_216);
+    assert_eq!(entry["top_provider"]["max_completion_tokens"], 393_216);
+    assert_eq!(entry["owned_by"], "sparkrouter");
+    let direct = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str().unwrap().ends_with("/deepseek-v4.1-flash"))
+        .unwrap();
+    assert_eq!(direct["context_length"], entry["context_length"]);
+    assert_eq!(direct["top_provider"], entry["top_provider"]);
+    assert!(!listed.to_string().contains("secret-not-listed"));
+    // Discovery describes configured step 1 even when disabled, not a selected
+    // strategy start or an arbitrary other connection's metadata.
+    save_provider(
+        &state,
+        "first",
+        "http://127.0.0.1:1",
+        Protocol::OpenAi,
+        false,
+        "secret-not-listed",
+    )
+    .await?;
+    combos::set_strategy(&state.db, &combo.id, Strategy::Random).await?;
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    assert_eq!(listed["data"][0]["context_length"], 1_048_576);
+    let steps = combos::steps(&state.db, &combo.id).await?;
+    combos::move_step(&state.db, &combo.id, &steps[1].id, -1).await?;
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    assert_eq!(listed["data"][0]["context_length"], 128_000);
+    assert!(listed["data"][0].get("max_output_tokens").is_none());
+    assert!(
+        listed["data"][0]["top_provider"]
+            .get("max_completion_tokens")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_discovery_uses_exact_combo_connection_and_oldest_enabled_direct_connection()
+-> TestResult {
+    use connection_models::ModelField;
+    let state = test_state().await;
+    let group = sparkrouter::db::provider_groups::create_with_slug(
+        &state.db,
+        "Cinf",
+        "http://127.0.0.1:1",
+        &Protocol::OpenAi,
+        Some("custom-limits"),
+    )
+    .await?;
+    for (id, context) in [("old", "128000 ctx"), ("new", "1.048.576 ctx")] {
+        save_provider(&state, id, "http://127.0.0.1:1", Protocol::OpenAi, true, "").await?;
+        sqlx::query("INSERT INTO provider_group_connections (provider_id, group_id) VALUES (?, ?)")
+            .bind(id)
+            .bind(&group.id)
+            .execute(&state.db)
+            .await?;
+        connection_models::replace(
+            &state.db,
+            id,
+            &[StoredModel {
+                id: "deepseek-v4.1-flash".into(),
+                name: "DeepSeek".into(),
+                free: false,
+                fields: vec![ModelField {
+                    label: "Context".into(),
+                    value: context.into(),
+                }],
+            }],
+            false,
+        )
+        .await?;
+    }
+    combo_with_strategy(
+        &state,
+        "limits",
+        &[("new", "deepseek-v4.1-flash")],
+        Strategy::Priority,
+    )
+    .await?;
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["data"][0]["id"], "combo/limits");
+    assert_eq!(listed["data"][0]["context_length"], 1_048_576);
+    assert_eq!(listed["data"][1]["id"], "custom-limits/deepseek-v4.1-flash");
+    assert_eq!(listed["data"][1]["context_length"], 128_000);
+    save_provider(
+        &state,
+        "old",
+        "http://127.0.0.1:1",
+        Protocol::OpenAi,
+        false,
+        "",
+    )
+    .await?;
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    assert_eq!(listed["data"][1]["context_length"], 1_048_576);
+    // A combo-only key can see the combo's limits without gaining access to
+    // its underlying direct model ID.
+    let key = sparkrouter::db::api_keys::create_with_policy(
+        &state.db,
+        &state.crypto,
+        "combo only",
+        sparkrouter::db::api_keys::KeyAccess::Selected(vec!["combo/limits".into()]),
+        sparkrouter::db::api_keys::Expiry::Never,
+    )
+    .await?;
+    let listed =
+        json_body(send(&state, models_request(Some(key.secret.expose_secret()))).await).await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["data"][0]["id"], "combo/limits");
+    assert_eq!(listed["data"][0]["context_length"], 1_048_576);
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_discovery_does_not_guess_limits_for_missing_or_invalid_first_models() -> TestResult {
+    use connection_models::ModelField;
+    let state = test_state().await;
+    save_provider(
+        &state,
+        "p",
+        "http://127.0.0.1:1",
+        Protocol::OpenAi,
+        true,
+        "",
+    )
+    .await?;
+    let known = StoredModel {
+        id: "known".into(),
+        name: "known".into(),
+        free: false,
+        fields: vec![ModelField {
+            label: "Context".into(),
+            value: "128000 ctx".into(),
+        }],
+    };
+    let invalid = StoredModel {
+        id: "invalid".into(),
+        name: "invalid".into(),
+        free: false,
+        fields: vec![
+            ModelField {
+                label: "Context".into(),
+                value: "1.05M ctx".into(),
+            },
+            ModelField {
+                label: "Output".into(),
+                value: "0 output".into(),
+            },
+        ],
+    };
+    connection_models::replace(&state.db, "p", &[known, invalid], false).await?;
+    combo_with_strategy(
+        &state,
+        "missing",
+        &[("p", "unknown"), ("p", "known")],
+        Strategy::Priority,
+    )
+    .await?;
+    combo_with_strategy(&state, "invalid", &[("p", "invalid")], Strategy::Priority).await?;
+    combos::create(&state.db, "empty").await?;
+    let listed = json_body(send(&state, models_request(None)).await).await;
+    for entry in listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["id"].as_str().unwrap().starts_with("combo/"))
+    {
+        assert!(entry.get("context_length").is_none());
+        assert!(entry.get("max_output_tokens").is_none());
+        assert!(entry.get("top_provider").is_none());
+    }
+    Ok(())
+}
+
 async fn remember_model(state: &AppState, provider_id: &str, model_id: &str) -> TestResult {
     connection_models::replace(
         &state.db,
@@ -1734,7 +1968,7 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
         "/models",
         get(|| async {
             Json(json!({"data": [
-                {"id": "alpha", "display_name": "Alpha", "context_length": 1050000, "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "alpha", "display_name": "Alpha", "context_length": 128000, "max_output_tokens": 16384, "pricing": {"prompt": "0", "completion": "0"}},
                 {"id": " beta "}
             ]}))
         }),
@@ -1768,9 +2002,13 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     let page = String::from_utf8(body_bytes(response).await.to_vec())?;
     assert!(page.contains("alpha") && page.contains("beta"));
     assert!(page.contains("Alpha"));
-    assert!(page.contains("1.050.000 ctx"));
+    assert!(page.contains("<span class=\"model-card-chip\" title=\"Context\">128k ctx</span>"));
     assert!(page.contains("data-copy-model=\"connection-listed/alpha\""));
-    assert!(page.contains("model-card-free"));
+    assert!(!page.contains("model-card-free"));
+    assert!(!page.contains("title=\"Output\""));
+    assert!(page.contains("<dt>Output</dt><dd>16.384 output</dd>"));
+    assert!(page.contains("<dt>Free</dt><dd>Yes</dd>"));
+    assert!(page.contains("<dt>Pricing · Prompt</dt>"));
     assert!(!page.contains("Owned by"));
     assert!(page.contains("data-model-search"));
     let combo = combos::create(&state.db, "suggest").await?;

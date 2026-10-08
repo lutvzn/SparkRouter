@@ -1,4 +1,5 @@
-//! Best-effort metadata recording; never changes response bytes or retry policy.
+//! Best-effort request history; never changes response bytes or retry policy.
+//! Basic is metadata-only; opt-in Extended bodies use `history_payload`.
 //!
 //! The insert is spawned so it does not delay the response. Streaming
 //! finalization waits for that insert, then writes the terminal outcome, so a
@@ -106,8 +107,20 @@ pub(crate) async fn record_response(
     streaming: bool,
     started: Instant,
     attempts: &[AttemptTrace],
-    response: Response,
+    mut response: Response,
 ) -> Response {
+    let capture = response
+        .extensions_mut()
+        .remove::<crate::history_payload::Capture>();
+    if capture
+        .as_ref()
+        .is_some_and(|c| c.mode == crate::db::settings::LoggingMode::Off)
+    {
+        return response;
+    }
+    let extended = capture
+        .as_ref()
+        .is_some_and(|c| c.mode == crate::db::settings::LoggingMode::Extended);
     let success = response.status().is_success();
     let is_stream = success && streaming;
     let usage = response
@@ -166,9 +179,34 @@ pub(crate) async fn record_response(
         );
         if !ok {
             tracing::warn!("request history write unavailable");
+        } else if let Some(capture) =
+            capture.filter(|c| c.mode == crate::db::settings::LoggingMode::Extended)
+        {
+            let captured = matches!(
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    crate::db::request_payloads::insert(
+                        &pool,
+                        &record.id,
+                        &capture.request,
+                        capture.truncated
+                    )
+                )
+                .await,
+                Ok(Ok(()))
+            );
+            if !captured {
+                tracing::warn!("request payload write unavailable");
+            }
         }
+        // Payload failure must not leave otherwise valid streaming metadata pending.
         insert.complete(ok);
     }));
+    let response = if extended {
+        crate::history_payload::wrap(response, state.db.clone(), id.clone(), gate.clone())
+    } else {
+        response
+    };
     if !is_stream {
         return response;
     }
@@ -294,7 +332,7 @@ async fn write_terminal(
 /// Signals whether the background insert succeeded without losing a wakeup
 /// when finalization starts before the insert task runs.
 #[derive(Clone)]
-struct InsertGate {
+pub(crate) struct InsertGate {
     tx: Arc<tokio::sync::watch::Sender<Option<bool>>>,
     rx: tokio::sync::watch::Receiver<Option<bool>>,
 }
@@ -316,7 +354,7 @@ impl InsertGate {
         *self.rx.borrow()
     }
 
-    async fn wait(&self) -> bool {
+    pub(crate) async fn wait(&self) -> bool {
         let mut rx = self.rx.clone();
         loop {
             if let Some(ok) = *rx.borrow_and_update() {

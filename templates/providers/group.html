@@ -48,7 +48,7 @@
 {% if providers.is_empty() %}
 <p class="empty">No connections for this endpoint yet. Use Add connection to get started.</p>
 {% else %}
-<span class="visually-hidden" id="copy-status" role="status" aria-live="polite"></span>
+<span class="copy-toast" id="copy-status" role="status" aria-live="polite"></span>
 <div class="connection-list">
   {% for provider in providers %}
   <article class="card connection-row">

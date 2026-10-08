@@ -14,6 +14,7 @@ mod history;
 mod home;
 pub(crate) use crate::provider_catalog;
 mod providers;
+mod settings;
 mod test;
 
 use askama::Template;
@@ -40,9 +41,12 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", get(auth::page).post(auth::login))
         .route("/logout", get(auth::logout_page).post(auth::logout))
+        .route("/settings", get(settings::page).post(settings::save))
+        .route("/settings/history/clear", post(settings::clear_history))
+        .route("/settings/logging", post(settings::save_logging))
         .route("/history", get(history::page))
+        .route("/history/{id}/payload", get(history::payload))
         .route("/history/clear", post(history::clear))
-        .route("/configuration", get(config_transfer::page))
         .route("/configuration/export", post(config_transfer::export))
         .route("/configuration/preview", post(config_transfer::preview))
         .route("/configuration/import", post(config_transfer::import))
@@ -190,6 +194,7 @@ mod tests {
             .block_on(sqlx::SqlitePool::connect("sqlite::memory:"))
             .unwrap();
         let state = AppState {
+            started_at: std::time::Instant::now(),
             db,
             client: reqwest::Client::new(),
             crypto: Arc::new(

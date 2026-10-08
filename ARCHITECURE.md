@@ -32,7 +32,7 @@ state, cache, queue, or routing worker is involved.
 | `db/combos.rs` | Combo CRUD, step order, transactional mutations |
 | `web/` | Form validation, CSRF verification, rendering and dashboard actions |
 | `api/chat.rs` | JSON boundary validation, authorization/admission, and response history/permit wrapping |
-| `api/models.rs` | Combos and refreshed connection models listed as OpenAI models |
+| `api/models.rs` | Scoped OpenAI model discovery with optional cached token limits; combos inherit first configured step details |
 | `routing/mod.rs` | Combo-or-direct dispatch, shared attempt execution/traces, and pre-commit deadlines |
 | `routing/combo.rs` | Sequential combo fallback loop and retryable status helper |
 | `routing/direct.rs` | Direct model lookup and the same pre-commit fallback policy |
@@ -76,6 +76,8 @@ on process restart and dashboard deletion removes the combo's cursor.
 | `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
 | `request_history` | Bounded metadata snapshots for routed API/test-chat requests, including usage/cost and retained provider identity |
 | `request_attempts` | Ordered attempt snapshots with provider slug/group name; cascade with history deletion |
+| `dashboard_settings` | Singleton retention (1–10,000), and logging mode (off/basic/extended, default basic) |
+| `request_payloads` | Opt-in bounded sensitive gateway bodies, truncation/completion flags; cascade with history |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
 reference it. An index supports provider-reference lookups. There is no models
@@ -104,6 +106,17 @@ configuration snapshot. A provider removed after its snapshotted step is deleted
 is skipped when no longer found; other database failures remain errors.
 
 ## Public API and fallback
+
+Model discovery derives exact context/output counts from cached `Context`/`Output`
+fields, never rounded UI tags. Optional numeric `context_length` and
+`max_output_tokens`, plus OpenRouter-style `top_provider` equivalents, leave
+existing ID/object/owner fields intact. Batched database joins bind combo metadata
+to the first configured step's exact connection/model; absent details do not
+borrow another step's limits. Direct metadata uses the oldest enabled listing
+connection. Disabled first steps and Round robin/Random strategies do not change
+this advisory configured-first-step view. Listing never calls upstreams or advances
+strategy cursors, and retains exact public-ID scope filtering. No limits are
+injected into generation requests or forwarded response bytes.
 
 The public router is mounted at `/v1` separately from the dashboard:
 
@@ -279,8 +292,14 @@ Askama renders `/providers`, `/providers/new`, `/providers/{id}` and the matchin
 combo pages. POST actions handle create/edit/delete, connection tests, model-list refresh, and step
 add/edit/remove/up/down operations. HTMX swaps small fragments; ordinary mutation
 forms generally use 303 redirects back to GET pages. There is no SPA state store.
-The `/` Overview is the default dashboard landing and login destination. It reads
-only retained history and displays five summary cards (requests, input/output/
+The `/` Overview is the default dashboard landing and login destination. On page
+load it probes SQLite with the same bounded read check as readiness and reads
+Linux `/proc/self/status` for current process resident memory (unavailable on
+other platforms or read failure). Retained success and failure counts exclude
+pending streams; failures include errors, interruptions, and cancellations.
+Unavailable database/history reads render unknown totals with a sanitized notice;
+the history summary has a two-second deadline. No monitoring worker is used.
+It reads retained history and displays five usage summary cards (requests, input/output/
 cache-read tokens, USD spend) plus the ten providers ranked by distinct requests.
 It performs summary and leaderboard reads in SQL read transactions; it does not
 call providers or use a worker. Pending streams are excluded. Only the selected
@@ -290,6 +309,13 @@ them. Missing metrics remain unknown; coverage counts make partial totals visibl
 Only explicitly reported USD costs are summed; non-USD costs and missing costs
 are unknown, with no estimated pricing. Clearing retained history clears these
 statistics, not lifetime totals.
+`/settings` provides browser-local Light/Dark/System selection, persisted history
+retention and confirmed clearing, configuration export/import and inline preview, and
+read-only sanitized security/system status. Retention updates and immediate
+pruning use `BEGIN IMMEDIATE`, serializing with history inserts; inserts read the
+cap under their own write lock. Settings never edits deployment secrets or
+rewrites environment files. Uptime is tracked by a shared monotonic startup
+instant; system status is sampled on page load without a worker.
 The shared shell renders page headings and the current navigation section on the
 server. One embedded stylesheet supplies light/dark design tokens, reusable
 controls, focus indicators, and responsive layout; no frontend build is needed.
@@ -388,11 +414,28 @@ master key securely available across restarts and backups.
 Request middleware generates/propagates `x-request-id` and creates tracing spans.
 Routing records combo, provider ID, model, status, latency, and fallback events.
 HTTP errors are logged through sanitized categories rather than full Reqwest
-errors. Do not enable or introduce credential/header/body dumps.
+errors. Do not enable or introduce credential/header/body dumps in operational logs.
+Explicitly opted-in Extended history stores bounded gateway bodies in SQLite only.
 
 ## Extension rules
 
 ### Local request history and configuration transfer
+
+Logging mode is sampled after authorization/admission, before routing, by
+`history_payload.rs` with a 200 ms deadline; read failures disable recording for
+that request. Off returns the unwrapped response without inserting history. Basic
+is the upgrade/default behavior. Extended snapshots gateway JSON and observes
+final response data incrementally, copying at most 64 KiB per direction without
+changing forwarded bytes/errors or fallback. It excludes headers and intermediate
+upstream errors, not secrets supplied in message/tool/extension body content.
+Bodies are intentionally unencrypted development data in SQLite/WAL/backups;
+Extended requires explicit confirmation in a CSRF/origin-protected Settings form.
+The payload insert waits for metadata and conditional SQL cannot resurrect a
+cleared/pruned parent. Body finalization/drop waits for the shared insert gate,
+with bounded best-effort writes and incomplete/truncated flags. Capture reads are
+on a dashboard-auth-protected, autoescaped, no-store HTML inspection page, not an
+API response. Existing and in-flight captures survive mode changes. Pruning and
+clear cascade bodies but are not secure disk erasure. No content enters tracing.
 
 `history.rs` observes routing traces and response bodies without changing upstream
 bytes, response envelopes, strategy state, or fallback semantics. JSON responses
@@ -407,7 +450,7 @@ database write, not a recurring worker. Recording failures are logged only as
 fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.
 The `request_history` and `request_attempts` tables contain metadata snapshots
 only, with no foreign keys to live configuration that could block deletion.
-Inserts prune to the newest 10,000 requests; attempts cascade with history
+Inserts prune to the configured newest requests (default/maximum 10,000); attempts cascade with history
 deletion. A new additive migration stores cache-token and cost fields on request
 history and provider-slug/group-name snapshots on attempts, captured from the
 same SQL configuration snapshot used for each attempt. These identities survive

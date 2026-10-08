@@ -1,60 +1,69 @@
 {% extends "base.html" %}
-{% block title %}Test chat{% endblock %}
+{% block title %}Test{% endblock %}
 {% block nav_test %} aria-current="page"{% endblock %}
 {% block main_class %}test-chat-page{% endblock %}
 {% block topbar_heading %}
 <div class="topbar-heading">
-  <h1>Test chat</h1>
-  <p class="topbar-subtitle">Send a chat completion through a combo and inspect every fallback attempt.</p>
+  <h1>Test</h1>
+  <p class="topbar-subtitle">Chat with a combo. Inspect its routing when you need to.</p>
 </div>
 {% endblock %}
 {% block content %}
 {% if combos.is_empty() %}
 <p class="empty">No combos configured yet. <a href="/combos">Add one</a> to try routing with ordered fallbacks.</p>
 {% else %}
-<div class="card test-controls">
-  <input type="hidden" name="_csrf" value="{{ csrf_token }}" id="test-csrf">
-  <label for="test-combo">Combo</label>
-  <select id="test-combo" autocomplete="off">
-    {% for c in combos %}
-    <option value="{{ c.name }}">{{ c.name }} &middot; {{ c.strategy.label() }}</option>
-    {% endfor %}
-  </select>
-  <p class="hint">Requests call <code>combo/&lt;name&gt;</code>. Changing the combo clears the conversation and attempts.</p>
-  <p class="hint">Sends real upstream requests; provider charges may apply.</p>
-  {% if auth_required %}
-  <label for="test-key">Gateway key</label>
-  <input id="test-key" type="password" autocomplete="off" spellcheck="false" placeholder="Gateway API key">
-  <p class="hint">The gateway requires a key. It is sent only with the request and never stored or displayed.</p>
-  {% endif %}
+<div class="test-chat-shell">
+  <div class="test-controls">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}" id="test-csrf">
+    <div class="test-combo-picker">
+      <label for="test-combo">Combo</label>
+      <select id="test-combo" autocomplete="off" aria-describedby="test-target-hint">
+        {% for c in combos %}
+        <option value="{{ c.name }}">{{ c.name }} &middot; {{ c.strategy.label() }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% if auth_required %}
+    <div class="test-key-picker">
+      <label for="test-key">Gateway key</label>
+      <input id="test-key" type="password" autocomplete="off" spellcheck="false" placeholder="Gateway API key" aria-describedby="test-target-hint">
+    </div>
+    {% endif %}
+    <button type="button" id="test-reset" class="btn">New chat</button>
+  </div>
+  <p id="test-target-hint" class="hint test-target-hint">Uses <code>combo/&lt;name&gt;</code>; switching combos starts a new chat.{% if auth_required %} Gateway key required; sent with requests, never saved in browser storage.{% endif %}</p>
+
+  <section class="test-conversation" aria-label="Conversation">
+    <div id="test-log" class="test-log" role="log" aria-live="polite" aria-relevant="additions">
+      <div class="test-log-empty">
+        <span class="test-welcome-icon" aria-hidden="true">✦</span>
+        <h2>What would you like to try?</h2>
+        <p>Send a message to your combo to start a conversation.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="test-chat-bottom">
+    <details class="test-routing">
+      <summary>Routing attempts <span class="hint">Latest request</span></summary>
+      <div id="test-attempts" class="test-attempts">
+        <p class="empty test-attempts-empty">No response yet.</p>
+        <ul id="test-attempt-list" class="test-attempt-list" hidden></ul>
+      </div>
+    </details>
+
+    <form id="test-form" class="test-compose" novalidate>
+      <label for="test-draft" class="test-draft-label">Message</label>
+      <div class="test-compose-row">
+        <input id="test-draft" type="text" autocomplete="off" placeholder="Message your combo…">
+        <button type="submit" id="test-send" class="btn primary" disabled>Send <span aria-hidden="true">↑</span></button>
+      </div>
+      <p id="test-status" class="hint" role="status" aria-live="polite" hidden></p>
+      <p id="test-error" class="test fail" role="alert" hidden></p>
+    </form>
+    <p class="hint test-disclaimer">Sends real upstream requests; provider charges may apply. Replies are non-streaming.</p>
+  </div>
 </div>
-
-<section class="test-section" aria-labelledby="test-log-heading">
-  <h2 id="test-log-heading">Conversation</h2>
-  <div id="test-log" class="test-log" role="log" aria-live="polite">
-    <p class="empty test-log-empty">No messages yet. Send one to start a conversation.</p>
-  </div>
-</section>
-
-<section class="test-section" aria-labelledby="test-attempts-heading">
-  <h2 id="test-attempts-heading">Attempts</h2>
-  <div id="test-attempts" class="test-attempts">
-    <p class="empty test-attempts-empty">No response yet.</p>
-    <ul id="test-attempt-list" class="test-attempt-list" hidden></ul>
-  </div>
-</section>
-
-<form id="test-form" class="card test-compose" novalidate>
-  <label for="test-draft">Message</label>
-  <textarea id="test-draft" rows="4" autocomplete="off" placeholder="Type a message for the combo"></textarea>
-  <p id="test-status" class="hint" role="status" aria-live="polite"></p>
-  <p id="test-error" class="test fail" role="alert" hidden></p>
-  <div class="form-actions">
-    <button type="button" id="test-reset" class="btn">Reset chat</button>
-    <button type="submit" id="test-send" class="btn primary" disabled>Send</button>
-  </div>
-</form>
-
 <script src="/static/test-chat.js" defer></script>
 <noscript><p class="empty">The test chat requires JavaScript. Use the <code>/v1</code> API endpoints to test combos without it.</p></noscript>
 {% endif %}

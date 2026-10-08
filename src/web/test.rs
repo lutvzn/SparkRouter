@@ -81,13 +81,15 @@ pub async fn chat(
     object.remove("_csrf");
     object.insert("stream".into(), Value::Bool(false));
     let _permit = access.admit(&state)?;
+    let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();
     let model = format!("combo/{name}");
     let result = routing::route_with_trace(&state, &model, &body, &mut attempts).await;
-    let response = match result {
+    let mut response = match result {
         Ok(response) => response,
         Err(error) => error.into_response(),
     };
+    response.extensions_mut().insert(capture);
     let response = crate::history::record_response(
         &state, "test", &model, false, started, &attempts, response,
     )

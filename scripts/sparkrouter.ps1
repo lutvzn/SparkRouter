@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'run', 'stop', 'restart', 'status', 'logs', 'health', 'build', 'check', 'test', 'keygen', 'help')]
+    [ValidateSet('start', 'run', 'stop', 'restart', 'rebuild', 'status', 'logs', 'health', 'build', 'check', 'test', 'keygen', 'help')]
     [string]$Command = 'help',
     [string]$EnvFile,
     [string]$StateDir,
@@ -28,11 +28,12 @@ $OriginalEnvironment = @{}
 function Show-Help {
     @'
 Usage: ./scripts/sparkrouter.ps1 COMMAND [options]
-Commands: start, run, stop, restart, status, logs, health, build, check, test, keygen, help
+Commands: start, run, stop, restart, rebuild, status, logs, health, build, check, test, keygen, help
 Options: -EnvFile FILE  -StateDir DIR  -DebugBuild  -Url URL  -TimeoutSeconds N
 Defaults: release build, .sparkrouter state directory, 30-second stop timeout.
 Environment files are opt-in; only KEY=value or quoted literal values are supported.
 start builds if the binary is missing. run stays in the foreground (Ctrl+C to stop).
+rebuild stops, builds, and starts again; a failed build leaves the server stopped.
 On Windows, stop forcibly terminates the managed process; it cannot drain streams.
 Use run and Ctrl+C when you need graceful shutdown.
 '@
@@ -137,7 +138,7 @@ function Stop-Router {
 try {
     if ($EnvFile) { Import-EnvironmentFile $EnvFile }
     Set-Location -LiteralPath $Root
-    if ($Command -in @('start','stop','restart','run','status') -and $env:OS -ne 'Windows_NT') {
+    if ($Command -in @('start','stop','restart','rebuild','run','status') -and $env:OS -ne 'Windows_NT') {
         throw 'Use scripts/sparkrouter.sh for Linux/macOS/WSL lifecycle management'
     }
     switch ($Command) {
@@ -159,6 +160,7 @@ try {
         'start' { Lock-State; Start-Router }
         'stop' { Lock-State; Stop-Router }
         'restart' { Lock-State; Stop-Router; Start-Router }
+        'rebuild' { Lock-State; Stop-Router; Build-Binary; Start-Router }
         'run' {
             if (-not $env:ROUTER_MASTER_KEY) { throw 'Set ROUTER_MASTER_KEY or pass -EnvFile FILE' }
             Ensure-Binary

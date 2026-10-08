@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Request bodies{% endblock %}
+{% block nav_history %} aria-current="page"{% endblock %}
+{% block topbar_heading %}<div class="topbar-heading"><h1>Request bodies</h1><p class="topbar-subtitle">Sensitive development captures — gateway-facing JSON / SSE, not raw provider wire traffic.</p></div>{% endblock %}
+{% block content %}
+<p><a class="btn" href="/history">Back to History</a></p>
+{% match payload %}
+{% when Some with (body) %}
+<p class="hint">Request uses the public model ID; History attempts show upstream models. Anthropic responses are translated to OpenAI format. Headers and intermediate fallback/error bodies are not captured. Body content is unredacted and may contain secrets. Captures are bounded UTF-8 text, not guaranteed valid JSON when truncated.</p>
+<section class="settings-card"><h2>Sent — gateway request</h2>{% if body.request_truncated %}<p class="test fail">Truncated at 64 KiB.</p>{% endif %}<pre class="payload-body"><code>{{ body.request_body }}</code></pre></section>
+<section class="settings-card"><h2>Received — gateway response</h2>{% if body.response_truncated %}<p class="test fail">Truncated at 64 KiB.</p>{% endif %}{% if !body.response_complete %}<p class="test fail">Partial capture: response pending, cancelled, interrupted, or final capture unavailable. Check History for the request outcome.</p>{% endif %}<pre class="payload-body"><code>{{ body.response_body }}</code></pre></section>
+{% when None %}<p class="empty">No Extended capture available. This request may have used Basic logging, been pruned or cleared, or encountered a recording failure.</p>
+{% endmatch %}
+{% endblock %}

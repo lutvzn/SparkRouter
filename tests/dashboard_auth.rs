@@ -241,7 +241,7 @@ async fn password_protected_dashboard_redirects_browsers_and_rejects_htmx_and_un
         "/combos",
         "/api-keys",
         "/history",
-        "/configuration",
+        "/settings",
         "/test",
         "/logout",
     ] {
@@ -477,7 +477,7 @@ async fn successful_login_sets_a_strict_random_cookie_that_unlocks_the_dashboard
         "/providers",
         "/combos",
         "/api-keys",
-        "/configuration",
+        "/settings",
         "/history",
         "/test",
     ] {

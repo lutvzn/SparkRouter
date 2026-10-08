@@ -1,13 +1,12 @@
-//! Dashboard pages for credential-free configuration transfer.
+//! Settings actions for credential-free configuration transfer.
 //!
-//! `GET /configuration` shows the export download and the import textarea.
+//! `GET /settings` shows the export download and the import textarea.
 //! `POST /configuration/preview` validates a pasted document and re-renders
 //! the page with counts, warnings, conflicts, and a confirmation form that
 //! carries the exact original text. `POST /configuration/import` applies it;
 //! every check runs again inside the write transaction, so the preview can
 //! never bypass validation or conflicts.
 
-use askama::Template;
 use axum::{
     extract::{Form, State},
     http::{HeaderValue, header},
@@ -15,7 +14,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::{CsrfForm, check_csrf, provider_catalog, render, see_other};
+use super::{CsrfForm, check_csrf, provider_catalog, see_other};
 use crate::app::AppState;
 use crate::error::AppError;
 use crate::providers::Protocol;
@@ -24,27 +23,19 @@ use crate::providers::Protocol;
 /// stored or submitted values.
 const EXPORT_FILENAME: &str = "attachment; filename=\"sparkrouter-configuration.json\"";
 
-#[derive(Template)]
-#[template(path = "config_transfer.html")]
-pub(crate) struct ConfigTransferPage {
-    app_name: &'static str,
-    csrf_token: String,
-    preview: Option<ImportPreview>,
-}
-
 /// One validated document rendered back to the operator. `configuration`
 /// echoes the exact submitted text so the confirmation form cannot drift
 /// from what was previewed.
 pub(crate) struct ImportPreview {
-    contents: crate::db::config_transfer::ConfigTransfer,
-    groups: usize,
-    connections: usize,
-    combos: usize,
-    steps: usize,
-    enabled_connections: usize,
-    warnings: Vec<String>,
-    conflicts: Vec<String>,
-    configuration: String,
+    pub(super) contents: crate::db::config_transfer::ConfigTransfer,
+    pub(super) groups: usize,
+    pub(super) connections: usize,
+    pub(super) combos: usize,
+    pub(super) steps: usize,
+    pub(super) enabled_connections: usize,
+    pub(super) warnings: Vec<String>,
+    pub(super) conflicts: Vec<String>,
+    pub(super) configuration: String,
 }
 
 /// Shared body of the preview and import actions: the CSRF token plus the
@@ -63,14 +54,6 @@ fn is_preset_endpoint(base_url: &str, protocol: &str) -> bool {
         .parse::<Protocol>()
         .map(|protocol| provider_catalog::matching(base_url, &protocol).is_some())
         .unwrap_or(false)
-}
-
-pub(crate) async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    render(ConfigTransferPage {
-        app_name: crate::APP_NAME,
-        csrf_token: state.csrf_token.as_str().to_owned(),
-        preview: None,
-    })
 }
 
 /// Exports the configuration as a JSON attachment. The document never
@@ -107,10 +90,10 @@ pub(crate) async fn preview(
         &is_preset_endpoint,
     )
     .await?;
-    render(ConfigTransferPage {
-        app_name: crate::APP_NAME,
-        csrf_token: state.csrf_token.as_str().to_owned(),
-        preview: Some(ImportPreview {
+    super::settings::render_page(
+        &state,
+        None,
+        Some(ImportPreview {
             contents: check.configuration,
             groups: check.stats.groups,
             connections: check.stats.connections,
@@ -121,7 +104,8 @@ pub(crate) async fn preview(
             conflicts: check.conflicts,
             configuration: form.configuration,
         }),
-    })
+    )
+    .await
 }
 
 /// Applies a previously previewed document. The document is revalidated and
@@ -141,6 +125,13 @@ pub(crate) async fn import(
 mod tests {
     use super::*;
     use askama::Template;
+
+    #[derive(Template)]
+    #[template(path = "config_transfer.html")]
+    struct ConfigTransferPage {
+        csrf_token: String,
+        preview: Option<ImportPreview>,
+    }
 
     const CSRF: &str = "csrf-test-token";
 
@@ -166,13 +157,11 @@ mod tests {
     #[test]
     fn page_renders_export_and_import_forms_with_csrf() {
         let page = ConfigTransferPage {
-            app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
             preview: None,
         }
         .render()
         .unwrap();
-        assert!(page.contains("<title>SparkRouter :: Configuration</title>"));
         assert!(page.contains("action=\"/configuration/export\""));
         assert!(page.contains("action=\"/configuration/preview\""));
         assert!(page.contains("name=\"configuration\""));
@@ -184,7 +173,6 @@ mod tests {
     fn preview_renders_counts_warnings_and_a_confirmation_form() {
         let json = r#"{"version":1,"groups":[{"id":"g","name":"Work <LLM>"}]}"#;
         let page = ConfigTransferPage {
-            app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
             preview: Some(preview_view(json)),
         }
@@ -207,7 +195,6 @@ mod tests {
     #[test]
     fn conflicting_names_replace_the_confirmation_form() {
         let page = ConfigTransferPage {
-            app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
             preview: Some(ImportPreview {
                 conflicts: vec!["chain".to_owned()],

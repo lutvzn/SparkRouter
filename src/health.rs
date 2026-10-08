@@ -29,14 +29,21 @@ async fn health() -> Response {
     response(StatusCode::OK, "ok")
 }
 
-async fn ready(State(state): State<AppState>) -> Response {
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&state.db),
+pub(crate) async fn database_ready(pool: &sqlx::SqlitePool) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(pool),
+        )
+        .await,
+        Ok(Ok(1))
     )
-    .await
-    {
-        Ok(Ok(1)) => response(StatusCode::OK, "ready"),
-        _ => response(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+}
+
+async fn ready(State(state): State<AppState>) -> Response {
+    if database_ready(&state.db).await {
+        response(StatusCode::OK, "ready")
+    } else {
+        response(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
     }
 }

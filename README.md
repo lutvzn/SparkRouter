@@ -38,7 +38,7 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 Open **http://127.0.0.1:8080/** for the Overview dashboard:
 
-The Overview is the default login destination and sidebar entry. It summarizes retained request usage in five cards (requests, input/output/cache tokens, and USD spend) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test chat**, **History**, and **Configuration**. Navigation wraps above the page on smaller screens.
+The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in five cards (requests, input/output/cache tokens, and USD spend) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**. Navigation wraps above the page on smaller screens.
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
 Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
@@ -76,7 +76,10 @@ and opens it for editing. Copies are named `<name>-copy`, then `<name>-copy-2`,
 and so on; long names are shortened to keep the 64-character limit. Existing
 connections are reused, not duplicated, and the selected strategy is preserved.
 
-Open **Test chat** (`/test`) to chat with a combo and inspect the actual routing attempts:
+Open **Test** (`/test`) for a chat-style workspace with a combo picker, user
+message bubbles, and a single-line bottom composer with Send on its right.
+Press Enter or click Send to send a message. **New chat** clears the conversation; **Routing attempts** expands
+the latest request's diagnostic trace. Chat with a combo and inspect the actual routing attempts:
 connection name, upstream model, configured step number, outcome, and latency.
 Retryable failures and the selected target appear in request order, including
 when a request fails. Tests use the same routing and round-robin state as API
@@ -227,7 +230,7 @@ reserved. Existing custom providers receive saved slugs on startup without
 changing credentials or combo references. Ungrouped non-preset connections use
 a reserved connection-specific namespace.
 
-The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** stores that list. Model cards show and copy the provider-prefixed **public ID**; model details also show the **upstream ID** used by combo steps. Cards support search, context size (`ctx`), and free-model labels. Combo suggestions retain raw upstream IDs, and you can still type any model. Some servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
+The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** stores that list. Model cards show and copy the provider-prefixed **public ID** (Copy uses the modern Clipboard API on HTTPS/localhost, with a legacy fallback for plain HTTP LAN access); model details also show the **upstream ID** used by combo steps. Cards support search and show only a compact context-size tag (for example, `128k ctx` or `1.05M ctx`, rounded to at most two decimal places); output limits, pricing, and free-model status stay in the info popup. Combo suggestions retain raw upstream IDs, and you can still type any model. Some servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
 
 Saved API keys are never rendered back into HTML. Leaving the key field blank
 when editing a connection preserves the existing encrypted value. To clear a
@@ -238,6 +241,43 @@ Custom provider cards carry a **Custom** badge. Open a custom provider and choos
 any connection is referenced by a combo; preset provider tiles are not removable.
 
 ## Routing and streaming
+
+### Model discovery limits
+
+`GET /v1/models` includes exact numeric `context_length` and `max_output_tokens`
+when present in the last refreshed model details. It also includes the
+OpenRouter-style `top_provider.context_length` and
+`top_provider.max_completion_tokens` for clients that recognize these extensions.
+Direct IDs use the oldest enabled connection listing that model. A combo inherits
+limits from **its first configured step's exact connection/model**, retaining its
+`combo/<name>` ID. For example, a combo starting with `cinf/deepseek-v4.1-flash`
+whose refreshed details show 1,048,576 context and 393,216 output tokens advertises:
+
+```json
+{
+  "id": "combo/my-combo",
+  "object": "model",
+  "created": 0,
+  "owned_by": "sparkrouter",
+  "context_length": 1048576,
+  "max_output_tokens": 393216,
+  "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 393216
+  }
+}
+```
+
+Refresh the connection's models to populate/update these details. Unknown or
+invalid limits are omitted, never guessed from another step. Empty combos remain
+listed. Metadata follows configured step order (including a disabled first
+connection), not a Round robin/Random reservation or a fallback selection. These
+are advisory first-model limits, **not a guarantee for every fallback target**;
+routing and request/response bodies are unchanged. Clients must support these
+optional discovery fields to display/use them. Scoped-key filtering still applies
+only to the public IDs; an allowed combo does not expose its underlying direct ID.
+
+### Routing behavior
 
 - **Priority** (default) starts at the first enabled step, then follows configured order on retryable failures.
 - **Round robin** rotates the starting step across enabled steps, once per request. After the last step it returns to the first. Cursors are per combo, shared across concurrent requests in one process, and reset on restart; changes to enabled steps may change the next starting step.
@@ -260,9 +300,44 @@ Set `ROUTER_DASHBOARD_PASSWORD` to enable a single-admin dashboard login at `/lo
 
 `ROUTER_API_KEY` and dashboard-generated API keys protect gateway endpoints only; a dashboard session does not authorize API requests. Generated keys support model allowlists and expiry, are shown once, and are authenticated by a master-key fingerprint; the temporary encrypted reveal envelope is cleared on first viewing. Dashboard forms retain CSRF and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
 
+### Settings
+
+**Settings** (`/settings`) offers browser-local Light/Dark/System appearance,
+request-history retention (1–10,000 records, default 10,000), a confirmed clear
+history action, configuration export/import with inline preview, and read-only authentication
+and system status (version, uptime, database read connectivity, Linux resident
+RAM). Refresh the page to update status. Retention persists in SQLite; lowering
+it immediately and irreversibly prunes older requests and attempts and updates
+Overview totals. Increasing it cannot recover deleted history. Clearing history
+resets totals but in-flight requests can still record new history.
+
+Configuration transfer is credential-free, not a complete backup, and does not
+include settings. For a full backup, use SQLite online backup or stop cleanly
+before copying the database; save the existing master key separately. Deployment
+secrets, bind address and database location are not exposed or editable here.
+Settings shares dashboard login, CSRF and origin protections. No background
+monitoring worker is added. Theme controls require JavaScript; retention,
+clear, transfer and status work without it.
+
 ### Request history and configuration transfer
 
-**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. It stores **metadata only**, never prompts, completions, credentials, endpoint URLs, or raw upstream errors. Retention is the newest 10,000 requests, with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort and does not delay the response; database write failures do not fail generation. Streaming finalization waits for the insert so a fast completion is not left recorded as still streaming. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
+**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. **Basic** (default) stores metadata only. **Off** records no new routed history. **Extended**, explicitly confirmed in Settings, also stores sensitive request/response body captures. Retention defaults to the newest 10,000 requests (a lower cap can be selected in Settings), with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; inserts do not delay response commitment and finalization is bounded. Reading the logging preference before routing has a 200 ms deadline (failure disables recording for that request); database write failures do not fail generation. Streaming finalization waits for the insert so a fast completion is not left recorded as still streaming. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
+
+Extended is a development tool, not an HTTP wire logger: it captures the validated
+gateway request JSON (public model ID, after removing Test chat CSRF) and final
+gateway response bytes (JSON or SSE; Anthropic translated to OpenAI). Attempts
+show upstream model IDs separately. It excludes HTTP headers, configured transport
+credentials, intermediate fallback bodies and raw upstream errors. **Body content
+is unredacted and may itself contain secrets.** Each request/response capture is
+limited to 64 KiB, with truncation and partial-capture notices. Inspect captures
+via History; pages are HTML-escaped and `no-store`. Bodies are stored **unencrypted
+in SQLite**, including its WAL and backups. Secure dashboard access, use test data,
+and keep retention low (the maximum permits roughly 1.25 GiB of body text plus
+metadata/database overhead). Mode changes apply before routing to new requests,
+not requests already in flight, and do not erase existing records. Clear/prune
+cascades to body captures; deletion is not a secure wipe of WAL, free pages or
+backups. Off pauses new Overview totals but does not suppress operational
+`tracing` logs. Configuration export never includes captures or logging settings.
 
 **Overview** (`/`) uses that same retained history, including finished API and
 test-chat requests; pending streams are excluded. Its five summary cards show
@@ -278,7 +353,7 @@ counts. Explicit zero remains zero. USD spend is shown only when explicitly
 reported as USD; non-USD or missing prices are not estimated and display as
 unknown. Clearing history clears these statistics, not lifetime totals.
 
-**Configuration** (`/configuration`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
+**Settings → Backup & restore** (`/settings`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
 Group slugs are exported too. Version 1 documents without a slug remain accepted;
 imports preserve requested slugs when available and add a suffix on conflicts.
 Check the imported provider's displayed slug before updating client model IDs.

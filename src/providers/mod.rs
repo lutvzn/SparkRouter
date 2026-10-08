@@ -247,8 +247,8 @@ pub fn parse_model_page(body: &Value) -> Result<(Vec<StoredModel>, Option<String
     Ok((models, next))
 }
 
-/// Card title plus at most two useful facts: context size and output limit.
-/// Modality strings, dates, owners, pricing, and descriptions stay off the card.
+/// Store the title, context/output limits, and extra details for the popup.
+/// Only context size is displayed as a card tag.
 fn model_card(item: &Value, id: &str) -> StoredModel {
     let name = ["display_name", "name", "title"]
         .iter()
@@ -758,21 +758,19 @@ mod tests {
         assert_eq!(models[1].id, "gpt-4o-mini");
         assert_eq!(
             models[0].display_fields(),
-            vec![
-                ModelField {
-                    label: "Context".into(),
-                    value: "1.050.000 ctx".into(),
-                },
-                ModelField {
-                    label: "Output".into(),
-                    value: "16.384 output".into(),
-                },
-            ]
+            vec![ModelField {
+                label: "Context".into(),
+                value: "1.05M ctx".into(),
+            }]
         );
         assert!(!models[0].free);
-        assert!(models[0].search_text().contains("1.050.000"));
+        assert!(models[0].search_text().contains("1.05M ctx"));
         assert!(!models[0].search_text().contains("openai"));
         let info = models[0].info_fields();
+        assert!(
+            info.iter()
+                .any(|field| { field.label == "Output" && field.value == "16.384 output" })
+        );
         assert!(
             info.iter()
                 .any(|field| field.label == "Type" && field.value == "text")
@@ -803,7 +801,7 @@ mod tests {
         }))
         .unwrap();
         assert!(flagged[0].is_free());
-        assert_eq!(flagged[0].display_fields()[0].value, "1.000.000 ctx");
+        assert_eq!(flagged[0].display_fields()[0].value, "1M ctx");
         let rendered = serde_json::to_string(&models[0].fields).unwrap();
         assert!(!rendered.contains("sk-should-not-appear"));
         assert!(!rendered.contains("nope"));

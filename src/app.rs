@@ -17,6 +17,7 @@ use tower_http::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) started_at: std::time::Instant,
     pub db: SqlitePool,
     pub client: reqwest::Client,
     pub crypto: Arc<Crypto>,
@@ -51,6 +52,7 @@ impl AppState {
         .execute(&db)
         .await?;
         Ok(Self {
+            started_at: std::time::Instant::now(),
             db,
             client,
             crypto: Arc::new(config.crypto),

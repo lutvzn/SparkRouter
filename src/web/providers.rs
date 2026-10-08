@@ -1070,7 +1070,10 @@ mod tests {
         // delete form each carry CSRF.
         assert!(group.contains("gpt-4o-mini"));
         assert!(group.contains("GPT-4o mini"));
-        assert!(group.contains("model-card-free"));
+        assert!(!group.contains("model-card-free"));
+        assert!(!group.contains("model-card-chip"));
+        assert!(group.contains("<dt>Free</dt><dd>Yes</dd>"));
+        assert!(group.contains("<dt>Owned by</dt><dd>openai</dd>"));
         assert!(group.contains("data-model-search"));
         assert!(group.contains("data-copy-model=\"local-llm/gpt-4o-mini\""));
         assert!(group.contains("Public ID: <code>local-llm/gpt-4o-mini</code>"));
