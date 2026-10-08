@@ -908,6 +908,76 @@ a.provider-tile:focus-visible {
    Duplicate/Edit/Delete right. */
 main.combo-page { max-width: 90rem; }
 
+/* Compact combo settings; descriptions stay available on hover or focus. */
+.card.combo-settings { width: 100%; max-width: none; padding: 1rem 1.25rem; }
+.combo-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: .85rem 1rem;
+}
+.combo-field { min-width: 0; }
+.field-label { position: relative; display: flex; align-items: center; gap: .4rem; margin-bottom: .35rem; }
+.field-label label { margin: 0; }
+.combo-settings .form-actions { justify-content: flex-end; margin-top: .85rem; }
+.field-help { display: inline-flex; flex: 0 0 auto; }
+.info-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--soft);
+  color: var(--muted);
+  font: 600 .85rem/1 Georgia, serif;
+  cursor: help;
+}
+.info-button:hover, .info-button:focus-visible { color: var(--accent); border-color: var(--accent); }
+.help-tooltip {
+  position: absolute;
+  z-index: 40;
+  top: 100%;
+  inset-inline-start: 0;
+  width: min(30rem, calc(100vw - 4rem));
+  padding: .75rem .9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--fg);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 15%);
+  font-size: .82rem;
+  font-weight: 400;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.field-help:not(.help-dismissed):hover .help-tooltip, .field-help:not(.help-dismissed):focus-within .help-tooltip {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+.combo-field:nth-child(n+3) .help-tooltip { inset-inline-start: auto; inset-inline-end: 0; }
+.combo-section-heading { margin: 1.25rem 0 .6rem; }
+.combo-section-heading h2 { margin: 0; }
+@media (max-width: 75rem) {
+  .combo-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .combo-field:nth-child(n) .help-tooltip { inset-inline-start: 0; inset-inline-end: auto; }
+  .combo-field:nth-child(even) .help-tooltip { inset-inline-start: auto; inset-inline-end: 0; }
+}
+@media (max-width: 40rem) {
+  .card.combo-settings { padding: 1rem; }
+  .combo-settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .combo-field:nth-child(n) .help-tooltip {
+    inset-inline-start: 0;
+    inset-inline-end: auto;
+    max-width: 100%;
+  }
+}
+
 .combo-list {
   display: grid;
   gap: 0.75rem;

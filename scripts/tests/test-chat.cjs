@@ -49,6 +49,7 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../static/test-chat.
   },
   window: { addEventListener: (name, fn) => { windowListeners[name] = fn; } },
   AbortController,
+  crypto: require('node:crypto').webcrypto,
   fetch: (url, options) => {
     requests.push({ url, options, body: JSON.parse(options.body) });
     return new Promise(resolve => {
@@ -94,6 +95,9 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   draft.value = 'Follow up';
   key();
   assert.equal(requests[1].body.messages.length, 3);
+  const session = requests[0].options.headers['X-SparkRouter-Session-Id'];
+  assert.match(session, /^[0-9a-f]{32}$/);
+  assert.equal(requests[1].options.headers['X-SparkRouter-Session-Id'], session);
   fail = true;
   resolveFetch();
   await settle();
@@ -108,6 +112,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   draft.value = 'After reset';
   key();
   assert.equal(requests[2].body.messages.length, 1);
+  assert.notEqual(requests[2].options.headers['X-SparkRouter-Session-Id'], session);
   resolveFetch();
   await settle();
   windowListeners.pagehide();

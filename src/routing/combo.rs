@@ -58,7 +58,14 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
 }
 
 pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Response, AppError> {
-    route_inner(state, name, body, None).await
+    route_inner(
+        state,
+        name,
+        body,
+        &super::affinity::RequestContext::default(),
+        None,
+    )
+    .await
 }
 
 /// Request-local diagnostics for the dashboard; never contains credentials,
@@ -106,20 +113,23 @@ pub(crate) async fn route_with_trace(
     state: &AppState,
     name: &str,
     body: &Value,
+    context: &super::affinity::RequestContext,
     attempts: &mut Vec<AttemptTrace>,
 ) -> Result<Response, AppError> {
-    route_inner(state, name, body, Some(attempts)).await
+    route_inner(state, name, body, context, Some(attempts)).await
 }
 
 async fn route_inner(
     state: &AppState,
     name: &str,
     body: &Value,
+    context: &super::affinity::RequestContext,
     mut attempts: Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let combo = combos::by_name(&state.db, name).await?;
     let mut steps = combos::steps(&state.db, &combo.id).await?;
-    if combo.strategy != combos::Strategy::Priority {
+    let binding = super::affinity::binding(&combo, context, &state.crypto, body)?;
+    if combo.strategy != combos::Strategy::Priority || binding.is_some() {
         // Disabled connections do not consume turns. Snapshot eligible steps
         // before selecting a start, but recheck providers below before calls so
         // concurrent deletion/disable edits retain the existing safety behavior.
@@ -138,10 +148,18 @@ async fn route_inner(
         let start = match combo.strategy {
             combos::Strategy::RoundRobin => state.round_robin.next(&combo.id, steps.len())?,
             combos::Strategy::Random => random_start(steps.len(), || OsRng.next_u64()),
-            combos::Strategy::Priority => unreachable!("priority retains its original order"),
+            combos::Strategy::Priority => 0,
         };
         // Each step is attempted at most once; fallback follows configured order
         // cyclically from the selected start without advancing the cursor again.
+        steps.rotate_left(start);
+    }
+    // Reserve the normal strategy once even on affinity hits. Override only
+    // the start; cyclic configured fallback still visits every step once.
+    if let Some(binding) = &binding
+        && let Some(target) = state.affinity.preferred(binding)
+        && let Some(start) = steps.iter().position(|step| target.matches(step))
+    {
         steps.rotate_left(start);
     }
     for step in steps {
@@ -178,9 +196,26 @@ async fn route_inner(
                     status = response.status().as_u16(), latency_ms = started.elapsed().as_millis(), "upstream selected");
                 // The response body now exclusively owns this attempt. Stream errors
                 // MUST terminate that body; they cannot re-enter this fallback loop.
+                if let Some(binding) = binding {
+                    let target = super::affinity::Target::from_step(&step);
+                    if body.get("stream").and_then(Value::as_bool) == Some(true) {
+                        return Ok(super::affinity::on_complete(
+                            response,
+                            state.affinity.clone(),
+                            binding,
+                            target,
+                        ));
+                    }
+                    state.affinity.remember(binding, target);
+                }
                 return Ok(response);
             }
             Err(AttemptError::Retryable) => {
+                if let Some(binding) = &binding {
+                    state
+                        .affinity
+                        .forget_target(binding, &super::affinity::Target::from_step(&step));
+                }
                 tracing::warn!(combo = name, provider = %provider.id, model = %step.model,
                     latency_ms = started.elapsed().as_millis(), "retryable upstream failure; trying next combo step");
             }

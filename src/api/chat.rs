@@ -9,6 +9,7 @@ use serde_json::Value;
 pub(crate) async fn complete(
     State(state): State<AppState>,
     Extension(auth): Extension<crate::app::Authorization>,
+    headers: axum::http::HeaderMap,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let started = std::time::Instant::now();
@@ -38,10 +39,11 @@ pub(crate) async fn complete(
     if model == "combo/" {
         return Err(AppError::InvalidRequest("Use model: combo/<name>".into()));
     }
+    let context = routing::affinity::RequestContext::new(auth.affinity_scope(&state), &headers);
     let permit = auth.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();
-    let result = routing::route_with_trace(&state, model, &body, &mut attempts).await;
+    let result = routing::route_with_trace(&state, model, &body, &context, &mut attempts).await;
     let mut response = result.unwrap_or_else(IntoResponse::into_response);
     response.extensions_mut().insert(capture);
     let response = crate::history::record_response(

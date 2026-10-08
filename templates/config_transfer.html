@@ -36,7 +36,7 @@
     <h3>Connections</h3>
     <ul>{% for connection in preview.contents.connections %}<li>{{ connection.name }} &middot; {{ connection.protocol }} &middot; <code>{{ connection.base_url }}</code> (ID <code>{{ connection.id }}</code>{% if let Some(group_id) = connection.group_id %}, group <code>{{ group_id }}</code>{% endif %}) &mdash; imported disabled</li>{% endfor %}</ul>
     <h3>Combos</h3>
-    {% for combo in preview.contents.combos %}<h4><code>combo/{{ combo.name }}</code> &middot; {{ combo.strategy }}</h4><ol>{% for step in combo.steps %}<li>Connection <code>{{ step.provider_id }}</code> &middot; model <code>{{ step.model }}</code></li>{% endfor %}</ol>{% endfor %}
+    {% for combo in preview.contents.combos %}<h4><code>combo/{{ combo.name }}</code> &middot; {{ combo.strategy }} &middot; affinity: {{ combo.affinity_mode }}{% if combo.affinity_mode == "sticky" %} ({{ combo.sticky_minutes }} min){% endif %}</h4><ol>{% for step in combo.steps %}<li>Connection <code>{{ step.provider_id }}</code> &middot; model <code>{{ step.model }}</code></li>{% endfor %}</ol>{% endfor %}
   </details>
   {% if preview.warnings.is_empty() %}{% else %}
   <ul>

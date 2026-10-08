@@ -80,11 +80,12 @@ pub async fn chat(
         .ok_or_else(|| AppError::InvalidRequest("Request must be a JSON object".into()))?;
     object.remove("_csrf");
     object.insert("stream".into(), Value::Bool(false));
+    let context = routing::affinity::RequestContext::new(access.affinity_scope(&state), &headers);
     let _permit = access.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();
     let model = format!("combo/{name}");
-    let result = routing::route_with_trace(&state, &model, &body, &mut attempts).await;
+    let result = routing::route_with_trace(&state, &model, &body, &context, &mut attempts).await;
     let mut response = match result {
         Ok(response) => response,
         Err(error) => error.into_response(),

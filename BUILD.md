@@ -99,6 +99,11 @@ are included in database backups, not configuration exports; clearing history
 is not a secure wipe of WAL/free pages/backups. Mode and retention persist across
 restart. See [request history](README.md#request-history-and-configuration-transfer).
 
+Cache-aware/sticky routing is configured per combo, not through environment
+variables. Off is the upgrade/default mode. Settings persist through SQLite
+migrations, while bounded placement hints reset on restart and are not shared
+between gateway processes. See [per-combo affinity](README.md#per-combo-cache-aware-and-sticky-routing).
+
 ## Convenience scripts
 
 The repository includes matching command helpers:

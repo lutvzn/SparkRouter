@@ -26,6 +26,7 @@ pub struct AppState {
     pub dashboard_auth: Option<Arc<crate::web::auth::DashboardAuth>>,
     pub(crate) key_limits: Arc<crate::key_limits::Limiter>,
     pub(crate) round_robin: Arc<crate::routing::combo::RoundRobin>,
+    pub(crate) affinity: Arc<crate::routing::affinity::Affinity>,
 }
 
 impl AppState {
@@ -66,6 +67,7 @@ impl AppState {
             }),
             key_limits: Arc::default(),
             round_robin: Arc::default(),
+            affinity: Arc::default(),
         })
     }
 }
@@ -110,6 +112,16 @@ pub(crate) struct Authorization {
     pub key: Option<crate::db::api_keys::AuthenticatedKey>,
 }
 impl Authorization {
+    /// Shared environment-key/open access each has one namespace; generated
+    /// keys never share placement hints with another caller.
+    pub(crate) fn affinity_scope(&self, state: &AppState) -> String {
+        match &self.key {
+            Some(key) => format!("key:{}", key.id),
+            None if state.api_key.is_some() => "environment".into(),
+            None => "anonymous".into(),
+        }
+    }
+
     pub fn admit(&self, state: &AppState) -> Result<Option<crate::key_limits::Permit>, AppError> {
         self.key
             .as_ref()

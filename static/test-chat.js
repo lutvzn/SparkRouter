@@ -39,7 +39,12 @@
   // Only successful exchanges enter this history; the next request replays it
   // in full so multi-turn context is preserved upstream. Failures must never
   // pollute it, so their drafts stay in the textarea for retry.
+  function newSessionId() {
+    return Array.from(crypto.getRandomValues(new Uint32Array(4)),
+      (value) => value.toString(16).padStart(8, "0")).join("");
+  }
   let conversation = [];
+  let sessionId = newSessionId();
   let busy = false;
   let requestVersion = 0;
   let pendingRequest = null;
@@ -191,7 +196,10 @@
     const controller = new AbortController();
     pendingRequest = controller;
 
-    const headers = { "Content-Type": "application/json" };
+    const headers = {
+      "Content-Type": "application/json",
+      "X-SparkRouter-Session-Id": sessionId,
+    };
     if (keyInput) {
       const key = keyInput.value.trim();
       if (key) headers.Authorization = "Bearer " + key;
@@ -286,6 +294,7 @@
   // against the new combo.
   comboSelect.addEventListener("change", () => {
     conversation = [];
+    sessionId = newSessionId();
     clearMessages();
     clearAttempts();
     setNote(errorNote, "");
@@ -294,6 +303,7 @@
 
   resetButton.addEventListener("click", () => {
     conversation = [];
+    sessionId = newSessionId();
     clearMessages();
     clearAttempts();
     draft.value = "";
@@ -312,6 +322,7 @@
     setBusy(false);
     if (keyInput) keyInput.value = "";
     conversation = [];
+    sessionId = newSessionId();
     clearMessages();
     clearAttempts();
     draft.value = "";

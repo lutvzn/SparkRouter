@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use crate::db::combos::Strategy;
+use crate::db::combos::{AffinityMode, AffinityOptions, Strategy};
 use crate::error::AppError;
 use crate::providers::{Protocol, normalize_base_url};
 
@@ -94,7 +94,18 @@ pub struct TransferConnection {
 pub struct TransferCombo {
     pub name: String,
     pub strategy: String,
+    #[serde(default = "default_affinity_mode")]
+    pub affinity_mode: String,
+    #[serde(default = "default_sticky_minutes")]
+    pub sticky_minutes: u32,
     pub steps: Vec<TransferStep>,
+}
+
+fn default_affinity_mode() -> String {
+    "off".into()
+}
+fn default_sticky_minutes() -> u32 {
+    AffinityOptions::default().sticky_minutes
 }
 
 /// One ordered step. `provider_id` references [`TransferConnection::id`].
@@ -152,9 +163,11 @@ pub async fn export(pool: &SqlitePool) -> Result<ConfigTransfer, AppError> {
     )
     .fetch_all(&mut *transaction)
     .await?;
-    let combo_rows = sqlx::query("SELECT id, name, strategy FROM combos ORDER BY name")
-        .fetch_all(&mut *transaction)
-        .await?;
+    let combo_rows = sqlx::query(
+        "SELECT id, name, strategy, affinity_mode, sticky_minutes FROM combos ORDER BY name",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
     let step_rows = sqlx::query(
         "SELECT combo_id, provider_id, model FROM combo_steps ORDER BY combo_id, position",
     )
@@ -209,6 +222,8 @@ pub async fn export(pool: &SqlitePool) -> Result<ConfigTransfer, AppError> {
             Ok(TransferCombo {
                 name: row.try_get("name")?,
                 strategy: row.try_get("strategy")?,
+                affinity_mode: row.try_get("affinity_mode")?,
+                sticky_minutes: row.try_get("sticky_minutes")?,
                 steps: steps_by_combo.remove(&id).unwrap_or_default(),
             })
         })
@@ -338,6 +353,11 @@ fn parse_and_validate(
             ));
         }
         Strategy::parse(&combo.strategy)?;
+        AffinityOptions {
+            mode: AffinityMode::parse(&combo.affinity_mode)?,
+            sticky_minutes: combo.sticky_minutes,
+        }
+        .validate()?;
         if combo.steps.len() > MAX_STEPS_PER_COMBO {
             return Err(AppError::InvalidRequest(format!(
                 "a combo has more than {MAX_STEPS_PER_COMBO} steps"
@@ -519,10 +539,12 @@ pub async fn apply(
 
     for combo in &transfer.combos {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO combos (id, name, strategy) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?)")
             .bind(&id)
             .bind(&combo.name)
             .bind(&combo.strategy)
+            .bind(&combo.affinity_mode)
+            .bind(combo.sticky_minutes)
             .execute(&mut *transaction)
             .await?;
         for (position, step) in combo.steps.iter().enumerate() {

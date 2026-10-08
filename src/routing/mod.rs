@@ -1,3 +1,4 @@
+pub(crate) mod affinity;
 pub mod combo;
 pub mod direct;
 
@@ -47,11 +48,12 @@ pub(crate) async fn route_with_trace(
     state: &AppState,
     model: &str,
     body: &Value,
+    context: &affinity::RequestContext,
     attempts: &mut Vec<AttemptTrace>,
 ) -> Result<Response, AppError> {
     let result = tokio::time::timeout(Duration::from_secs(180), async {
         if let Some(name) = model.strip_prefix("combo/") {
-            combo::route_with_trace(state, name, body, attempts).await
+            combo::route_with_trace(state, name, body, context, attempts).await
         } else {
             direct::route_with_trace(state, model, body, attempts).await
         }
@@ -128,8 +130,9 @@ mod tests {
         for model in ["combo/pending", direct.as_str()] {
             let body = serde_json::json!({"model": model});
             let mut attempts = Vec::new();
+            let context = affinity::RequestContext::default();
             {
-                let routing = route_with_trace(&state, model, &body, &mut attempts);
+                let routing = route_with_trace(&state, model, &body, &context, &mut attempts);
                 tokio::pin!(routing);
                 // Accept but never answer. Connection establishment proves the
                 // attempt started, without sleeps or a billable upstream call.

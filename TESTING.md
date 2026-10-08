@@ -51,6 +51,7 @@ cargo test --locked -- --list
 | `tests/config_transfer.rs` | Credential-free transfer, preview, validation, atomic rollback, fresh disabled connections |
 | `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
+| `tests/combo_affinity.rs`, `src/routing/affinity.rs` tests | Per-combo Off/Basic/Smart/Sticky, header/body session IDs, exact prompt continuity/separation, caller isolation, clock-controlled expiry/capacity, fallback/rebinding, disabled/edited targets, successful/interrupted/dropped streams, dropdown validation/CSRF, duplication and backward-compatible transfer |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
 | `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
 | `src/db/provider_slugs.rs` tests | Readable unique slugs, reserved names, transactional conflicts/concurrency, stable legacy initialization |
@@ -96,6 +97,7 @@ test (Node.js is not required to build or run SparkRouter):
 node scripts/tests/clipboard.cjs
 node scripts/tests/theme.cjs
 node scripts/tests/test-chat.cjs
+node scripts/tests/tooltips.cjs
 ```
 
 It covers modern clipboard copying, plain-HTTP fallback, failure feedback,
@@ -110,6 +112,7 @@ prove browser clipboard permissions.
 cargo test --locked --test gateway
 cargo test --locked --test dashboard
 cargo test --locked --test test_chat
+cargo test --locked --test combo_affinity
 
 # Library module filters:
 cargo test --locked --lib crypto::tests
@@ -267,6 +270,22 @@ both API endpoints. Generate an unrestricted API key and confirm it can call eve
    restart its sequence after process restart. Random should choose one enabled
    start per request; repeat selections are valid. For both strategies, verify
    cyclic fallback, permanent-error stopping, and no post-commit streaming retry.
+   On each combo's create/edit page, check the separate Off/Basic/Smart/Sticky
+   dropdown (Off by default) and Sticky minutes (1–1440, default 5). Basic should
+   retain a local mock target for the same session-id header; without an ID it
+   follows the strategy. Smart should retain the target across growing messages
+   with an unchanged initial prompt/tools, and separate changed first prompts.
+   Sticky should retain the last successful target for that key/combo even when
+   sessions change; after its idle timeout it follows the strategy again. Check
+   successful requests renew the timeout, retries rebind, and permanent errors
+   stop. Hints reset on restart/edits but mode/timeout persist. Check ordinary
+   non-JS forms, all four options, saved minutes, narrow layouts, and both themes.
+   Combo settings should use one full-width card with four compact columns on
+   wide screens, two on tablets, and one on phones. Descriptions belong to the
+   info buttons: verify hover, keyboard focus, tap-to-focus, Escape dismissal,
+   pointer movement into the tooltip, and no form submission on info clicks.
+   Test chat New chat/combo changes should generate a fresh page-local ID;
+   Sticky deliberately ignores New chat until expiry.
 8. Check that deleting a referenced provider is rejected. Delete its combo steps
    first, then retry. Check HTMX actions and their error display in a browser.
    Create providers and combos using their ordinary form submits too; the pages

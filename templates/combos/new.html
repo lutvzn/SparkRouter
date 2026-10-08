@@ -1,20 +1,38 @@
 {% extends "base.html" %}
 {% block title %}Add combo{% endblock %}
+{% block main_class %}combo-page{% endblock %}
 {% block nav_combos %} aria-current="page"{% endblock %}
 {% block topbar_heading %}<div class="topbar-heading"><h1>Add combo</h1><p class="topbar-subtitle">Create an ordered route with fallback connections.</p></div>{% endblock %}
 {% block content %}
-<form method="post" action="/combos" class="card">
+<form method="post" action="/combos" class="card combo-settings">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-  <label for="name">Name</label>
-  <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. default">
-  <p class="hint">1&ndash;64 characters: letters, digits, underscore, dot, hyphen.</p>
-  <label for="strategy">Strategy</label>
-  <select id="strategy" name="strategy" required>
-    <option value="priority" selected>Priority</option>
-    <option value="round_robin">Round robin</option>
-    <option value="random">Random</option>
-  </select>
-  <p class="hint">Priority tries enabled steps in order; round robin rotates the starting step; random picks a random starting step. Retryable failures fall back to the remaining steps; streaming never switches after it starts.</p>
+  <div class="combo-settings-grid">
+    <div class="combo-field">
+      <div class="field-label">
+        <label for="name">Name</label>
+        {% let info_id = "name-help" %}
+        {% let info_label = "About combo names" %}
+        {% let info_text = "1–64 characters: letters, digits, underscore, dot, hyphen." %}
+        {% include "combos/_info.html" %}
+      </div>
+      <input id="name" name="name" type="text" required maxlength="64" placeholder="e.g. default">
+    </div>
+    <div class="combo-field">
+      <div class="field-label">
+        <label for="strategy">Strategy</label>
+        {% let info_id = "strategy-help" %}
+        {% let info_label = "About routing strategies" %}
+        {% let info_text = "Priority tries enabled steps in order; round robin rotates the starting step; random picks a random starting step. Retryable failures fall back to the remaining steps; streaming never switches after it starts." %}
+        {% include "combos/_info.html" %}
+      </div>
+      <select id="strategy" name="strategy" required>
+        <option value="priority" selected>Priority</option>
+        <option value="round_robin">Round robin</option>
+        <option value="random">Random</option>
+      </select>
+    </div>
+    {% include "combos/_affinity.html" %}
+  </div>
   <div class="form-actions">
     <a class="btn" href="/combos">Cancel</a>
     <button class="btn primary" type="submit">Create combo</button>

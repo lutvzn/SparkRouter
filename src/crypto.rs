@@ -91,11 +91,19 @@ impl Crypto {
         self.fingerprint(b"sparkrouter.dashboard-password.v1\0", secret)
     }
 
+    pub(crate) fn affinity_fingerprint(&self, value: &[u8]) -> Result<String, AppError> {
+        self.fingerprint_bytes(b"sparkrouter.routing-affinity.v1\0", value)
+    }
+
     fn fingerprint(&self, domain: &[u8], secret: &str) -> Result<String, AppError> {
+        self.fingerprint_bytes(domain, secret.as_bytes())
+    }
+
+    fn fingerprint_bytes(&self, domain: &[u8], value: &[u8]) -> Result<String, AppError> {
         let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.key.as_ref())
             .map_err(|_| AppError::Encryption)?;
         <Hmac<Sha256> as Mac>::update(&mut mac, domain);
-        <Hmac<Sha256> as Mac>::update(&mut mac, secret.as_bytes());
+        <Hmac<Sha256> as Mac>::update(&mut mac, value);
         Ok(STANDARD.encode(<Hmac<Sha256> as Mac>::finalize(mac).into_bytes()))
     }
 }

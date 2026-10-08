@@ -68,7 +68,64 @@ Without JavaScript, use the **Edit step** disclosure below the row; all connecti
 options remain visible and ordinary form submissions still work.
 
 Choose **Priority**, **Round robin**, or **Random** when creating or editing a
-combo. Existing combos default to Priority. The Combos list shows its strategy.
+combo. Existing combos default to Priority. The Combos list shows its strategy
+and cache-aware/sticky mode.
+
+### Per-combo cache-aware and sticky routing
+
+Each combo has one **Cache-aware / sticky routing** dropdown:
+
+| Mode | Starting-target preference |
+| --- | --- |
+| **Off** (default) | Use the combo's Priority, Round robin, or Random strategy unchanged |
+| **Basic** | Reuse the last successful connection/model for the same explicit session ID |
+| **Smart** | Same as Basic; without an explicit ID, fingerprint the initial consecutive system/developer messages, first user message, and tool definitions |
+| **Sticky** | Reuse this caller's last successful connection/model for this combo, regardless of session or prompt, within its configured timeout |
+
+Set **Sticky timeout (minutes)** on that combo to **1–1440 minutes** (default 5).
+It is used only in Sticky mode. Basic/Smart hints expire after 30 idle minutes.
+Successful requests renew hints; streams establish/renew them only when the body
+finishes successfully, not when response headers arrive. Failures or cancellation
+do not establish a new hint. On a miss, expiry, or unavailable target, the normal
+strategy chooses the start. Round robin still advances exactly once per request,
+even on affinity hits. An affinity hit starts configured cyclic fallback at the
+remembered step, trying each enabled step at most once; permanent errors still
+stop routing, and streaming never switches after commitment.
+
+For Basic/Smart, prefer a gateway-only header:
+
+```http
+X-SparkRouter-Session-Id: client-generated-stable-chat-id
+```
+
+Supported header precedence is `X-SparkRouter-Session-Id`,
+`X-SparkRouter-Conversation-Id`, `session-id`, then `X-Session-Id` (case-insensitive).
+If the selected header is absent/blank, string `session_id`, `conversation_id`,
+or `chat_id` fields in the request body, then in its `metadata` object, are checked
+in that order. Blank/null body fields mean absent; other types, control characters,
+or IDs longer than 256 bytes are rejected in Basic/Smart. IDs are trimmed and
+case-sensitive. Header IDs are not forwarded upstream. Body extension fields are
+preserved by the OpenAI adapter, so use a header if your upstream rejects them.
+No identifiers are extracted from prompt text, tool-call IDs, `user`, or
+`x-request-id`. The Test chat page generates a page-local session ID and replaces
+it on New chat or combo changes.
+
+Hints are isolated by combo and generated gateway-key ID. Clients sharing the
+environment key share one namespace, and unauthenticated clients share another;
+use separate generated keys for caller isolation. Smart fingerprints preserve
+exact message/tool content but ignore JSON object-key ordering. Identical initial
+prompts can share a hint; this is not proof that they are the same conversation.
+Without a first user message, Smart falls back to normal selection.
+
+This is **placement affinity for upstream prompt caches**, not response caching,
+cache-hit prediction, or a guarantee of lower bills. It works with logging Off
+and never reads saved request bodies. Only keyed fingerprints and routing IDs
+are retained in a bounded process-local map (up to 4096 hints), not raw IDs,
+prompts, or API secrets. Hints reset on restart, are invalidated by combo/step
+edits, and may be evicted at capacity. Concurrent cold requests can select
+different targets before either finishes. Mode/timeout configuration persists in
+SQLite and survives duplication/export/import; new and upgraded combos default
+to Off.
 
 The Combos list has a **Copy** button beside each name for its `combo/<name>`
 model ID. **Duplicate** creates an independent combo with the same ordered steps
@@ -353,7 +410,9 @@ counts. Explicit zero remains zero. USD spend is shown only when explicitly
 reported as USD; non-USD or missing prices are not estimated and display as
 unknown. Clearing history clears these statistics, not lifetime totals.
 
-**Settings → Backup & restore** (`/settings`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
+**Settings → Backup & restore** (`/settings`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Combo affinity modes and
+Sticky timeouts are included; older version 1 files without those fields default
+to Off and 5 minutes. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
 Group slugs are exported too. Version 1 documents without a slug remain accepted;
 imports preserve requested slugs when available and add a suffix on conflicts.
 Check the imported provider's displayed slug before updating client model IDs.
@@ -415,6 +474,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-Only `/v1/chat/completions` and `/v1/models` are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. No embeddings, Responses API, Gemini, OAuth, routing optimization, price optimization, queues, caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+Only `/v1/chat/completions` and `/v1/models` are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No embeddings, Responses API, Gemini, OAuth, adaptive routing optimization, price optimization, queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
 Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow in this version.

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
 use crate::db::{
-    combos::{self, Strategy},
+    combos::{self, AffinityMode, AffinityOptions, Strategy},
     provider_groups::ConnectionGroup,
     providers::Provider,
 };
@@ -34,6 +34,7 @@ pub(crate) struct ComboRow {
     name: String,
     step_summary: String,
     strategy_label: String,
+    affinity_label: String,
 }
 
 #[derive(Template)]
@@ -41,6 +42,8 @@ pub(crate) struct ComboRow {
 pub(crate) struct ComboNewPage {
     app_name: &'static str,
     csrf_token: String,
+    affinity_mode: String,
+    sticky_minutes: String,
 }
 
 #[derive(Template)]
@@ -53,6 +56,8 @@ pub(crate) struct ComboEditPage {
     /// Stored strategy as its form value (`as_str`) so the select can mark
     /// the matching option selected.
     strategy: String,
+    affinity_mode: String,
+    sticky_minutes: String,
     steps: Vec<StepRow>,
     provider_groups: Vec<ProviderGroup>,
     providers: Vec<ProviderOption>,
@@ -104,6 +109,10 @@ pub(crate) struct ComboForm {
     /// `priority`, while edits preserve the stored strategy.
     #[serde(default)]
     strategy: Option<String>,
+    #[serde(default)]
+    affinity_mode: Option<String>,
+    #[serde(default)]
+    sticky_minutes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,6 +134,11 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
                 n => format!("{n} steps"),
             },
             strategy_label: combo.strategy.label().to_owned(),
+            affinity_label: if combo.affinity.mode == AffinityMode::Sticky {
+                format!("Sticky · {} min", combo.affinity.sticky_minutes)
+            } else {
+                format!("Affinity: {}", combo.affinity.mode.label())
+            },
             id: combo.id,
             name: combo.name,
         });
@@ -140,6 +154,8 @@ pub(crate) async fn new(State(state): State<AppState>) -> Result<Html<String>, A
     render(ComboNewPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
+        affinity_mode: AffinityMode::Off.as_str().to_owned(),
+        sticky_minutes: AffinityOptions::default().sticky_minutes.to_string(),
     })
 }
 
@@ -151,7 +167,9 @@ pub(crate) async fn create(
     let name = validate_combo_name(&form.name)?;
     // Parse before the insert so an unknown value is a 400, never a row.
     let strategy = parse_strategy(form.strategy.as_deref())?.unwrap_or(Strategy::Priority);
-    let combo = crate::db::combos::create_with_strategy(&state.db, &name, strategy).await?;
+    let affinity = parse_affinity(&form)?.unwrap_or_default();
+    let combo =
+        crate::db::combos::create_with_options(&state.db, &name, strategy, affinity).await?;
     Ok(see_other(&format!("/combos/{}", combo.id)))
 }
 
@@ -167,6 +185,8 @@ pub(crate) async fn edit(
         combo_id: combo.id,
         combo_name: combo.name,
         strategy: combo.strategy.as_str().to_owned(),
+        affinity_mode: combo.affinity.mode.as_str().to_owned(),
+        sticky_minutes: combo.affinity.sticky_minutes.to_string(),
         steps,
         provider_groups,
         providers,
@@ -183,7 +203,9 @@ pub(crate) async fn rename(
     // Parse before the write so an unknown value is a 400 without applying
     // a partial rename; `None` preserves the stored strategy.
     let strategy = parse_strategy(form.strategy.as_deref())?;
-    crate::db::combos::update(&state.db, &id, &name, strategy).await?;
+    let affinity = parse_affinity(&form)?;
+    crate::db::combos::update_with_options(&state.db, &id, &name, strategy, affinity).await?;
+    state.affinity.forget(&id);
     Ok(see_other(&format!("/combos/{id}")))
 }
 
@@ -197,6 +219,7 @@ pub(crate) async fn delete(
     // The combo's rotation cursor can no longer be reused; drop it so a
     // future combo with the same id starts fresh.
     state.round_robin.forget(&id);
+    state.affinity.forget(&id);
     Ok(see_other("/combos"))
 }
 
@@ -470,6 +493,25 @@ fn connection_label(
     format!("{} / {}", group_name, provider.name)
 }
 
+fn parse_affinity(form: &ComboForm) -> Result<Option<AffinityOptions>, AppError> {
+    if form.affinity_mode.is_none() && form.sticky_minutes.is_none() {
+        return Ok(None);
+    }
+    let mode = AffinityMode::parse(form.affinity_mode.as_deref().unwrap_or("off").trim())?;
+    let sticky_minutes = match &form.sticky_minutes {
+        Some(value) => value.trim().parse::<u32>().map_err(|_| {
+            AppError::InvalidRequest("sticky timeout must be 1–1440 minutes".into())
+        })?,
+        None => AffinityOptions::default().sticky_minutes,
+    };
+    let options = AffinityOptions {
+        mode,
+        sticky_minutes,
+    };
+    options.validate()?;
+    Ok(Some(options))
+}
+
 /// Parses the optional strategy form field, rejecting unknown values before
 /// any database write. A missing or blank value yields `None`: creation then
 /// defaults to `priority`, while updates preserve the stored strategy.
@@ -611,6 +653,7 @@ mod tests {
                 name: "default".to_string(),
                 step_summary: "2 steps".to_string(),
                 strategy_label: "Round robin".to_string(),
+                affinity_label: "Affinity: Off".to_string(),
             }],
         }
         .render()
@@ -652,6 +695,8 @@ mod tests {
         let new = ComboNewPage {
             app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
+            affinity_mode: "off".into(),
+            sticky_minutes: "5".into(),
         }
         .render()
         .unwrap();
@@ -669,6 +714,8 @@ mod tests {
             combo_id: "default".to_string(),
             combo_name: "default".to_string(),
             strategy: "round_robin".to_string(),
+            affinity_mode: "smart".into(),
+            sticky_minutes: "7".into(),
             steps: vec![StepRow {
                 id: "s1".to_string(),
                 provider_id: "p1".to_string(),
@@ -702,6 +749,43 @@ mod tests {
             "only the stored strategy may be selected"
         );
         assert!(edit.contains("Save changes"));
+        // Full-width, compact settings share the same four fields on both pages.
+        // Help buttons never submit forms, and descriptions live in linked
+        // tooltip regions instead of taking space as always-visible hints.
+        for page in [&new, &edit] {
+            assert!(page.contains("class=\"card combo-settings\""));
+            assert!(page.contains("class=\"combo-settings-grid\""));
+            let settings = page
+                .split("class=\"card combo-settings\"")
+                .nth(1)
+                .unwrap()
+                .split("</form>")
+                .next()
+                .unwrap();
+            assert_eq!(settings.matches("class=\"combo-field\"").count(), 4);
+            assert_eq!(
+                settings
+                    .matches("class=\"info-button\" type=\"button\"")
+                    .count(),
+                4
+            );
+            assert!(!settings.contains("<p class=\"hint\">"));
+            for id in ["name-help", "strategy-help", "affinity-help", "sticky-help"] {
+                assert_eq!(
+                    page.matches(&format!("id=\"{id}\" role=\"tooltip\""))
+                        .count(),
+                    1
+                );
+                assert!(settings.contains(&format!("aria-describedby=\"{id}\"")));
+            }
+            assert!(settings.contains("name=\"_csrf\""));
+            assert!(
+                settings.contains("name=\"sticky_minutes\" type=\"number\" min=\"1\" max=\"1440\"")
+            );
+        }
+        assert!(edit.contains("id=\"steps-help\" role=\"tooltip\""));
+        assert!(edit.contains("id=\"add-step-help\" role=\"tooltip\""));
+        assert!(!edit.contains("<p class=\"hint\">Order defines"));
         // Provider and connection are separate pickers. The connection still
         // posts its id, and a disabled connection stays labeled as skipped.
         assert!(edit.contains("<label for=\"provider_group\">Provider</label>"));

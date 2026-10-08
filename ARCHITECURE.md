@@ -16,7 +16,8 @@ OpenAI client ──> /v1/* ──> combo or direct model ──> protocol adapt
 There is one Cargo package with a library (`src/lib.rs`) and executable
 (`src/main.rs`). The library lets integration tests exercise the actual router
 without starting a separate gateway process. No frontend service, distributed
-state, cache, queue, or routing worker is involved.
+state, response cache, queue, or routing worker is involved. Optional combo
+placement hints are bounded process-local state, not saved prompt/completion data.
 
 ## Module boundaries
 
@@ -35,6 +36,7 @@ state, cache, queue, or routing worker is involved.
 | `api/models.rs` | Scoped OpenAI model discovery with optional cached token limits; combos inherit first configured step details |
 | `routing/mod.rs` | Combo-or-direct dispatch, shared attempt execution/traces, and pre-commit deadlines |
 | `routing/combo.rs` | Sequential combo fallback loop and retryable status helper |
+| `routing/affinity.rs` | Per-caller/combo session, prompt, and timed placement hints; successful-body recording |
 | `routing/direct.rs` | Direct model lookup and the same pre-commit fallback policy |
 | `providers/mod.rs` | Protocol selection, authentication, bounded HTTP bodies and stream commitment |
 | `providers/openai.rs` | OpenAI passthrough and terminal SSE tracking |
@@ -62,12 +64,44 @@ round-robin cursors are ephemeral shared runtime state, protected by a short
 mutex reservation with no lock held during database or upstream I/O. They reset
 on process restart and dashboard deletion removes the combo's cursor.
 
+A second short mutex protects at most 4096 affinity entries. The key includes
+combo ID, routing revision, authenticated caller namespace, and a domain-separated
+master-key HMAC of the explicit session ID or Smart prompt. Sticky uses a fixed
+identity within that caller/combo namespace. Only routing target IDs, digests,
+and monotonic expiry/last-success instants are retained. No locks span I/O, and
+expiry/oldest-entry eviction runs inline; there is no worker or history dependency.
+Basic/Smart expire 30 minutes after last success; Sticky uses the combo's 1–1440
+minute timeout. Generated keys have distinct namespaces; environment-key and
+open access each share one namespace. Concurrent misses are not serialized
+through upstream completion.
+
+Affinity overrides the reserved strategy start, not its accounting or retry
+policy. Round robin still reserves exactly once per request. Enabled steps are
+snapshotted before preference lookup, target step/connection/model are matched,
+and fallback follows configured cyclic order from a hit. Provider enablement is
+rechecked before calls. Retryable failures clear that request's hint before
+fallback; a successful backup becomes the new target. Non-streaming adapters
+already validate/buffer success; streaming bodies are wrapped without changing
+bytes/errors and only successful EOF establishes/renews affinity. Body error or
+drop does not establish a new hint or re-enter fallback.
+
+`api/chat.rs` and `web/test.rs` pass authenticated caller context and one selected
+session header into routing; no bearer header is retained or forwarded. Basic
+uses explicit header/body IDs; Smart additionally fingerprints consecutive
+initial system/developer messages, the first user message, and tools using exact
+JSON content (ordered object maps). Serialized fingerprint material is temporary
+and zeroizing. IDs are bounded/validated with sanitized errors, never logged.
+Off/Sticky ignore session fields for routing. Header precedence and accepted
+body fields are documented in the README. Smart requires a first user message
+and is a conservative placement hint, not conversation identity or evidence of
+an upstream cache hit.
+
 ## Persistence model
 
 | Table | Important columns and constraints |
 | --- | --- |
 | `providers` | UUID string ID, name, base URL, protocol, encrypted key blob, enabled flag, creation/update timestamps |
-| `combos` | UUID string ID, unique name, strategy (`priority`/`round_robin`/`random`), creation/update timestamps |
+| `combos` | UUID string ID, unique name, strategy (`priority`/`round_robin`/`random`), affinity mode (`off`/`basic`/`smart`/`sticky`), Sticky minutes (1–1440), routing revision, creation/update timestamps |
 | `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
@@ -99,6 +133,11 @@ Step target edits update the existing row in the same immediate transaction,
 preserving its ID, combo, position, and the combo's strategy. Invalid connections
 or cross-combo step IDs never mutate configuration.
 Timestamps are updated on edits; provider creation time is preserved by upserts.
+An additive migration defaults existing combos to affinity Off and a 5-minute
+Sticky timeout. Name/strategy/affinity and step mutations increment the routing
+revision, so an in-flight old snapshot cannot seed hints for an edited combo.
+Dashboard combo edits/deletion also clear hints; older revisions expire naturally.
+Duplication copies settings but uses fresh combo/step IDs and no runtime hints.
 
 Routing snapshots the ordered step list, then loads each provider as its attempt
 begins. Changes made during an active request are not a single transactional
@@ -476,7 +515,9 @@ connections have empty credential blobs and start disabled, regardless of their
 exported enabled flag. Endpoints must be reviewed and credentials set before
 enabling. Provider groups, including distinct groups sharing an endpoint and empty
 groups, and combo strategy/step ordering survive transfer. This is not a database
-backup or master-key rotation mechanism.
+backup or master-key rotation mechanism. Combo affinity mode and Sticky minutes
+are optional version 1 fields (older files default to Off/5 minutes), validated
+before writes and preserved on transfer. Runtime hints are never exported.
 
 - Add protocols in `src/providers/` with explicit request/JSON/SSE translation,
   preserving the existing retry and commitment contracts.

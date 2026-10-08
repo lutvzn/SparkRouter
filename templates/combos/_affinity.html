@@ -1,0 +1,25 @@
+<div class="combo-field">
+  <div class="field-label">
+    <label for="affinity_mode">Cache-aware / sticky routing</label>
+    {% let info_id = "affinity-help" %}
+    {% let info_label = "About cache-aware and sticky routing" %}
+    {% let info_text = "Off uses the strategy above. Basic prefers the same connection/model for the same explicit session ID. Smart also fingerprints the initial system/developer messages, first user message, and tools when no session ID is supplied. Session/prompt hints expire after 30 idle minutes. For Basic/Smart, send a session-id or X-SparkRouter-Session-Id header (gateway-only), or a string session_id in the request or its metadata. IDs are isolated by gateway key; clients sharing one key share its affinity namespace." %}
+    {% include "combos/_info.html" %}
+  </div>
+  <select id="affinity_mode" name="affinity_mode" required>
+    <option value="off"{% if affinity_mode == "off" %} selected{% endif %}>Off</option>
+    <option value="basic"{% if affinity_mode == "basic" %} selected{% endif %}>Basic</option>
+    <option value="smart"{% if affinity_mode == "smart" %} selected{% endif %}>Smart</option>
+    <option value="sticky"{% if affinity_mode == "sticky" %} selected{% endif %}>Sticky</option>
+  </select>
+</div>
+<div class="combo-field">
+  <div class="field-label">
+    <label for="sticky_minutes">Sticky timeout (minutes)</label>
+    {% let info_id = "sticky-help" %}
+    {% let info_label = "About the Sticky timeout" %}
+    {% let info_text = "Used only in Sticky mode: prefer this caller's last successful connection/model for this combo within 1–1440 minutes, regardless of session. Default: 5 minutes. Successful requests renew the timeout. Hints reset on restart or combo edits; retryable failures still fall back, and streams never switch after commitment." %}
+    {% include "combos/_info.html" %}
+  </div>
+  <input id="sticky_minutes" name="sticky_minutes" type="number" min="1" max="1440" required value="{{ sticky_minutes }}">
+</div>

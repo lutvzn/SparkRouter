@@ -18,6 +18,25 @@ document.body.addEventListener("htmx:sendError", () => {
   showActionError("Unable to reach the gateway. Check the connection and try again.");
 });
 
+// CSS provides hover/focus help even without JavaScript. Explicitly focus on
+// tap (including browsers that do not focus clicked buttons) and allow Escape
+// to dismiss a tooltip without moving keyboard focus or the mouse pointer.
+document.querySelectorAll(".field-help").forEach((help) => {
+  const reopen = () => help.classList.remove("help-dismissed");
+  help.addEventListener("pointerenter", reopen);
+  help.addEventListener("focusin", reopen);
+  help.querySelector(".info-button").addEventListener("click", (event) => {
+    reopen();
+    event.currentTarget.focus({ preventScroll: true });
+  });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  document.querySelectorAll(".field-help").forEach((help) => {
+    help.classList.add("help-dismissed");
+  });
+});
+
 // Progressive copy buttons ship hidden in the markup and are only revealed
 // when a clipboard API is available. Plain HTTP LAN addresses need the legacy
 // copy fallback because the async Clipboard API requires a secure context.

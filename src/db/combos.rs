@@ -49,11 +49,81 @@ impl Strategy {
     }
 }
 
+/// Optional affinity overrides the strategy-selected start, not retry policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AffinityMode {
+    #[default]
+    Off,
+    Basic,
+    Smart,
+    Sticky,
+}
+
+impl AffinityMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Basic => "basic",
+            Self::Smart => "smart",
+            Self::Sticky => "sticky",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Basic => "Basic",
+            Self::Smart => "Smart",
+            Self::Sticky => "Sticky",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "off" => Ok(Self::Off),
+            "basic" => Ok(Self::Basic),
+            "smart" => Ok(Self::Smart),
+            "sticky" => Ok(Self::Sticky),
+            _ => Err(AppError::InvalidRequest(
+                "unknown combo affinity mode".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AffinityOptions {
+    pub mode: AffinityMode,
+    pub sticky_minutes: u32,
+}
+
+impl Default for AffinityOptions {
+    fn default() -> Self {
+        Self {
+            mode: AffinityMode::Off,
+            sticky_minutes: 5,
+        }
+    }
+}
+
+impl AffinityOptions {
+    pub fn validate(self) -> Result<(), AppError> {
+        if !(1..=1440).contains(&self.sticky_minutes) {
+            return Err(AppError::InvalidRequest(
+                "sticky timeout must be 1–1440 minutes".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A named fallback combo.
 pub struct Combo {
     pub id: String,
     pub name: String,
     pub strategy: Strategy,
+    pub affinity: AffinityOptions,
+    pub routing_revision: i64,
 }
 
 /// One entry in a combo's ordered fallback chain.
@@ -116,7 +186,7 @@ async fn begin_immediate(
 
 async fn touch_combo(connection: &mut sqlx::SqliteConnection, id: &str) -> Result<(), AppError> {
     sqlx::query(
-        "UPDATE combos SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        "UPDATE combos SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), routing_revision = routing_revision + 1 WHERE id = ?",
     )
     .bind(id)
     .execute(connection)
@@ -129,6 +199,11 @@ fn combo_from_row(row: &SqliteRow) -> Result<Combo, AppError> {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         strategy: Strategy::parse(&row.try_get::<String, _>("strategy")?)?,
+        affinity: AffinityOptions {
+            mode: AffinityMode::parse(&row.try_get::<String, _>("affinity_mode")?)?,
+            sticky_minutes: row.try_get("sticky_minutes")?,
+        },
+        routing_revision: row.try_get("routing_revision")?,
     })
 }
 
@@ -144,7 +219,7 @@ fn step_from_row(row: &SqliteRow) -> Result<ComboStep, AppError> {
 
 /// All combos, ordered by name.
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Combo>, AppError> {
-    let rows = sqlx::query("SELECT id, name, strategy FROM combos ORDER BY name")
+    let rows = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos ORDER BY name")
         .fetch_all(pool)
         .await?;
     rows.iter().map(combo_from_row).collect()
@@ -152,7 +227,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Combo>, AppError> {
 
 /// Look up a combo by id.
 pub async fn get(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
-    let row = sqlx::query("SELECT id, name, strategy FROM combos WHERE id = ?")
+    let row = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -164,7 +239,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
 
 /// Look up a combo by its unique name.
 pub async fn by_name(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
-    let row = sqlx::query("SELECT id, name, strategy FROM combos WHERE name = ?")
+    let row = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE name = ?")
         .bind(name)
         .fetch_optional(pool)
         .await?;
@@ -185,16 +260,30 @@ pub async fn create_with_strategy(
     name: &str,
     strategy: Strategy,
 ) -> Result<Combo, AppError> {
+    create_with_options(pool, name, strategy, AffinityOptions::default()).await
+}
+
+pub async fn create_with_options(
+    pool: &SqlitePool,
+    name: &str,
+    strategy: Strategy,
+    affinity: AffinityOptions,
+) -> Result<Combo, AppError> {
     validate_name(name)?;
+    affinity.validate()?;
     let combo = Combo {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_owned(),
         strategy,
+        affinity,
+        routing_revision: 0,
     };
-    let result = sqlx::query("INSERT INTO combos (id, name, strategy) VALUES (?1, ?2, ?3)")
+    let result = sqlx::query("INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?)")
         .bind(&combo.id)
         .bind(&combo.name)
         .bind(combo.strategy.as_str())
+        .bind(combo.affinity.mode.as_str())
+        .bind(combo.affinity.sticky_minutes)
         .execute(pool)
         .await;
     match result {
@@ -209,7 +298,7 @@ pub async fn create_with_strategy(
 /// Duplicate a combo and its ordered steps atomically, using a unique copy name.
 pub async fn duplicate(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
     let mut transaction = begin_immediate(pool).await?;
-    let source = sqlx::query("SELECT id, name, strategy FROM combos WHERE id = ?")
+    let source = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE id = ?")
         .bind(id)
         .fetch_optional(&mut *transaction)
         .await?
@@ -236,11 +325,15 @@ pub async fn duplicate(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         strategy: source.strategy,
+        affinity: source.affinity,
+        routing_revision: 0,
     };
-    sqlx::query("INSERT INTO combos (id, name, strategy) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?)")
         .bind(&combo.id)
         .bind(&combo.name)
         .bind(combo.strategy.as_str())
+        .bind(combo.affinity.mode.as_str())
+        .bind(combo.affinity.sticky_minutes)
         .execute(&mut *transaction)
         .await?;
     let rows = sqlx::query(
@@ -280,16 +373,34 @@ pub async fn update(
     name: &str,
     strategy: Option<Strategy>,
 ) -> Result<(), AppError> {
+    update_with_options(pool, id, name, strategy, None).await
+}
+
+pub async fn update_with_options(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    strategy: Option<Strategy>,
+    affinity: Option<AffinityOptions>,
+) -> Result<(), AppError> {
     validate_name(name)?;
+    if let Some(options) = affinity {
+        options.validate()?;
+    }
     let result = sqlx::query(
         "UPDATE combos
          SET name = ?,
              strategy = COALESCE(?, strategy),
+             affinity_mode = COALESCE(?, affinity_mode),
+             sticky_minutes = COALESCE(?, sticky_minutes),
+             routing_revision = routing_revision + 1,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?",
     )
     .bind(name)
     .bind(strategy.map(|strategy| strategy.as_str()))
+    .bind(affinity.map(|options| options.mode.as_str()))
+    .bind(affinity.map(|options| options.sticky_minutes))
     .bind(id)
     .execute(pool)
     .await;
@@ -310,6 +421,7 @@ pub async fn set_strategy(pool: &SqlitePool, id: &str, strategy: Strategy) -> Re
     let result = sqlx::query(
         "UPDATE combos
          SET strategy = ?,
+             routing_revision = routing_revision + 1,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?",
     )
