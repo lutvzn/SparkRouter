@@ -55,7 +55,7 @@ pub(crate) async fn route_with_trace(
         if let Some(name) = model.strip_prefix("combo/") {
             combo::route_with_trace(state, name, body, context, attempts).await
         } else {
-            direct::route_with_trace(state, model, body, attempts).await
+            direct::route_with_trace(state, model, body, context, attempts).await
         }
     })
     .await;

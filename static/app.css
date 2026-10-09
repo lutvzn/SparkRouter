@@ -229,6 +229,13 @@ main > h2:first-child, .card > h2:first-child { margin-top: 0; }
 }
 
 .provider-toolbar { justify-content: space-between; align-items: flex-end; }
+.provider-tag-filters { display: flex; flex-wrap: wrap; gap: 0.5rem 0.8rem; border: 0; padding: 0; margin: 0; min-width: 0; }
+.provider-tag-filters legend { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem; }
+.provider-tag-filters label { display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; font-size: 0.85rem; white-space: nowrap; }
+.provider-tag-filters input[type="checkbox"] { margin: 0; }
+.provider-toolbar .provider-tag-filters { flex: 1 1 24rem; }
+.provider-tags-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1rem; margin-top: 1rem; }
+.provider-capability-tag { color: var(--accent); }
 .provider-search { flex: 1 1 16rem; max-width: 28rem; margin: 0; }
 .provider-search-label { display: block; margin: 0 0 0.25rem; font-weight: 600; font-size: 0.9rem; }
 .provider-search-field {
@@ -1050,6 +1057,11 @@ main.test-chat-page { max-width: 56rem; margin-top: 1rem; }
 .test-msg-author { margin: 0 0 0.45rem; font-size: 0.75rem; font-weight: 600; color: var(--muted); }
 .test-msg-body { margin: 0; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .test-chat-bottom { position: sticky; bottom: 0; padding: 0.5rem 0; background: var(--bg); }
+.test-chat-bottom:has(.test-evaluation:not([hidden])) { position: static; }
+.test-evaluation textarea { font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; width: 100%; resize: vertical; }
+.test-evaluation .hint { margin-top: 0; }
+.test-msg-body { max-width: 100%; }
+.test-compose-row:has(input[hidden]) { justify-content: flex-end; }
 .test-routing { margin-bottom: 0.75rem; }
 .test-routing summary .hint { margin-left: 0.5rem; font-weight: 400; }
 .test-attempts { margin-top: 0.75rem; max-height: 14rem; overflow: auto; }

@@ -302,7 +302,8 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
     assert!(page.contains("<title>SparkRouter :: Test</title>"));
     assert!(page.contains("class=\"test-chat-shell\""));
     assert!(page.contains("What would you like to try?"));
-    assert!(page.contains("switching combos starts a new chat."));
+    assert!(page.contains("switching combos or modes clears results."));
+    assert!(page.contains("<option value=\"systemone\">SystemOne</option>"));
     assert!(!page.contains("Follow-up messages keep the context."));
     assert!(page.contains("<details class=\"test-routing\">"));
     assert!(!page.contains("Enter to send"));
@@ -311,7 +312,10 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
     assert!(!page.contains("self-hosted LLM gateway with ordered fallback combos"));
     assert!(page.contains("<input id=\"test-draft\" type=\"text\""));
     assert!(page.contains("class=\"test-compose-row\""));
-    assert!(!page.contains("<textarea"));
+    assert!(!page.contains("<textarea id=\"test-draft\""));
+    assert!(page.contains("id=\"test-evaluation\" class=\"test-evaluation\" hidden"));
+    assert!(page.contains("<textarea id=\"test-state\""));
+    assert!(page.contains("<textarea id=\"test-questions\""));
     assert!(page.find("id=\"test-log\"").unwrap() < page.find("id=\"test-form\"").unwrap());
     let nav_start = page
         .find("<nav aria-label=\"Dashboard\">")

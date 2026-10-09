@@ -17,12 +17,18 @@
       <input id="provider-search" type="search" placeholder="Filter by name" autocomplete="off" enterkeyhint="search" aria-controls="provider-grid">
     </span>
   </label>
+  <fieldset class="provider-tag-filters" aria-controls="provider-grid">
+    <legend>Tags (match any)</legend>
+    {% for tag in self.tag_options() %}
+    <label><input type="checkbox" value="{{ tag.value }}" data-provider-tag-filter> {{ tag.label }}</label>
+    {% endfor %}
+  </fieldset>
   <a class="btn primary" href="/providers/new"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Add custom provider</a>
 </div>
 <p id="provider-search-empty" class="provider-search-empty" hidden>No providers match.</p>
 <div id="provider-grid" class="provider-grid">
   {% for t in tiles %}
-  <a class="provider-tile" href="{{ t.href }}">
+  <a class="provider-tile" href="{{ t.href }}" data-provider-tags="{{ t.tag_values() }}">
     <span class="provider-tile-heading">
       <span class="provider-initial" aria-hidden="true">{{ t.name|first_char }}</span>
       <span class="provider-title-row">
@@ -30,8 +36,9 @@
       </span>
     </span>
     <span class="provider-tile-meta">
-      <span class="badge">{% if t.protocol == "openai" %}OpenAI{% else %}Anthropic{% endif %}</span>
+      <span class="badge">{% if t.protocol == "openai" %}OpenAI{% else if t.protocol == "systemone" %}SystemOne{% else %}Anthropic{% endif %}</span>
       {% if t.is_custom %}<span class="badge">Custom</span>{% endif %}
+      {% for tag in t.tag_labels() %}<span class="badge provider-capability-tag">{{ tag.label }}</span>{% endfor %}
     </span>
     {% if t.connection_count == 0 %}
     <span class="provider-tile-status"><span class="badge">not connected</span></span>

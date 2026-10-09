@@ -24,6 +24,12 @@ pub(crate) struct Preset {
 /// Well-known gateways, in dashboard display order.
 pub(crate) const PRESETS: &[Preset] = &[
     Preset {
+        slug: "typesafe",
+        name: "TypeSafe AI",
+        base_url: "https://api.typesafe.ai/v1",
+        protocol: Protocol::SystemOne,
+    },
+    Preset {
         slug: "openai",
         name: "OpenAI",
         base_url: "https://api.openai.com/v1",
@@ -1158,7 +1164,8 @@ mod tests {
         assert_eq!(groq.protocol, Protocol::OpenAi);
         assert!(find("Groq").is_none());
         assert!(find("unknown-provider").is_none());
-        assert_eq!(PRESETS.len(), 171);
+        assert_eq!(PRESETS.len(), 172);
+        assert_eq!(find("typesafe").unwrap().protocol, Protocol::SystemOne);
         assert_eq!(find("xai").expect("xai").name, "xAI (Grok)");
         assert_eq!(find("poe").expect("poe").base_url, "https://api.poe.com/v1");
         assert_eq!(
@@ -1223,7 +1230,7 @@ mod tests {
             assert!(slugs.insert(slug), "duplicate routing slug {slug}");
             assert!(!slug.starts_with("combo/"));
         }
-        assert_eq!(slugs.len(), 171);
+        assert_eq!(slugs.len(), 172);
         assert_eq!(find("openrouter").unwrap().routing_slug(), "openrouter");
         assert_eq!(find("deepseek").unwrap().routing_slug(), "ds");
     }

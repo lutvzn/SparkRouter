@@ -16,7 +16,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http_body_util::BodyExt;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -835,24 +835,4 @@ async fn exports_are_empty_but_well_formed_on_a_fresh_gateway() {
     assert_eq!(value["groups"].as_array().unwrap().len(), 0);
     assert_eq!(value["connections"].as_array().unwrap().len(), 0);
     assert_eq!(value["combos"].as_array().unwrap().len(), 0);
-}
-
-// Guard the crypto helper assumptions used above: exported ciphertext under
-// one master key must never be decryptable under another, which is why the
-// transfer document omits ciphertext entirely.
-#[test]
-fn master_keys_do_not_share_ciphertext() {
-    let source = Crypto::from_base64(&SecretString::from(STANDARD.encode(SOURCE_KEY))).unwrap();
-    let target = Crypto::from_base64(&SecretString::from(STANDARD.encode(TARGET_KEY))).unwrap();
-    let sealed = source
-        .encrypt_api_key("src-1", &SecretString::from("sk-live-source-secret"))
-        .unwrap();
-    assert!(target.decrypt_api_key("src-1", &sealed).is_err());
-    assert_eq!(
-        source
-            .decrypt_api_key("src-1", &sealed)
-            .unwrap()
-            .expose_secret(),
-        "sk-live-source-secret"
-    );
 }

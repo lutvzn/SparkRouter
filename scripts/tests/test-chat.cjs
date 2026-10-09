@@ -30,7 +30,8 @@ class Element {
   }
 }
 const ids = ['test-form', 'test-csrf', 'test-combo', 'test-key', 'test-draft',
-  'test-send', 'test-reset', 'test-status', 'test-error', 'test-log', 'test-attempt-list'];
+  'test-send', 'test-reset', 'test-status', 'test-error', 'test-log', 'test-attempt-list',
+  'test-mode', 'test-evaluation', 'test-state', 'test-questions'];
 const nodes = Object.fromEntries(ids.map(id => [id, new Element()]));
 const empty = new Element();
 const attemptsEmpty = new Element();
@@ -38,6 +39,7 @@ const windowListeners = {};
 const requests = [];
 let fail = false;
 let resolveFetch;
+nodes['test-mode'].value = 'chat';
 nodes['test-combo'].value = 'coding';
 nodes['test-csrf'].value = 'csrf-fixture';
 nodes['test-key'].value = 'gateway-fixture';
@@ -56,7 +58,9 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../static/test-chat.
       resolveFetch = () => resolve({ ok: !fail, status: fail ? 502 : 200,
         json: async () => fail
           ? { error: { message: 'Provider unavailable' }, attempts: [] }
-          : { completion: { choices: [{ message: { content: '<script>plain text</script>' } }] }, attempts: [] },
+          : { completion: url === '/test/systemone'
+              ? { model: 'jev-1.13.0', answers: { urgent: { type: 'noul', noul: 0.95 } }, extension: '<script>safe</script>' }
+              : { choices: [{ message: { content: '<script>plain text</script>' } }] }, attempts: [] },
       });
     });
   },
@@ -115,8 +119,50 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
   assert.notEqual(requests[2].options.headers['X-SparkRouter-Session-Id'], session);
   resolveFetch();
   await settle();
+  fail = false;
+  nodes['test-mode'].value = 'systemone';
+  nodes['test-mode'].listeners.change();
+  assert.equal(draft.hidden, true);
+  assert.equal(nodes['test-evaluation'].hidden, false);
+  assert.equal(nodes['test-send'].textContent, 'Evaluate');
+  assert.equal(nodes['test-log'].children.length, 0);
+  nodes['test-state'].value = 'not json';
+  nodes['test-questions'].value = '{}';
+  nodes['test-form'].listeners.submit({ preventDefault() {} });
+  assert.equal(requests.length, 3);
+  assert.match(nodes['test-error'].textContent, /valid JSON/);
+  nodes['test-state'].value = JSON.stringify({ text: 'Help!' });
+  nodes['test-questions'].value = JSON.stringify({ urgent: { type: 'noul', instructions: ['Urgent?'] } });
+  nodes['test-state'].listeners.input();
+  nodes['test-form'].listeners.submit({ preventDefault() {} });
+  assert.equal(requests[3].url, '/test/systemone');
+  assert.deepEqual(requests[3].body.state, { text: 'Help!' });
+  assert.equal('messages' in requests[3].body, false);
+  assert.equal(nodes['test-mode'].disabled, true);
+  resolveFetch();
+  await settle();
+  const result = nodes['test-log'].children[0];
+  assert.equal(result.children[0].textContent, 'SystemOne result');
+  assert.match(result.children[1].textContent, /"noul": 0.95/);
+  assert.match(result.children[1].textContent, /<script>safe<\/script>/);
+  assert.equal(nodes['test-state'].value, JSON.stringify({ text: 'Help!' }));
+  fail = true;
+  nodes['test-form'].listeners.submit({ preventDefault() {} });
+  resolveFetch();
+  await settle();
+  assert.equal(nodes['test-log'].children.length, 1);
+  assert.equal(nodes['test-error'].textContent, 'Provider unavailable');
+  nodes['test-reset'].listeners.click();
+  assert.equal(nodes['test-log'].children.length, 0);
+  assert.equal(nodes['test-state'].focused, true);
+  nodes['test-mode'].value = 'chat';
+  nodes['test-mode'].listeners.change();
+  assert.equal(draft.hidden, false);
+  assert.equal(nodes['test-evaluation'].hidden, true);
   windowListeners.pagehide();
+  assert.equal(nodes['test-state'].value, '');
+  assert.equal(nodes['test-questions'].value, '');
   assert.equal(nodes['test-key'].value, '');
   assert.equal(draft.value, '');
-  console.log('Test chat checks passed: keyboard/IME, busy guard, context, safe text, retry, reset, key cleanup.');
+  console.log('Test playground checks passed: chat keyboard/context, SystemOne JSON/payload/results, mode switching, busy guard, safe text, retry, reset, secret cleanup.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

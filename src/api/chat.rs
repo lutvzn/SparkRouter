@@ -12,6 +12,25 @@ pub(crate) async fn complete(
     headers: axum::http::HeaderMap,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    execute(state, auth, headers, payload, false).await
+}
+
+pub(crate) async fn systemone(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::app::Authorization>,
+    headers: axum::http::HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    execute(state, auth, headers, payload, true).await
+}
+
+async fn execute(
+    state: AppState,
+    auth: crate::app::Authorization,
+    headers: axum::http::HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
+    systemone: bool,
+) -> Result<Response, AppError> {
     let started = std::time::Instant::now();
     let Json(body) = payload.map_err(|error| AppError::RequestBody(error.status()))?;
     if !body.is_object() {
@@ -30,6 +49,26 @@ pub(crate) async fn complete(
     if body.get("stream").is_some_and(|v| !v.is_boolean()) {
         return Err(AppError::InvalidRequest("stream must be a boolean".into()));
     }
+    if systemone {
+        if !body
+            .get("state")
+            .is_some_and(|state| state.is_string() || state.is_object() || state.is_array())
+        {
+            return Err(AppError::InvalidRequest(
+                "state must be a string, object, or array".into(),
+            ));
+        }
+        if body.get("questions").and_then(Value::as_object).is_none() {
+            return Err(AppError::InvalidRequest(
+                "questions must be an object".into(),
+            ));
+        }
+        if body.get("stream").and_then(Value::as_bool) == Some(true) {
+            return Err(AppError::InvalidRequest(
+                "SystemOne does not support streaming".into(),
+            ));
+        }
+    }
     if !auth.access.allows(model) {
         return Err(AppError::Forbidden);
     }
@@ -40,6 +79,11 @@ pub(crate) async fn complete(
         return Err(AppError::InvalidRequest("Use model: combo/<name>".into()));
     }
     let context = routing::affinity::RequestContext::new(auth.affinity_scope(&state), &headers);
+    let context = if systemone {
+        context.for_systemone()
+    } else {
+        context
+    };
     let permit = auth.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();

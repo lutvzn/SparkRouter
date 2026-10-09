@@ -7,6 +7,7 @@ pub mod config_transfer;
 pub mod connection_models;
 pub mod provider_groups;
 pub mod provider_slugs;
+pub mod provider_tags;
 pub mod providers;
 pub mod request_history;
 pub mod request_payloads;

@@ -40,6 +40,24 @@ pub async fn chat(
     headers: HeaderMap,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    execute(state, headers, payload, false).await
+}
+
+/// Native evaluation tests share chat's authorization, admission and trace wrapper.
+pub async fn systemone(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    execute(state, headers, payload, true).await
+}
+
+async fn execute(
+    state: AppState,
+    headers: HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
+    systemone: bool,
+) -> Result<Response, AppError> {
     let started = std::time::Instant::now();
     let Json(mut body) = payload.map_err(|error| AppError::RequestBody(error.status()))?;
     super::check_csrf(
@@ -57,30 +75,61 @@ pub async fn chat(
     if !access.access.allows(&format!("combo/{name}")) {
         return Err(AppError::Forbidden);
     }
-    let messages = body
-        .get("messages")
-        .and_then(Value::as_array)
-        .filter(|messages| !messages.is_empty())
-        .ok_or_else(|| AppError::InvalidRequest("messages must be a nonempty array".into()))?;
-    if messages.iter().any(|message| {
-        !matches!(
-            message.get("role").and_then(Value::as_str),
-            Some("user" | "assistant")
-        ) || message
-            .get("content")
-            .and_then(Value::as_str)
-            .is_none_or(|content| content.trim().is_empty())
-    }) {
-        return Err(AppError::InvalidRequest(
-            "Test messages need a user or assistant role and nonempty text".into(),
-        ));
+    if systemone {
+        if !body
+            .get("state")
+            .is_some_and(|value| value.is_string() || value.is_object() || value.is_array())
+        {
+            return Err(AppError::InvalidRequest(
+                "state must be a string, object, or array".into(),
+            ));
+        }
+        if body.get("questions").and_then(Value::as_object).is_none() {
+            return Err(AppError::InvalidRequest(
+                "questions must be an object".into(),
+            ));
+        }
+        if body
+            .get("stream")
+            .is_some_and(|value| value != &Value::Bool(false))
+        {
+            return Err(AppError::InvalidRequest(
+                "SystemOne does not support streaming".into(),
+            ));
+        }
+    } else {
+        let messages = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .filter(|messages| !messages.is_empty())
+            .ok_or_else(|| AppError::InvalidRequest("messages must be a nonempty array".into()))?;
+        if messages.iter().any(|message| {
+            !matches!(
+                message.get("role").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) || message
+                .get("content")
+                .and_then(Value::as_str)
+                .is_none_or(|content| content.trim().is_empty())
+        }) {
+            return Err(AppError::InvalidRequest(
+                "Test messages need a user or assistant role and nonempty text".into(),
+            ));
+        }
     }
     let object = body
         .as_object_mut()
         .ok_or_else(|| AppError::InvalidRequest("Request must be a JSON object".into()))?;
     object.remove("_csrf");
-    object.insert("stream".into(), Value::Bool(false));
+    if !systemone {
+        object.insert("stream".into(), Value::Bool(false));
+    }
     let context = routing::affinity::RequestContext::new(access.affinity_scope(&state), &headers);
+    let context = if systemone {
+        context.for_systemone()
+    } else {
+        context
+    };
     let _permit = access.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();

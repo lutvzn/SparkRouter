@@ -36,6 +36,17 @@
       <dd><code>{{ protocol }}</code></dd>
     </div>
   </dl>
+  <form method="post" action="{{ action }}/tags" class="provider-tags-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <fieldset class="provider-tag-filters">
+      <legend>Provider tags</legend>
+      {% for tag in self.tag_options() %}
+      <label><input type="checkbox" name="{{ tag.value }}" value="1"{% if tag.selected %} checked{% endif %}> {{ tag.label }}</label>
+      {% endfor %}
+    </fieldset>
+    <button class="btn small" type="submit">Save tags</button>
+  </form>
+  <p class="hint">Tags organize the catalog only; they do not enable additional gateway APIs.</p>
   <p class="hint">Direct model ID: <code>{{ slug }}/&lt;upstream-model-id&gt;</code>. Requests stay within this provider; its enabled connections are tried oldest first. Combo steps use upstream IDs without this prefix.</p>
   {% if is_custom %}
   <p class="hint">Deleting this provider also deletes its connections. Remove any linked combo steps first.</p>

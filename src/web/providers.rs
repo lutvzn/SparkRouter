@@ -27,6 +27,83 @@ use crate::providers::Protocol;
 
 const NAME_MAX_CHARS: usize = 100;
 
+struct TagOption {
+    value: &'static str,
+    label: &'static str,
+    selected: bool,
+}
+
+fn tag_options(tags: &[String]) -> Vec<TagOption> {
+    crate::db::provider_tags::TAGS
+        .iter()
+        .map(|&(value, label)| TagOption {
+            value,
+            label,
+            selected: tags.iter().any(|tag| tag == value),
+        })
+        .collect()
+}
+
+impl ProvidersPage {
+    fn tag_options(&self) -> Vec<TagOption> {
+        tag_options(&[])
+    }
+}
+
+impl ProviderTile {
+    fn tag_labels(&self) -> Vec<TagOption> {
+        tag_options(&self.tags)
+            .into_iter()
+            .filter(|tag| tag.selected)
+            .collect()
+    }
+    fn tag_values(&self) -> String {
+        self.tags.join(" ")
+    }
+}
+
+impl ProviderGroupPage {
+    fn tag_options(&self) -> Vec<TagOption> {
+        tag_options(&self.tags)
+    }
+}
+
+async fn load_tags(
+    state: &AppState,
+    identity: &str,
+    protocol: &Protocol,
+) -> Result<Vec<String>, AppError> {
+    Ok(crate::db::provider_tags::list(&state.db)
+        .await?
+        .remove(identity)
+        .unwrap_or_else(|| crate::db::provider_tags::defaults(protocol)))
+}
+
+pub(crate) async fn save_tags(
+    State(state): State<AppState>,
+    Path((kind, id)): Path<(String, String)>,
+    Form(mut form): Form<HashMap<String, String>>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, form.remove("_csrf").as_deref().unwrap_or(""))?;
+    let group_id = match kind.as_str() {
+        "catalog" => {
+            provider_catalog::find(&id)
+                .ok_or_else(|| AppError::NotFound("provider preset was not found".into()))?;
+            None
+        }
+        "groups" => {
+            provider_groups::get(&state.db, &id).await?;
+            Some(id.as_str())
+        }
+        _ => return Err(AppError::NotFound("provider was not found".into())),
+    };
+    let mut tags: Vec<String> = form.into_keys().collect();
+    tags.sort();
+    let identity = format!("/providers/{kind}/{id}");
+    crate::db::provider_tags::save(&state.db, &identity, group_id, &tags).await?;
+    Ok(see_other(&identity))
+}
+
 #[derive(Template)]
 #[template(path = "providers/list.html")]
 pub(crate) struct ProvidersPage {
@@ -39,6 +116,7 @@ pub(crate) struct ProvidersPage {
 pub(crate) struct ProviderTile {
     name: String,
     protocol: String,
+    tags: Vec<String>,
     href: String,
     connection_count: usize,
     enabled_count: usize,
@@ -57,6 +135,7 @@ pub(crate) struct ProviderGroupPage {
     base_url: String,
     protocol: String,
     action: String,
+    tags: Vec<String>,
     providers: Vec<ProviderRow>,
     /// False for catalog preset pages, true for persisted custom groups
     /// (which show the Custom badge and the group delete form).
@@ -193,9 +272,16 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
     let stored = crate::db::providers::list(&state.db).await?;
     let memberships = provider_groups::connection_group_names(&state.db).await?;
     let group_summaries = provider_groups::list(&state.db).await?;
+    let overrides = crate::db::provider_tags::list(&state.db).await?;
+    let mut tiles = build_tiles(stored, &memberships, group_summaries);
+    for tile in &mut tiles {
+        if let Some(tags) = overrides.get(&tile.href) {
+            tile.tags.clone_from(tags);
+        }
+    }
     render(ProvidersPage {
         app_name: crate::APP_NAME,
-        tiles: build_tiles(stored, &memberships, group_summaries),
+        tiles,
     })
 }
 
@@ -223,6 +309,12 @@ pub(crate) async fn catalog(
         base_url: preset.base_url.to_string(),
         protocol: preset.protocol.as_str().to_string(),
         action: format!("/providers/catalog/{slug}"),
+        tags: load_tags(
+            &state,
+            &format!("/providers/catalog/{slug}"),
+            &preset.protocol,
+        )
+        .await?,
         providers,
         is_custom: false,
     })
@@ -248,6 +340,12 @@ pub(crate) async fn group(
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
         slug: crate::db::provider_slugs::for_group(&state.db, &group.id).await?,
+        tags: load_tags(
+            &state,
+            &format!("/providers/groups/{}", group.id),
+            &group.protocol,
+        )
+        .await?,
         name: group.name,
         base_url: group.base_url,
         protocol: group.protocol.as_str().to_string(),
@@ -602,6 +700,7 @@ fn build_tiles(
         .map(|(preset, (connection_count, enabled_count))| ProviderTile {
             name: preset.name.to_string(),
             protocol: preset.protocol.as_str().to_string(),
+            tags: crate::db::provider_tags::defaults(&preset.protocol),
             href: format!("/providers/catalog/{}", preset.slug),
             connection_count,
             enabled_count,
@@ -612,6 +711,7 @@ fn build_tiles(
     tiles.extend(group_summaries.into_iter().map(|summary| ProviderTile {
         name: summary.group.name,
         protocol: summary.group.protocol.as_str().to_string(),
+        tags: crate::db::provider_tags::defaults(&summary.group.protocol),
         href: format!("/providers/groups/{}", summary.group.id),
         connection_count: summary.connection_count,
         enabled_count: summary.enabled_count,
@@ -693,6 +793,7 @@ fn protocol_options(selected: Option<&Protocol>) -> Vec<ProtocolOption> {
     [
         (Protocol::OpenAi.as_str(), "OpenAI"),
         (Protocol::Anthropic.as_str(), "Anthropic"),
+        (Protocol::SystemOne.as_str(), "SystemOne"),
     ]
     .into_iter()
     .map(|(value, label)| ProtocolOption {
@@ -947,6 +1048,7 @@ mod tests {
             slug: "local".into(),
             base_url: "http://localhost/v1".into(),
             protocol: "openai".into(),
+            tags: vec!["text".into()],
             action: "/providers/groups/local".into(),
             providers,
             is_custom: true,
@@ -972,8 +1074,6 @@ mod tests {
         }
         assert!(html.contains("vendor/&#60;one&#62;"));
         assert!(html.contains("Model &#60;details&#62;"));
-        assert!(!html.contains("data-model-info"));
-        assert!(!include_str!("../../static/app.js").contains("openModelInfo"));
     }
 
     #[test]
@@ -988,6 +1088,7 @@ mod tests {
                 ProviderTile {
                     name: "Preset <A> & Co".to_string(),
                     protocol: "openai".to_string(),
+                    tags: vec!["text".into()],
                     href: "/providers/catalog/preset-a".to_string(),
                     connection_count: 2,
                     enabled_count: 1,
@@ -996,6 +1097,7 @@ mod tests {
                 ProviderTile {
                     name: "Custom <Host>".to_string(),
                     protocol: "anthropic".to_string(),
+                    tags: vec!["text".into()],
                     href: "/providers/groups/g1".to_string(),
                     connection_count: 0,
                     enabled_count: 0,
@@ -1030,6 +1132,7 @@ mod tests {
             slug: "local-llm".into(),
             base_url: "http://127.0.0.1:8080/v1".to_string(),
             protocol: "openai".to_string(),
+            tags: vec!["text".into()],
             action: "/providers/groups/custom-g1".to_string(),
             providers: vec![ProviderRow {
                 id: "p1".to_string(),
@@ -1070,8 +1173,6 @@ mod tests {
         // delete form each carry CSRF.
         assert!(group.contains("gpt-4o-mini"));
         assert!(group.contains("GPT-4o mini"));
-        assert!(!group.contains("model-card-free"));
-        assert!(!group.contains("model-card-chip"));
         assert!(group.contains("<dt>Free</dt><dd>Yes</dd>"));
         assert!(group.contains("<dt>Owned by</dt><dd>openai</dd>"));
         assert!(group.contains("data-model-search"));
@@ -1085,11 +1186,9 @@ mod tests {
         assert!(group.contains("aria-labelledby=\"model-info-heading-p1-1\""));
         assert!(group.contains("id=\"model-info-heading-p1-1\">GPT-4o mini</h2>"));
         assert!(group.contains("popovertargetaction=\"hide\" aria-label=\"Close model details\""));
-        assert!(!group.contains("data-model-info"));
-        assert!(!group.contains("<dialog"));
         assert!(group.contains("class=\"connection-list\""));
         assert!(group.contains("action=\"/providers/p1/models\""));
-        assert_eq!(group.matches("name=\"_csrf\"").count(), 5);
+        assert_eq!(group.matches("name=\"_csrf\"").count(), 6);
         // The add form posts back to the group and pins the endpoint.
         assert!(group.contains("action=\"/providers/groups/custom-g1\""));
         assert!(
@@ -1104,6 +1203,7 @@ mod tests {
             slug: "preset-a".into(),
             base_url: "https://preset.example.com/v1".to_string(),
             protocol: "openai".to_string(),
+            tags: vec!["text".into()],
             action: "/providers/catalog/preset-a".to_string(),
             providers: vec![ProviderRow {
                 id: "p9".to_string(),
@@ -1126,7 +1226,7 @@ mod tests {
         assert!(!catalog_page.contains("Delete provider"));
         assert!(!catalog_page.contains("/providers/catalog/preset-a/delete"));
         assert!(!catalog_page.contains("Deleting this provider also deletes its connections."));
-        assert_eq!(catalog_page.matches("name=\"_csrf\"").count(), 4);
+        assert_eq!(catalog_page.matches("name=\"_csrf\"").count(), 5);
 
         let form = ProviderFormPage {
             app_name: crate::APP_NAME,

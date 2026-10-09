@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod openai;
+pub mod systemone;
 // Framing decoder private to the provider adapters.
 pub(crate) mod sse;
 
@@ -31,6 +32,7 @@ type ResponseStream = Pin<Box<dyn Stream<Item = Result<Bytes, AttemptError>> + S
 pub enum Protocol {
     OpenAi,
     Anthropic,
+    SystemOne,
 }
 
 impl Protocol {
@@ -38,6 +40,7 @@ impl Protocol {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::SystemOne => "systemone",
         }
     }
 }
@@ -49,6 +52,7 @@ impl FromStr for Protocol {
         match value {
             "openai" => Ok(Self::OpenAi),
             "anthropic" => Ok(Self::Anthropic),
+            "systemone" => Ok(Self::SystemOne),
             _ => Err(AppError::InvalidRequest(
                 "Unsupported provider protocol".into(),
             )),
@@ -107,6 +111,7 @@ pub async fn call(
     match provider.protocol {
         Protocol::OpenAi => openai::call(client, crypto, provider, model, body).await,
         Protocol::Anthropic => anthropic::call(client, crypto, provider, model, body).await,
+        Protocol::SystemOne => systemone::call(client, crypto, provider, model, body).await,
     }
 }
 
@@ -184,7 +189,11 @@ pub async fn list_models(
         let bytes = read_model_body(response).await?;
         let body: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AppError::InvalidRequest("provider did not return a model list".into()))?;
-        let (page, next) = parse_model_page(&body)?;
+        let (page, next) = if provider.protocol == Protocol::SystemOne {
+            (systemone::parse_models(&body)?, None)
+        } else {
+            parse_model_page(&body)?
+        };
         for model in page {
             if seen.insert(model.id.clone()) {
                 models.push(model);

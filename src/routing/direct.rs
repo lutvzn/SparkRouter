@@ -17,22 +17,31 @@ use serde_json::Value;
 const MAX_MODEL_CHARS: usize = crate::db::provider_slugs::MAX_PUBLIC_MODEL_CHARS;
 
 pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Response, AppError> {
-    route_inner(state, model, body, None).await
+    route_inner(
+        state,
+        model,
+        body,
+        &super::affinity::RequestContext::default(),
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn route_with_trace(
     state: &AppState,
     model: &str,
     body: &Value,
+    context: &super::affinity::RequestContext,
     attempts: &mut Vec<super::combo::AttemptTrace>,
 ) -> Result<Response, AppError> {
-    route_inner(state, model, body, Some(attempts)).await
+    route_inner(state, model, body, context, Some(attempts)).await
 }
 
 async fn route_inner(
     state: &AppState,
     model: &str,
     body: &Value,
+    context: &super::affinity::RequestContext,
     mut attempts: Option<&mut Vec<super::combo::AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let public_model = validate_model(model)?;
@@ -67,7 +76,7 @@ async fn route_inner(
             };
         // Endpoint edits can change an unassigned connection's namespace.
         // Validate the namespace from the same snapshot as its credentials/URL.
-        if namespace != slug {
+        if namespace != slug || !context.accepts(provider.protocol) {
             continue;
         }
         if !provider.enabled {

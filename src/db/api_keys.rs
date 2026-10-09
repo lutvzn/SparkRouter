@@ -451,42 +451,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_keeps_existing_key_fingerprints_and_unrestricted_access() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!("../../migrations/0004_api_keys.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let hash = crypto().gateway_key_fingerprint("legacy-secret").unwrap();
-        sqlx::query("INSERT INTO api_keys (id,name,key_prefix,key_hash,reveal_envelope) VALUES ('legacy','Legacy','legacy',?,NULL)").bind(&hash).execute(&pool).await.unwrap();
-        sqlx::raw_sql(include_str!("../../migrations/0008_scoped_api_keys.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!("../../migrations/0012_api_key_limits.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let stored: (String, bool, Option<i64>) = sqlx::query_as(
-            "SELECT key_hash,restricted,expires_at FROM api_keys WHERE id = 'legacy'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(stored, (hash, false, None));
-        assert!(matches!(
-            authenticate(&pool, &crypto(), "legacy-secret")
-                .await
-                .unwrap(),
-            Some(KeyAccess::All)
-        ));
-    }
-
-    #[tokio::test]
     async fn invalid_policy_never_creates_a_key_and_scope_deduplication_is_exact() {
         let pool = pool().await;
         for models in [

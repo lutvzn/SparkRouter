@@ -41,6 +41,7 @@ placement hints are bounded process-local state, not saved prompt/completion dat
 | `providers/mod.rs` | Protocol selection, authentication, bounded HTTP bodies and stream commitment |
 | `providers/openai.rs` | OpenAI passthrough and terminal SSE tracking |
 | `providers/anthropic.rs` | Anthropic request, response, and event translation |
+| `providers/systemone.rs` | Native evaluation passthrough and SystemOne model-list parsing |
 | `providers/sse.rs` | Private incremental SSE framing shared by both adapters |
 
 `APP_NAME` in `src/lib.rs` centralizes the dashboard's display name. The package,
@@ -105,6 +106,7 @@ an upstream cache hit.
 | `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
+| `provider_tags` | Dashboard-only tag overrides keyed by preset/group page identity; custom group foreign key cascades deletion; JSON list of validated fixed tags |
 | `provider_slugs` | Custom group ID with cascading deletion; unique saved public slug (1–64 lowercase letters/digits/hyphens) |
 | `api_keys` | UUID string ID, display name, short prefix, master-key HMAC fingerprint, optional one-time reveal envelope, restricted flag, optional Unix expiry timestamp, optional requests/minute and concurrency limits |
 | `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
@@ -160,6 +162,7 @@ injected into generation requests or forwarded response bytes.
 The public router is mounted at `/v1` separately from the dashboard:
 
 - `POST /v1/chat/completions`
+- `POST /v1/systemone` (native, non-streaming evaluations)
 - `GET /v1/models`
 
 If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
@@ -250,7 +253,7 @@ not forwarded to the client as redirect instructions.
 
 ## Protocols rather than vendors
 
-`Protocol::{OpenAi, Anthropic}` is the dispatch boundary. The dashboard catalog
+`Protocol::{OpenAi, Anthropic, SystemOne}` is the dispatch boundary. The dashboard catalog
 is static public metadata for OmniRoute API-key chat presets whose endpoint and
 auth header match one of these adapters. OpenRouter, Groq, DeepSeek, and similar
 vendors share OpenAI handling through configuration. No trait hierarchy or
@@ -265,7 +268,9 @@ accepted. HTTP/private endpoints are intentionally allowed for self-hosted model
 | OpenAI | `{base_url}/chat/completions` | Bearer key when configured | Preserve request extensions and original valid JSON response bytes; raw SSE passthrough |
 | Anthropic | `{base_url}/messages` | `x-api-key` and `anthropic-version: 2023-06-01` | Translate messages, tools, text/image input, usage, finish reasons, and SSE to OpenAI shapes |
 
-Both protocols test connectivity with `GET {base_url}/models`. That is not a
+| SystemOne | `{base_url}/systemone` | Bearer key when configured | Preserve evaluation fields and native valid JSON response bytes; no streaming |
+
+All protocols test connectivity with `GET {base_url}/models`. That is not a
 generation test or a guarantee of access to a particular model.
 
 Anthropic translation deliberately rejects unsupported semantics rather than
@@ -273,6 +278,18 @@ pretending to provide full OpenAI parity. Its default token budget is 8192.
 Unknown extension fields can pass through, while known bookkeeping fields are
 omitted. Thinking blocks are not exposed as answer text. See the README for the
 current supported subset.
+
+SystemOne model listing reads the native `models` array with `name` IDs.
+The shared API handler applies authentication, model scopes, admission, capture,
+and history to evaluations. The request context carries endpoint compatibility:
+SystemOne routes skip chat providers and chat/Test-chat routes skip SystemOne providers,
+before strategy selection and again before attempts. SystemOne affinity namespaces
+are separate from chat. The gateway checks top-level state/questions and rejects
+streaming; question validation remains upstream. The adapter bounds and validates
+the native success envelope (`model`, `answers`, no non-null `error`) before
+commitment; invalid success bodies are retryable. Unknown fields and successful
+response bytes are preserved. An additive migration widens the custom-provider
+protocol constraint while retaining group IDs, membership, slugs, and credentials.
 
 ## Streaming ownership and limits
 
@@ -315,6 +332,18 @@ Committed streams are not subject to the pre-commit deadlines; they can run
 longer while data arrives. The individual read timeout still applies.
 
 ## Dashboard and trust boundaries
+
+The Test page offers Chat and SystemOne modes. `POST /test/systemone` uses the
+same dashboard CSRF/origin checks, gateway authentication/scopes, traffic
+admission, history/capture, and diagnostic wrapper as Test chat. It validates
+native state/questions, removes `_csrf`, rejects streaming, and routes only to
+SystemOne targets using the real combo strategy/fallback loop. Native response
+JSON is returned inside the existing `completion` trace envelope. Browser inputs
+and formatted results are page-local; results use textContent, never HTML.
+Switching mode clears chat history/results/session identity; pagehide discards
+keys and evaluation inputs too. The SystemOne form keeps state/questions after
+success or failure for explicit repeat/retry and does not replay past results as
+chat messages.
 
 `GET /test` renders a combo chat playground with embedded JavaScript.
 `POST /test/chat` requires dashboard CSRF/origin checks and the same gateway
@@ -364,7 +393,14 @@ name and fresh combo/step IDs are allocated; provider connection IDs are reused.
 The list's clipboard control uses embedded JavaScript to copy `combo/<name>`;
 it is hidden when the browser's clipboard API is unavailable.
 
-The providers index is a preset/custom tile catalog. `/providers/catalog/{slug}`
+The providers index is a preset/custom tile catalog. Cards show fixed capability
+labels (Text, Image, Video, Music, TTS, STT, Decision) with protocol-derived defaults.
+CSRF/origin-protected tag forms save optional per-provider overrides in SQLite;
+these labels never affect protocol dispatch, model scopes, or routing. Custom
+overrides cascade on group deletion; preset overrides persist without connections.
+Client-side checkbox filters use any-tag matching combined with title-only search.
+Assignments are dashboard metadata, not part of configuration transfer.
+ `/providers/catalog/{slug}`
 and `/providers/groups/{id}` show named connections and an add-connection popup.
 The popup uses native HTML popover controls, retaining ordinary POST forms and
 CSRF fields without inline scripts or a JavaScript dependency. Browsers without

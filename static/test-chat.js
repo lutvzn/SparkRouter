@@ -7,6 +7,15 @@
   "use strict";
 
   const form = document.getElementById("test-form");
+  const modeSelect = document.getElementById("test-mode");
+  const evaluation = document.getElementById("test-evaluation");
+  const stateInput = document.getElementById("test-state");
+  const questionsInput = document.getElementById("test-questions");
+  const welcomeText = document.querySelector(".test-log-empty p");
+  function isEvaluation() { return modeSelect && modeSelect.value === "systemone"; }
+  function hasInput() {
+    return isEvaluation() ? stateInput.value.trim() !== "" && questionsInput.value.trim() !== "" : draft.value.trim() !== "";
+  }
   const csrfInput = document.getElementById("test-csrf");
   const comboSelect = document.getElementById("test-combo");
   const keyInput = document.getElementById("test-key"); // absent unless auth is required
@@ -55,12 +64,13 @@
   }
 
   function updateSendEnabled() {
-    sendButton.disabled = busy || draft.value.trim() === "";
+    sendButton.disabled = busy || !hasInput();
   }
 
   function setBusy(value) {
     busy = value;
-    sendButton.disabled = value || draft.value.trim() === "";
+    sendButton.disabled = value || !hasInput();
+    if (modeSelect) modeSelect.disabled = value;
     resetButton.disabled = value;
     comboSelect.disabled = value;
     if (keyInput) keyInput.disabled = value;
@@ -78,8 +88,8 @@
     article.className = "test-msg test-msg-" + role;
     const author = document.createElement("p");
     author.className = "test-msg-author";
-    author.textContent = role === "user" ? "You" : "Assistant";
-    const body = document.createElement("p");
+    author.textContent = role === "user" ? "You" : (isEvaluation() ? "SystemOne result" : "Assistant");
+    const body = document.createElement(isEvaluation() ? "pre" : "p");
     body.className = "test-msg-body";
     body.textContent = text;
     article.append(author, body);
@@ -191,7 +201,29 @@
     // unchanged field is cleared afterwards.
     const originalDraft = draft.value;
     const text = originalDraft.trim();
-    if (!text || busy) return;
+    if (!hasInput() || busy) return;
+    const evaluating = isEvaluation();
+    let payload;
+    if (evaluating) {
+      try {
+        const state = JSON.parse(stateInput.value);
+        const questions = JSON.parse(questionsInput.value);
+        if (state === null || !["string", "object"].includes(typeof state)) throw new Error();
+        if (questions === null || typeof questions !== "object" || Array.isArray(questions)) throw new Error();
+        payload = { _csrf: csrfInput.value, model: "combo/" + comboSelect.value, state, questions };
+      } catch (_) {
+        clearAttempts();
+        setNote(statusNote, "");
+        setNote(errorNote, "Enter valid JSON: state must be a string, object, or array; questions must be an object.");
+        return;
+      }
+    } else {
+      payload = {
+        _csrf: csrfInput.value,
+        model: "combo/" + comboSelect.value,
+        messages: conversation.concat([{ role: "user", content: text }]),
+      };
+    }
     const version = ++requestVersion;
     const controller = new AbortController();
     pendingRequest = controller;
@@ -204,12 +236,6 @@
       const key = keyInput.value.trim();
       if (key) headers.Authorization = "Bearer " + key;
     }
-    const payload = {
-      _csrf: csrfInput.value,
-      model: "combo/" + comboSelect.value,
-      messages: conversation.concat([{ role: "user", content: text }]),
-    };
-
     setNote(errorNote, "");
     setNote(statusNote, "Sending\u2026");
     // Drop the previous trace immediately: a failure that never reaches
@@ -219,7 +245,7 @@
     setBusy(true);
     let data = null;
     try {
-      const response = await fetch("/test/chat", {
+      const response = await fetch(evaluating ? "/test/systemone" : "/test/chat", {
         method: "POST",
         credentials: "same-origin",
         headers,
@@ -238,7 +264,7 @@
         renderAttempts(data.attempts);
       }
       if (response.ok && data && data.completion && !data.error) {
-        const reply = replyText(data.completion);
+        const reply = evaluating ? JSON.stringify(data.completion, null, 2) : replyText(data.completion);
         if (reply === null) {
           setNote(
             errorNote,
@@ -246,11 +272,13 @@
           );
           setNote(statusNote, "");
         } else {
-          addMessage("user", text);
+          if (!evaluating) addMessage("user", text);
           addMessage("assistant", reply);
-          conversation.push({ role: "user", content: text });
-          conversation.push({ role: "assistant", content: reply });
-          if (draft.value === originalDraft) draft.value = "";
+          if (!evaluating) {
+            conversation.push({ role: "user", content: text });
+            conversation.push({ role: "assistant", content: reply });
+            if (draft.value === originalDraft) draft.value = "";
+          }
           setNote(statusNote, "Response received.");
           log.lastElementChild.scrollIntoView({ block: "nearest" });
         }
@@ -278,6 +306,28 @@
     send();
   });
 
+  if (stateInput) stateInput.addEventListener("input", updateSendEnabled);
+  if (questionsInput) questionsInput.addEventListener("input", updateSendEnabled);
+  function updateMode() {
+    const evaluating = isEvaluation();
+    if (evaluation) evaluation.hidden = !evaluating;
+    draft.hidden = evaluating;
+    if (modeSelect) {
+      sendButton.textContent = evaluating ? "Evaluate" : "Send ↑";
+      resetButton.textContent = evaluating ? "Clear results" : "New chat";
+      if (welcomeText) welcomeText.textContent = evaluating ? "Enter state and questions below, then evaluate with a SystemOne combo." : "Send a message to your combo to start a conversation.";
+    }
+    updateSendEnabled();
+  }
+  if (modeSelect) modeSelect.addEventListener("change", () => {
+    conversation = [];
+    sessionId = newSessionId();
+    clearMessages();
+    clearAttempts();
+    setNote(errorNote, "");
+    setNote(statusNote, "");
+    updateMode();
+  });
   draft.addEventListener("input", updateSendEnabled);
   draft.addEventListener("keydown", (event) => {
     // Do not submit an IME composition or steal modified keyboard shortcuts.
@@ -310,7 +360,8 @@
     setNote(errorNote, "");
     setNote(statusNote, "");
     updateSendEnabled();
-    draft.focus();
+    if (isEvaluation()) stateInput.focus();
+    else draft.focus();
   });
 
   // Leaving the page (including a BFCache save) must discard the entered
@@ -321,6 +372,8 @@
     pendingRequest = null;
     setBusy(false);
     if (keyInput) keyInput.value = "";
+    if (stateInput) stateInput.value = "";
+    if (questionsInput) questionsInput.value = "";
     conversation = [];
     sessionId = newSessionId();
     clearMessages();
@@ -340,5 +393,5 @@
     }
   });
 
-  updateSendEnabled();
+  updateMode();
 })();

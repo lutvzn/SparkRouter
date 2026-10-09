@@ -18,6 +18,11 @@ changes, also run:
 cargo build --release --locked
 ```
 
+Before the v1 release, historical-schema upgrade tests are not maintained.
+Fresh database initialization still applies all embedded migrations, and the
+suite tests current schema constraints and persistence. The migration files
+remain unchanged.
+
 These checks require **no real provider keys, running gateway, production
 database, or configuration environment variables**. Fixtures construct
 configuration directly with test-only keys. Tests create local mock HTTP servers
@@ -35,13 +40,15 @@ cargo test --locked -- --list
 | Location | Covered behavior |
 | --- | --- |
 | `src/crypto.rs` tests | Encryption round-trip, unique nonces, wrong key/provider context, tampering, invalid master-key lengths |
-| `src/db/` tests | Migrations, foreign keys, WAL persistence, CRUD, validation, ordering, transactional swaps/removals, delete constraints, timestamps |
+| `src/db/` tests | Fresh database initialization, foreign keys, WAL persistence, CRUD, validation, ordering, transactional swaps/removals, delete constraints, timestamps |
 | `src/routing/` tests | Retry classification, per-combo/concurrent round-robin turns, unbiased random index selection, and pre-commit cancellation retaining attempt traces |
 | `src/providers/` tests | URL normalization, unknown-field preservation, model replacement, response translation, fragmented UTF-8/CRLF SSE, tools, usage, truncation, limits, stream commitment |
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
+| `tests/provider_tags.rs`, `scripts/tests/provider-tags.cjs` | Text/Decision defaults, preset/custom multi-tag edits, empty overrides, validation/CSRF/origin, restart persistence, cascading deletion, combined name/any-tag filtering and empty state |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
 | `tests/test_chat.rs` | Test chat rendering, authenticated/CSRF-protected combo calls, actual fallback traces, sanitized failures, and shared routing strategy state |
 | `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models with exact cached context/output discovery (configured-first combo step, reorder, disabled/missing details, oldest enabled direct connection, scoped visibility), optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
+| `tests/systemone.rs` | Dashboard evaluation results/traces and shared strategy state, CSRF/origin/auth/scope/validation, shared traffic admission, Native evaluation passthrough, model discovery/direct routing, endpoint protocol isolation, authenticated/scoped boundary, retryable versus permanent failures, invalid success fallback, custom-provider transfer |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
 | `tests/dashboard_auth.rs` | Optional admin login, cookie isolation/revocation, CSRF/origin protections, login limits |
@@ -98,7 +105,19 @@ node scripts/tests/clipboard.cjs
 node scripts/tests/theme.cjs
 node scripts/tests/test-chat.cjs
 node scripts/tests/tooltips.cjs
+node scripts/tests/provider-tags.cjs
 ```
+
+For provider tags, manually check checkbox filters to the right of search on
+wide screens and wrapping on phones, in both themes. Verify keyboard focus,
+any-tag matching plus name search, no-selection reset, tag edits on preset and
+custom pages, and ordinary Save tags submissions without JavaScript. DOM mocks
+do not establish browser layout or accessibility.
+
+The test-chat checks also cover SystemOne mode switching, JSON validation,
+native evaluation payloads/results, safe text rendering, repeat/retry, and
+pagehide cleanup. Manually check the SystemOne state/questions editors and
+formatted result at phone and desktop widths; DOM mocks do not prove layout.
 
 It covers modern clipboard copying, plain-HTTP fallback, failure feedback,
 temporary textarea cleanup, focus restoration, and toast dismissal/reset. Also manually check Copy on
@@ -113,6 +132,7 @@ cargo test --locked --test gateway
 cargo test --locked --test dashboard
 cargo test --locked --test test_chat
 cargo test --locked --test combo_affinity
+cargo test --locked --test systemone
 
 # Library module filters:
 cargo test --locked --lib crypto::tests

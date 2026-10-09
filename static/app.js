@@ -128,13 +128,17 @@ function filterProviderTiles() {
   const grid = document.getElementById("provider-grid");
   if (!input || !grid) return;
   const empty = document.getElementById("provider-search-empty");
+  const filters = Array.from(document.querySelectorAll("[data-provider-tag-filter]"));
   const apply = () => {
+    const selected = filters.filter((filter) => filter.checked).map((filter) => filter.value);
     const query = input.value.trim().toLowerCase();
     let visible = 0;
     grid.querySelectorAll(".provider-tile").forEach((tile) => {
       const title = tile.querySelector(".provider-tile-title");
       const name = title ? title.textContent.toLowerCase() : "";
-      const match = query === "" || name.includes(query);
+      const tags = (tile.getAttribute("data-provider-tags") || "").split(" ");
+      const match = (query === "" || name.includes(query))
+        && (selected.length === 0 || selected.some((tag) => tags.includes(tag)));
       tile.hidden = !match;
       if (match) visible += 1;
     });
@@ -143,6 +147,7 @@ function filterProviderTiles() {
       empty.hidden = visible !== 0;
     }
   };
+  filters.forEach((filter) => filter.addEventListener("change", apply));
   input.addEventListener("input", apply);
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") event.preventDefault();

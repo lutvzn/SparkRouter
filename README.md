@@ -142,7 +142,18 @@ Retryable failures and the selected target appear in request order, including
 when a request fails. Tests use the same routing and round-robin state as API
 requests and make real, potentially billable upstream calls. Enter a gateway
 API key if authentication is configured; keys are not saved in browser storage.
-Chat requires JavaScript, uses non-streaming responses, and keeps conversation
+The **Mode** selector switches between **Chat** and **SystemOne**. For
+SystemOne, select a combo containing SystemOne connections, edit **State** as a
+JSON string/object/array and **Questions** as a JSON object, then click
+**Evaluate**. A Noul example is prefilled; Choice and Score questions and structured
+instructions/criteria are supported too. Results display the native model,
+answers, usage, and extension fields as formatted JSON, with the same routing
+attempt details. Inputs remain available for repeat evaluations; **Clear results**
+clears results and starts a new session. Mode/combo changes clear previous results
+and chat context. Inputs, results, and gateway keys are never saved in browser
+storage and are discarded when leaving the page.
+
+The playground requires JavaScript, uses non-streaming responses, and keeps conversation
 history only in the current page. Changing combos or clearing the chat starts a
 fresh conversation.
 
@@ -164,7 +175,7 @@ Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and mod
 Generated API keys optionally support **Requests per minute** (1–1,000,000) and
 **Maximum concurrent requests** (1–10,000). Set these when generating a key or
 under **Edit access / expiry / limits**; blank means unlimited. Existing keys
-remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions and
+remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions, SystemOne evaluations, and
 test chat together; `/v1/models` is exempt.
 
 Rate accounting uses fixed 60-second windows beginning with the first admitted
@@ -271,6 +282,52 @@ process environment variables.
 The parent database directory must already exist and be writable. SQLite WAL/SHM sidecar files are normal while running. For backups, stop the application first or use SQLite's online backup facility rather than copying an active database file alone.
 
 ## Providers and protocols
+
+Provider cards display capability tags: **Text, Image, Video, Music, TTS, STT,
+and Decision**. Chat providers default to Text; SystemOne providers default to
+Decision. Open any preset or custom provider, check its **Provider tags**, and
+click **Save tags** to assign multiple tags or clear them all. Tags are manual
+organizational labels, not verified model capabilities and do not enable image,
+video, music, or speech endpoints in SparkRouter.
+
+Checkbox filters to the right of the Providers search bar match **any** checked
+tag and combine with the name search. No checked tags means show all. Filtering
+requires JavaScript and resets on navigation/reload; tag assignments persist in
+SQLite across restarts. These dashboard-only assignments are included in full
+database backups, but not configuration export/import (imported providers use
+their protocol defaults).
+
+### SystemOne evaluations (TypeSafe AI)
+
+The **TypeSafe AI** preset uses `https://api.typesafe.ai/v1` with the native
+**SystemOne** protocol and Bearer authentication. Custom SystemOne-compatible
+providers can select that protocol too. Add a connection, refresh models for
+direct routing, or create a combo with upstream model IDs such as `jev-latest`.
+
+```sh
+curl http://127.0.0.1:8080/v1/systemone \
+  -H "Authorization: Bearer $ROUTER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"typesafe/jev-latest","state":"Help! My payouts are failing.","questions":{"urgent":{"type":"noul","instructions":"Does this convey urgency?"}}}'
+```
+
+Use `combo/<name>` instead for combo routing. `/v1/systemone` tries only enabled
+SystemOne connections; chat completions and Test chat skip SystemOne connections.
+Mixed combos therefore use only the targets compatible with the incoming endpoint.
+SystemOne forwards the original evaluation JSON with only `model` replaced and
+returns native `model`, `answers`, and `usage` JSON without chat translation.
+Noul, Choice, Score, structured instructions/criteria, and unknown extension
+fields are preserved. The gateway validates the top-level model, state, and
+questions shape; question-specific validation belongs to the upstream. Streaming
+is not supported (`stream: true` is rejected). Authentication, exact public-ID
+scopes, per-key traffic limits, history, deadlines, and once-each ordered fallback
+apply just as for chat. Upstream 401/429/529 can fall back; 422 stops the chain.
+SystemOne model refresh reads `{ "models": [{ "name": "jev-latest", ... }] }`.
+`/v1/models` includes these qualified IDs alongside chat models; it is a shared
+catalog, not a guarantee that every model supports every endpoint. The Test page's **SystemOne** mode sends native evaluations through
+`POST /test/systemone`; its Chat mode remains chat-only. Basic session affinity and Sticky work for evaluation combos;
+Smart without a session ID has no chat-message fingerprint and uses the strategy.
+
 
 Providers are configuration, not vendor-specific implementations. The dashboard includes OmniRoute's API-key chat presets that use the **OpenAI** or **Anthropic** adapters, including OpenRouter, Groq, DeepSeek, Together, and Fireworks. Local OpenAI-compatible servers use the **OpenAI** protocol too. Include any required API prefix (usually `/v1`) in the base URL. Trailing slashes are normalized; URL credentials, query strings, and fragments are rejected. HTTP is supported for local servers. An empty API key is allowed for unauthenticated local servers.
 
@@ -423,8 +480,8 @@ also fit the 4 MiB HTTP body limit). Split larger configurations into smaller
 documents with their required references. Ungrouped custom connections receive
 their own new provider groups so they remain manageable in the dashboard.
 
-The test page itself is a dashboard page, but `POST /test/chat` additionally
-requires the same gateway authentication as `/v1/*`, plus dashboard CSRF and
+The test page itself is a dashboard page, but `POST /test/chat` and
+`POST /test/systemone` additionally require the same gateway authentication as `/v1/*`, plus dashboard CSRF and
 origin checks. It never reveals saved provider credentials or raw upstream errors.
 
 The dashboard uses `Referrer-Policy: same-origin`: native form submissions retain their Origin for validation, and external destinations receive no referrer. If a submission is rejected, reload the form after a server restart (CSRF tokens change), use one consistent hostname and port, and ensure a reverse proxy preserves the browser-facing Host header.
@@ -474,6 +531,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-Only `/v1/chat/completions` and `/v1/models` are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No embeddings, Responses API, Gemini, OAuth, adaptive routing optimization, price optimization, queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+`/v1/chat/completions`, `/v1/systemone`, and `/v1/models` are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No embeddings, Responses API, Gemini, OAuth, adaptive routing optimization, price optimization, queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
 Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow in this version.

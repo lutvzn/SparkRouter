@@ -34,7 +34,7 @@ async fn serve(router: Router) -> (String, Server) {
 }
 
 #[tokio::test]
-async fn redirects_never_forward_either_protocols_credentials() {
+async fn redirects_never_forward_any_protocols_credentials() {
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();
     let (destination, _destination_server) = serve(Router::new().fallback(move || {
@@ -65,7 +65,7 @@ async fn redirects_never_forward_either_protocols_credentials() {
     })
     .await
     .unwrap();
-    for protocol in [Protocol::OpenAi, Protocol::Anthropic] {
+    for protocol in [Protocol::OpenAi, Protocol::Anthropic, Protocol::SystemOne] {
         let provider = Provider {
             id: "provider".into(),
             name: "redirecting upstream".into(),

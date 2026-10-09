@@ -10,5 +10,6 @@ use axum::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chat/completions", post(chat::complete))
+        .route("/systemone", post(chat::systemone))
         .route("/models", get(models::list))
 }

@@ -28,6 +28,7 @@ const MAX_SESSION_BYTES: usize = 256;
 pub(crate) struct RequestContext {
     scope: String,
     session_header: Option<HeaderValue>,
+    pub(crate) systemone: bool,
 }
 
 impl Default for RequestContext {
@@ -35,11 +36,22 @@ impl Default for RequestContext {
         Self {
             scope: "anonymous".into(),
             session_header: None,
+            systemone: false,
         }
     }
 }
 
 impl RequestContext {
+    pub(crate) fn for_systemone(mut self) -> Self {
+        self.systemone = true;
+        self.scope.push_str(":systemone");
+        self
+    }
+
+    pub(crate) fn accepts(&self, protocol: crate::providers::Protocol) -> bool {
+        self.systemone == (protocol == crate::providers::Protocol::SystemOne)
+    }
+
     pub(crate) fn new(scope: String, headers: &HeaderMap) -> Self {
         let session_header = [
             "x-sparkrouter-session-id",
@@ -53,6 +65,7 @@ impl RequestContext {
         Self {
             scope,
             session_header,
+            systemone: false,
         }
     }
 }
@@ -473,6 +486,7 @@ mod tests {
         let other = RequestContext {
             scope: "other-key".into(),
             session_header: None,
+            systemone: false,
         };
         assert!(
             memory
@@ -504,6 +518,7 @@ mod tests {
             let context = RequestContext {
                 scope: format!("key-{i}"),
                 session_header: None,
+                systemone: false,
             };
             memory.remember_at(
                 binding(&combo, &context, &crypto, &Value::Null)

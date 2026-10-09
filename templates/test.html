@@ -5,7 +5,7 @@
 {% block topbar_heading %}
 <div class="topbar-heading">
   <h1>Test</h1>
-  <p class="topbar-subtitle">Chat with a combo. Inspect its routing when you need to.</p>
+  <p class="topbar-subtitle">Try chat or SystemOne evaluations with a combo and inspect its routing.</p>
 </div>
 {% endblock %}
 {% block content %}
@@ -15,6 +15,13 @@
 <div class="test-chat-shell">
   <div class="test-controls">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}" id="test-csrf">
+    <div class="test-combo-picker">
+      <label for="test-mode">Mode</label>
+      <select id="test-mode" autocomplete="off">
+        <option value="chat">Chat</option>
+        <option value="systemone">SystemOne</option>
+      </select>
+    </div>
     <div class="test-combo-picker">
       <label for="test-combo">Combo</label>
       <select id="test-combo" autocomplete="off" aria-describedby="test-target-hint">
@@ -31,7 +38,7 @@
     {% endif %}
     <button type="button" id="test-reset" class="btn">New chat</button>
   </div>
-  <p id="test-target-hint" class="hint test-target-hint">Uses <code>combo/&lt;name&gt;</code>; switching combos starts a new chat.{% if auth_required %} Gateway key required; sent with requests, never saved in browser storage.{% endif %}</p>
+  <p id="test-target-hint" class="hint test-target-hint">Uses <code>combo/&lt;name&gt;</code>; switching combos or modes clears results. Only connections compatible with the selected mode are used.{% if auth_required %} Gateway key required; sent with requests, never saved in browser storage.{% endif %}</p>
 
   <section class="test-conversation" aria-label="Conversation">
     <div id="test-log" class="test-log" role="log" aria-live="polite" aria-relevant="additions">
@@ -53,6 +60,18 @@
     </details>
 
     <form id="test-form" class="test-compose" novalidate>
+      <div id="test-evaluation" class="test-evaluation" hidden>
+        <p class="hint">Evaluate state against typed questions. Both fields accept JSON. Questions support Noul, Choice, and Score with structured instructions and criteria.</p>
+        <label for="test-state">State (JSON string, object, or array)</label>
+        <textarea id="test-state" rows="3" spellcheck="false">"Help! My payouts have been failing for 3 days."</textarea>
+        <label for="test-questions">Questions (JSON object)</label>
+        <textarea id="test-questions" rows="8" spellcheck="false">{
+  "is_urgent": {
+    "type": "noul",
+    "instructions": "Does this convey urgency?"
+  }
+}</textarea>
+      </div>
       <label for="test-draft" class="test-draft-label">Message</label>
       <div class="test-compose-row">
         <input id="test-draft" type="text" autocomplete="off" placeholder="Message your combo…">
@@ -65,6 +84,6 @@
   </div>
 </div>
 <script src="/static/test-chat.js" defer></script>
-<noscript><p class="empty">The test chat requires JavaScript. Use the <code>/v1</code> API endpoints to test combos without it.</p></noscript>
+<noscript><p class="empty">The test playground requires JavaScript. Use the <code>/v1</code> API endpoints to test combos without it.</p></noscript>
 {% endif %}
 {% endblock %}

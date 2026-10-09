@@ -53,6 +53,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(home::page))
         .route("/providers", get(providers::list).post(providers::create))
         .route("/providers/new", get(providers::new))
+        .route("/providers/{kind}/{id}/tags", post(providers::save_tags))
         .route("/providers/custom", post(providers::custom_create))
         .route(
             "/providers/catalog/{slug}",
@@ -80,6 +81,7 @@ pub fn router() -> Router<AppState> {
         .route("/combos", get(combos::list).post(combos::create))
         .route("/test", get(test::page))
         .route("/test/chat", post(test::chat))
+        .route("/test/systemone", post(test::systemone))
         .route("/combos/new", get(combos::new))
         .route("/combos/{id}", get(combos::edit).post(combos::rename))
         .route("/combos/{id}/delete", post(combos::delete))

@@ -129,14 +129,16 @@ async fn route_inner(
     let combo = combos::by_name(&state.db, name).await?;
     let mut steps = combos::steps(&state.db, &combo.id).await?;
     let binding = super::affinity::binding(&combo, context, &state.crypto, body)?;
-    if combo.strategy != combos::Strategy::Priority || binding.is_some() {
+    if combo.strategy != combos::Strategy::Priority || binding.is_some() || context.systemone {
         // Disabled connections do not consume turns. Snapshot eligible steps
         // before selecting a start, but recheck providers below before calls so
         // concurrent deletion/disable edits retain the existing safety behavior.
         let mut eligible = Vec::with_capacity(steps.len());
         for step in steps {
             match provider_db::get(&state.db, &step.provider_id).await {
-                Ok(provider) if provider.enabled => eligible.push(step),
+                Ok(provider) if provider.enabled && context.accepts(provider.protocol) => {
+                    eligible.push(step)
+                }
                 Ok(_) | Err(AppError::NotFound(_)) => {}
                 Err(error) => return Err(error),
             }
@@ -172,6 +174,9 @@ async fn route_inner(
                 // provider while an earlier upstream attempt is still in progress.
                 None => continue,
             };
+        if !context.accepts(provider.protocol) {
+            continue;
+        }
         if !provider.enabled {
             tracing::debug!(combo = name, provider = %provider.id, "disabled provider skipped");
             continue;
