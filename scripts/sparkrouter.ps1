@@ -31,7 +31,8 @@ Usage: ./scripts/sparkrouter.ps1 COMMAND [options]
 Commands: start, run, stop, restart, rebuild, status, logs, health, build, check, test, keygen, help
 Options: -EnvFile FILE  -StateDir DIR  -DebugBuild  -Url URL  -TimeoutSeconds N
 Defaults: release build, .sparkrouter state directory, 30-second stop timeout.
-Environment files are opt-in; only KEY=value or quoted literal values are supported.
+Loads .env from the caller working directory if present unless -EnvFile is specified.
+Only KEY=value or quoted literal values are supported.
 start builds if the binary is missing. run stays in the foreground (Ctrl+C to stop).
 rebuild stops, builds, and starts again; a failed build leaves the server stopped.
 On Windows, stop forcibly terminates the managed process; it cannot drain streams.
@@ -136,6 +137,9 @@ function Stop-Router {
     } finally { $Process.Dispose() }
 }
 try {
+    if (-not $PSBoundParameters.ContainsKey('EnvFile') -and (Test-Path -LiteralPath '.env' -PathType Leaf)) {
+        $EnvFile = '.env'
+    }
     if ($EnvFile) { Import-EnvironmentFile $EnvFile }
     Set-Location -LiteralPath $Root
     if ($Command -in @('start','stop','restart','rebuild','run','status') -and $env:OS -ne 'Windows_NT') {

@@ -6,6 +6,7 @@ ACTION=${1:-help}
 [[ $# -eq 0 ]] || shift
 STATE_DIR="$ROOT/.sparkrouter"
 ENV_FILE=''
+ENV_FILE_SPECIFIED=false
 PROFILE=release
 URL=''
 TIMEOUT=30
@@ -14,7 +15,8 @@ usage() {
     'Commands: start, run, stop, restart, rebuild, status, logs, health, build, check, test, keygen, help' \
     'Options: --env-file FILE  --state-dir DIR  --debug  --url URL  --timeout SECONDS' \
     'Defaults: release build, .sparkrouter state directory, 30-second stop timeout.' \
-    'Environment files are opt-in; only plain KEY=value or quoted literal values are supported.' \
+    'Loads .env from the caller working directory if present unless --env-file is specified.' \
+    'Only plain KEY=value or quoted literal values are supported.' \
     'start builds if the binary is missing. run stays in the foreground (Ctrl+C to stop).' \
     'rebuild stops, builds, and starts again; a failed build leaves the server stopped.' \
     'stop sends SIGTERM; it never escalates to SIGKILL. Windows: use the PowerShell helper.'
@@ -25,7 +27,7 @@ while [[ $# -gt 0 ]]; do
     --env-file|--state-dir|--url|--timeout)
       [[ $# -ge 2 ]] || fail "Missing value for $1"
       case "$1" in
-        --env-file) ENV_FILE=$2;; --state-dir) STATE_DIR=$2;; --url) URL=$2;; --timeout) TIMEOUT=$2;;
+        --env-file) ENV_FILE=$2; ENV_FILE_SPECIFIED=true;; --state-dir) STATE_DIR=$2;; --url) URL=$2;; --timeout) TIMEOUT=$2;;
       esac
       shift 2;;
     --debug) PROFILE=debug; shift;;
@@ -37,6 +39,7 @@ case "$ACTION" in start|run|stop|restart|rebuild|status|logs|health|build|check|
 [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || fail 'Timeout must be a positive integer'
 # Resolve user paths before switching to the repository working directory.
 [[ "$STATE_DIR" = /* ]] || STATE_DIR="$PWD/$STATE_DIR"
+if [[ "$ENV_FILE_SPECIFIED" == false && -f .env ]]; then ENV_FILE='.env'; fi
 if [[ -n "$ENV_FILE" ]]; then
   [[ -f "$ENV_FILE" ]] || fail 'Environment file not found'
   # Do NOT source/eval a file containing secrets or execute substitutions.
