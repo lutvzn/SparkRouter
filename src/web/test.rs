@@ -2,7 +2,7 @@ use askama::Template;
 use axum::{
     Json,
     body::to_bytes,
-    extract::{State, rejection::JsonRejection},
+    extract::{Multipart, Path, State, multipart::MultipartRejection, rejection::JsonRejection},
     http::HeaderMap,
     response::{Html, IntoResponse, Response},
 };
@@ -50,6 +50,91 @@ pub async fn systemone(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     execute(state, headers, payload, true).await
+}
+
+fn media_kind(mode: &str, upload: bool) -> Result<crate::providers::media::Kind, AppError> {
+    use crate::providers::media::Kind;
+    match (mode, upload) {
+        ("image", false) => Ok(Kind::Image),
+        ("video", false) => Ok(Kind::Video),
+        ("music", false) => Ok(Kind::Music),
+        ("speech", false) => Ok(Kind::Speech),
+        ("image-edit", true) => Ok(Kind::ImageEdit),
+        ("transcription", true) => Ok(Kind::Transcription),
+        ("translation", true) => Ok(Kind::Translation),
+        _ => Err(AppError::InvalidRequest(
+            "Select a supported media mode".into(),
+        )),
+    }
+}
+
+fn check_media_model(body: &mut Value) -> Result<(), AppError> {
+    if !body
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| {
+            model
+                .trim()
+                .strip_prefix("combo/")
+                .is_some_and(|name| !name.is_empty())
+        })
+    {
+        return Err(AppError::InvalidRequest("Select a combo to test".into()));
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("_csrf");
+    }
+    Ok(())
+}
+
+// Media tests use the public API's validation/admission/history/stream wrappers.
+// CSRF lives in a header, never in upstream JSON or multipart fields.
+pub async fn media(
+    State(state): State<AppState>,
+    Path(mode): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    super::check_csrf(
+        &state,
+        headers
+            .get("x-sparkrouter-csrf")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    )?;
+    let auth = app::authorize(&state, &headers).await?;
+    let kind = media_kind(&mode, false)?;
+    let Json(mut body) = payload.map_err(|error| AppError::RequestBody(error.status()))?;
+    check_media_model(&mut body)?;
+    crate::api::media::execute(state, auth, headers, body, kind, None, true).await
+}
+
+pub async fn media_upload(
+    State(state): State<AppState>,
+    Path(mode): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Multipart, MultipartRejection>,
+) -> Result<Response, AppError> {
+    super::check_csrf(
+        &state,
+        headers
+            .get("x-sparkrouter-csrf")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    )?;
+    let auth = app::authorize(&state, &headers).await?;
+    let kind = media_kind(&mode, true)?;
+    let multipart = payload.map_err(|error| AppError::RequestBody(error.status()))?;
+    let (mut body, upload) = crate::api::media::parse_upload(multipart, kind).await?;
+    check_media_model(&mut body)?;
+    let upload = std::sync::Arc::new(
+        upload
+            .iter()
+            .filter(|part| part.name != "_csrf")
+            .cloned()
+            .collect(),
+    );
+    crate::api::media::execute(state, auth, headers, body, kind, Some(upload), true).await
 }
 
 async fn execute(
@@ -130,6 +215,7 @@ async fn execute(
     } else {
         context
     };
+    routing::validate_combo_category(&state, &format!("combo/{name}"), context.category()).await?;
     let _permit = access.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();

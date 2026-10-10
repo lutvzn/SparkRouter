@@ -104,6 +104,14 @@ variables. Off is the upgrade/default mode. Settings persist through SQLite
 migrations, while bounded placement hints reset on restart and are not shared
 between gateway processes. See [per-combo affinity](README.md#per-combo-cache-aware-and-sticky-routing).
 
+Media uses the same executable and deployment environment; no frontend/media
+worker or external queue is required. JSON bodies remain capped at 4 MiB, while
+multipart media accepts up to 32 MiB including framing. Reverse proxies used for
+media should permit those uploads and the gateway's up-to-610-second preparation
+window; binary output retains the 120-second upstream idle timeout. See
+[MEDIA.md](MEDIA.md) for protocols and limits. No transcoder or media toolchain
+is required.
+
 ## Convenience scripts
 
 The repository includes matching command helpers:

@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use crate::db::combos::{AffinityMode, AffinityOptions, Strategy};
+use crate::db::combos::{AffinityMode, AffinityOptions, Category, Strategy};
 use crate::error::AppError;
 use crate::providers::{Protocol, normalize_base_url};
 
@@ -93,12 +93,18 @@ pub struct TransferConnection {
 #[serde(deny_unknown_fields)]
 pub struct TransferCombo {
     pub name: String,
+    #[serde(default = "default_category")]
+    pub category: String,
     pub strategy: String,
     #[serde(default = "default_affinity_mode")]
     pub affinity_mode: String,
     #[serde(default = "default_sticky_minutes")]
     pub sticky_minutes: u32,
     pub steps: Vec<TransferStep>,
+}
+
+fn default_category() -> String {
+    "text".into()
 }
 
 fn default_affinity_mode() -> String {
@@ -164,7 +170,7 @@ pub async fn export(pool: &SqlitePool) -> Result<ConfigTransfer, AppError> {
     .fetch_all(&mut *transaction)
     .await?;
     let combo_rows = sqlx::query(
-        "SELECT id, name, strategy, affinity_mode, sticky_minutes FROM combos ORDER BY name",
+        "SELECT id, name, category, strategy, affinity_mode, sticky_minutes FROM combos ORDER BY name",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -221,6 +227,7 @@ pub async fn export(pool: &SqlitePool) -> Result<ConfigTransfer, AppError> {
             let id: String = row.try_get("id")?;
             Ok(TransferCombo {
                 name: row.try_get("name")?,
+                category: row.try_get("category")?,
                 strategy: row.try_get("strategy")?,
                 affinity_mode: row.try_get("affinity_mode")?,
                 sticky_minutes: row.try_get("sticky_minutes")?,
@@ -345,6 +352,7 @@ fn parse_and_validate(
 
     let mut combo_names: HashSet<String> = HashSet::new();
     let mut steps = 0;
+    let mut classified = HashMap::new();
     for combo in &mut transfer.combos {
         combo.name = validate_combo_name(&combo.name)?;
         if !combo_names.insert(combo.name.clone()) {
@@ -352,6 +360,7 @@ fn parse_and_validate(
                 "a combo name appears more than once".into(),
             ));
         }
+        let category = Category::parse(&combo.category)?;
         Strategy::parse(&combo.strategy)?;
         AffinityOptions {
             mode: AffinityMode::parse(&combo.affinity_mode)?,
@@ -372,6 +381,32 @@ fn parse_and_validate(
                 ));
             }
             step.model = validate_model(&step.model)?;
+            let connection = transfer
+                .connections
+                .iter()
+                .find(|connection| connection.id == step.provider_id)
+                .expect("validated connection reference");
+            let provider = crate::db::providers::Provider {
+                id: connection.id.clone(),
+                name: connection.name.clone(),
+                base_url: connection.base_url.clone(),
+                protocol: connection.protocol.parse()?,
+                encrypted_api_key: Vec::new(),
+                enabled: false,
+            };
+            if !category.accepts(&provider) {
+                return Err(AppError::InvalidRequest(
+                    "Imported step protocol is incompatible with its combo category".into(),
+                ));
+            }
+            if classified
+                .insert((step.provider_id.clone(), step.model.clone()), category)
+                .is_some_and(|existing| existing != category)
+            {
+                return Err(AppError::InvalidRequest(
+                    "Imported model has conflicting categories".into(),
+                ));
+            }
         }
     }
     if steps > MAX_TOTAL_STEPS {
@@ -539,15 +574,24 @@ pub async fn apply(
 
     for combo in &transfer.combos {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO combos (id, name, category, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(&id)
             .bind(&combo.name)
+            .bind(&combo.category)
             .bind(&combo.strategy)
             .bind(&combo.affinity_mode)
             .bind(combo.sticky_minutes)
             .execute(&mut *transaction)
             .await?;
         for (position, step) in combo.steps.iter().enumerate() {
+            super::model_categories::validate(
+                &mut transaction,
+                &connection_ids[&step.provider_id],
+                &step.model,
+                Category::parse(&combo.category)?,
+                true,
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO combo_steps (id, combo_id, position, provider_id, model)
                  VALUES (?, ?, ?, ?, ?)",

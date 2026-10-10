@@ -1968,7 +1968,7 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
         "/models",
         get(|| async {
             Json(json!({"data": [
-                {"id": "alpha", "display_name": "Alpha", "context_length": 128000, "max_output_tokens": 16384, "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "alpha", "display_name": "Alpha", "context_length": 128000, "max_output_tokens": 16384, "pricing": {"prompt": "0", "completion": "0"}, "architecture": {"output_modalities": ["text"]}},
                 {"id": " beta "}
             ]}))
         }),
@@ -2024,7 +2024,10 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     let editor = String::from_utf8(body_bytes(editor).await.to_vec())?;
     assert!(editor.contains("id=\"models-listed\""));
     assert!(editor.contains("value=\"alpha\""));
-    assert!(editor.contains("value=\"beta\""));
+    assert!(
+        !editor.contains("value=\"beta\""),
+        "unclassified IDs remain cached but are not category suggestions"
+    );
     Ok(())
 }
 

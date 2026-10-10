@@ -2,6 +2,7 @@
 
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 
+pub use super::model_categories::Category;
 use crate::error::AppError;
 
 /// Maximum length of a combo name.
@@ -121,6 +122,7 @@ impl AffinityOptions {
 pub struct Combo {
     pub id: String,
     pub name: String,
+    pub category: Category,
     pub strategy: Strategy,
     pub affinity: AffinityOptions,
     pub routing_revision: i64,
@@ -198,6 +200,7 @@ fn combo_from_row(row: &SqliteRow) -> Result<Combo, AppError> {
     Ok(Combo {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
+        category: Category::parse(&row.try_get::<String, _>("category")?)?,
         strategy: Strategy::parse(&row.try_get::<String, _>("strategy")?)?,
         affinity: AffinityOptions {
             mode: AffinityMode::parse(&row.try_get::<String, _>("affinity_mode")?)?,
@@ -219,7 +222,7 @@ fn step_from_row(row: &SqliteRow) -> Result<ComboStep, AppError> {
 
 /// All combos, ordered by name.
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Combo>, AppError> {
-    let rows = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos ORDER BY name")
+    let rows = sqlx::query("SELECT id, name, category, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos ORDER BY name")
         .fetch_all(pool)
         .await?;
     rows.iter().map(combo_from_row).collect()
@@ -227,7 +230,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Combo>, AppError> {
 
 /// Look up a combo by id.
 pub async fn get(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
-    let row = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE id = ?")
+    let row = sqlx::query("SELECT id, name, category, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -239,7 +242,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
 
 /// Look up a combo by its unique name.
 pub async fn by_name(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
-    let row = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE name = ?")
+    let row = sqlx::query("SELECT id, name, category, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE name = ?")
         .bind(name)
         .fetch_optional(pool)
         .await?;
@@ -269,18 +272,30 @@ pub async fn create_with_options(
     strategy: Strategy,
     affinity: AffinityOptions,
 ) -> Result<Combo, AppError> {
+    create_typed(pool, name, Category::Text, strategy, affinity).await
+}
+
+pub async fn create_typed(
+    pool: &SqlitePool,
+    name: &str,
+    category: Category,
+    strategy: Strategy,
+    affinity: AffinityOptions,
+) -> Result<Combo, AppError> {
     validate_name(name)?;
     affinity.validate()?;
     let combo = Combo {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_owned(),
+        category,
         strategy,
         affinity,
         routing_revision: 0,
     };
-    let result = sqlx::query("INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?)")
+    let result = sqlx::query("INSERT INTO combos (id, name, category, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&combo.id)
         .bind(&combo.name)
+        .bind(combo.category.as_str())
         .bind(combo.strategy.as_str())
         .bind(combo.affinity.mode.as_str())
         .bind(combo.affinity.sticky_minutes)
@@ -298,7 +313,7 @@ pub async fn create_with_options(
 /// Duplicate a combo and its ordered steps atomically, using a unique copy name.
 pub async fn duplicate(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
     let mut transaction = begin_immediate(pool).await?;
-    let source = sqlx::query("SELECT id, name, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE id = ?")
+    let source = sqlx::query("SELECT id, name, category, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE id = ?")
         .bind(id)
         .fetch_optional(&mut *transaction)
         .await?
@@ -324,13 +339,15 @@ pub async fn duplicate(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
     let combo = Combo {
         id: uuid::Uuid::new_v4().to_string(),
         name,
+        category: source.category,
         strategy: source.strategy,
         affinity: source.affinity,
         routing_revision: 0,
     };
-    sqlx::query("INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO combos (id, name, category, strategy, affinity_mode, sticky_minutes) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&combo.id)
         .bind(&combo.name)
+        .bind(combo.category.as_str())
         .bind(combo.strategy.as_str())
         .bind(combo.affinity.mode.as_str())
         .bind(combo.affinity.sticky_minutes)
@@ -344,6 +361,14 @@ pub async fn duplicate(pool: &SqlitePool, id: &str) -> Result<Combo, AppError> {
     .await?;
     for row in rows {
         let step = step_from_row(&row)?;
+        super::model_categories::validate(
+            &mut transaction,
+            &step.provider_id,
+            &step.model,
+            combo.category,
+            false,
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO combo_steps (id, combo_id, position, provider_id, model) VALUES (?, ?, ?, ?, ?)",
         )
@@ -383,13 +408,47 @@ pub async fn update_with_options(
     strategy: Option<Strategy>,
     affinity: Option<AffinityOptions>,
 ) -> Result<(), AppError> {
+    update_typed(pool, id, name, strategy, affinity, None).await
+}
+
+pub async fn update_typed(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    strategy: Option<Strategy>,
+    affinity: Option<AffinityOptions>,
+    category: Option<Category>,
+) -> Result<(), AppError> {
     validate_name(name)?;
     if let Some(options) = affinity {
         options.validate()?;
     }
+    let mut transaction = begin_immediate(pool).await?;
+    if let Some(category) = category {
+        let stored: Option<String> = sqlx::query_scalar("SELECT category FROM combos WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if stored
+            .as_deref()
+            .is_some_and(|stored| stored != category.as_str())
+        {
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM combo_steps WHERE combo_id = ?")
+                    .bind(id)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if count != 0 {
+                return Err(AppError::InvalidRequest(
+                    "Remove all steps before changing the combo category".into(),
+                ));
+            }
+        }
+    }
     let result = sqlx::query(
         "UPDATE combos
          SET name = ?,
+             category = COALESCE(?, category),
              strategy = COALESCE(?, strategy),
              affinity_mode = COALESCE(?, affinity_mode),
              sticky_minutes = COALESCE(?, sticky_minutes),
@@ -398,17 +457,21 @@ pub async fn update_with_options(
          WHERE id = ?",
     )
     .bind(name)
+    .bind(category.map(|category| category.as_str()))
     .bind(strategy.map(|strategy| strategy.as_str()))
     .bind(affinity.map(|options| options.mode.as_str()))
     .bind(affinity.map(|options| options.sticky_minutes))
     .bind(id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await;
     match result {
         Ok(result) if result.rows_affected() == 0 => {
             Err(AppError::NotFound(format!("combo '{id}' was not found")))
         }
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            transaction.commit().await?;
+            Ok(())
+        }
         Err(error) if super::is_constraint_violation(&error) => Err(AppError::InvalidRequest(
             format!("a combo named '{name}' already exists"),
         )),
@@ -501,6 +564,18 @@ pub async fn add_step(
         )));
     }
 
+    let category: String = sqlx::query_scalar("SELECT category FROM combos WHERE id = ?")
+        .bind(combo_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    super::model_categories::validate(
+        &mut transaction,
+        provider_id,
+        &model,
+        Category::parse(&category)?,
+        true,
+    )
+    .await?;
     let max_position: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MAX(position) FROM combo_steps WHERE combo_id = ?",
     )
@@ -566,6 +641,18 @@ pub async fn update_step(
             "Selected connection does not exist".into(),
         ));
     }
+    let category: String = sqlx::query_scalar("SELECT category FROM combos WHERE id = ?")
+        .bind(combo_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    super::model_categories::validate(
+        &mut transaction,
+        provider_id,
+        &model,
+        Category::parse(&category)?,
+        true,
+    )
+    .await?;
     sqlx::query("UPDATE combo_steps SET provider_id = ?, model = ? WHERE id = ? AND combo_id = ?")
         .bind(provider_id)
         .bind(model)

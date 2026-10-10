@@ -16,14 +16,16 @@ pub const TAGS: &[(&str, &str)] = &[
 ];
 
 pub fn defaults(protocol: &Protocol) -> Vec<String> {
-    vec![
-        if *protocol == Protocol::SystemOne {
-            "decision"
-        } else {
-            "text"
-        }
-        .into(),
-    ]
+    let tags: &[&str] = match protocol {
+        Protocol::SystemOne => &["decision"],
+        Protocol::Fal => &["image", "video", "music"],
+        Protocol::Xai => &["text", "image", "video"],
+        Protocol::MiniMax => &["text", "image", "video", "music", "tts", "stt"],
+        Protocol::Deepgram => &["tts", "stt"],
+        Protocol::ElevenLabs => &["music", "tts", "stt"],
+        _ => &["text"],
+    };
+    tags.iter().map(|tag| (*tag).into()).collect()
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<HashMap<String, Vec<String>>, AppError> {

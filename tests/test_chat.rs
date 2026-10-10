@@ -346,9 +346,9 @@ async fn test_page_renders_empty_and_populated_without_leaking_credentials() -> 
     // The combo picker lists every combo and embeds the CSRF token for the
     // script; no inline scripts run against the strict CSP.
     assert!(page.contains("id=\"test-combo\""));
-    assert!(page.contains("<option value=\"coding\">"));
-    assert!(page.contains("coding &middot; Priority"));
-    assert!(page.contains("<option value=\"writing\">"));
+    assert!(page.contains("<option value=\"coding\" data-category=\"text\">"));
+    assert!(page.contains("coding &middot; Text &middot; Priority"));
+    assert!(page.contains("<option value=\"writing\" data-category=\"text\">"));
     assert!(page.contains(&format!("value=\"{}\"", state.csrf_token)));
     assert!(page.contains("src=\"/static/test-chat.js\""));
     assert!(

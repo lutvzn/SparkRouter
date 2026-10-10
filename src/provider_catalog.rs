@@ -24,6 +24,24 @@ pub(crate) struct Preset {
 /// Well-known gateways, in dashboard display order.
 pub(crate) const PRESETS: &[Preset] = &[
     Preset {
+        slug: "fal",
+        name: "fal.ai",
+        base_url: "https://queue.fal.run",
+        protocol: Protocol::Fal,
+    },
+    Preset {
+        slug: "deepgram",
+        name: "Deepgram",
+        base_url: "https://api.deepgram.com/v1",
+        protocol: Protocol::Deepgram,
+    },
+    Preset {
+        slug: "elevenlabs",
+        name: "ElevenLabs",
+        base_url: "https://api.elevenlabs.io/v1",
+        protocol: Protocol::ElevenLabs,
+    },
+    Preset {
         slug: "typesafe",
         name: "TypeSafe AI",
         base_url: "https://api.typesafe.ai/v1",
@@ -1087,6 +1105,19 @@ pub(crate) fn display_name(base_url: &str, protocol: &Protocol) -> String {
 }
 
 impl Preset {
+    /// Documented default capabilities, not per-account access guarantees.
+    pub(crate) fn default_tags(&self) -> Vec<String> {
+        let tags: &[&str] = match self.slug {
+            "openai" => &["text", "image", "tts", "stt"],
+            "xai" => &["text", "image", "video"],
+            "groq" => &["text", "tts", "stt"],
+            "together" => &["text", "image", "tts", "stt"],
+            "minimax" | "minimax-cn" => &["text", "image", "video", "music", "tts", "stt"],
+            _ => return crate::db::provider_tags::defaults(&self.protocol),
+        };
+        tags.iter().map(|tag| (*tag).into()).collect()
+    }
+
     /// Stable routing alias used by OmniRoute's default provider catalog.
     /// The aliases correspond to entries in OmniRoute's `src/shared/constants/providers/apikey/`
     /// gateway, frontier-labs, inference-hosts, enterprise-cloud, regional, and specialty-media catalogs.
@@ -1164,7 +1195,7 @@ mod tests {
         assert_eq!(groq.protocol, Protocol::OpenAi);
         assert!(find("Groq").is_none());
         assert!(find("unknown-provider").is_none());
-        assert_eq!(PRESETS.len(), 172);
+        assert_eq!(PRESETS.len(), 175);
         assert_eq!(find("typesafe").unwrap().protocol, Protocol::SystemOne);
         assert_eq!(find("xai").expect("xai").name, "xAI (Grok)");
         assert_eq!(find("poe").expect("poe").base_url, "https://api.poe.com/v1");
@@ -1230,7 +1261,7 @@ mod tests {
             assert!(slugs.insert(slug), "duplicate routing slug {slug}");
             assert!(!slug.starts_with("combo/"));
         }
-        assert_eq!(slugs.len(), 172);
+        assert_eq!(slugs.len(), PRESETS.len());
         assert_eq!(find("openrouter").unwrap().routing_slug(), "openrouter");
         assert_eq!(find("deepseek").unwrap().routing_slug(), "ds");
     }

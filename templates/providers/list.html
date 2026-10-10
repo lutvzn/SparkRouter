@@ -36,7 +36,7 @@
       </span>
     </span>
     <span class="provider-tile-meta">
-      <span class="badge">{% if t.protocol == "openai" %}OpenAI{% else if t.protocol == "systemone" %}SystemOne{% else %}Anthropic{% endif %}</span>
+      <span class="badge">{% if t.protocol == "openai" %}OpenAI{% else if t.protocol == "anthropic" %}Anthropic{% else if t.protocol == "systemone" %}SystemOne{% else if t.protocol == "fal" %}fal.ai{% else if t.protocol == "minimax" %}MiniMax{% else if t.protocol == "xai" %}xAI{% else if t.protocol == "deepgram" %}Deepgram{% else if t.protocol == "elevenlabs" %}ElevenLabs{% endif %}</span>
       {% if t.is_custom %}<span class="badge">Custom</span>{% endif %}
       {% for tag in t.tag_labels() %}<span class="badge provider-capability-tag">{{ tag.label }}</span>{% endfor %}
     </span>

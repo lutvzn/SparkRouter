@@ -65,7 +65,12 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   the complete upstream suffix. Try enabled connections within that provider
   whose last refresh listed it, oldest first, with once-each fallback. Never
   cross provider slugs or treat raw IDs as aliases. Combo steps retain upstream
-  IDs unchanged. A missing model list never blocks a combo step.
+  IDs unchanged. A missing model list never blocks a combo step. Each combo has
+  one enforced category (Text, Decision, Image, Video, Music, TTS, STT);
+  wrong-mode requests are rejected rather than filtering a mixed chain. Model
+  IDs are never guessed into categories: adding an unclassified connection/model
+  explicitly declares its category, constrained by known modalities and protocol
+  support.
 - **Never fall back after a streaming response has been returned to Axum.**
   Before commitment, adapters may report a retryable failure. After commitment,
   interruptions terminate the body; do not synthesize a successful ending.

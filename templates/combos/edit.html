@@ -31,6 +31,7 @@
         <option value="random"{% if strategy == "random" %} selected{% endif %}>Random</option>
       </select>
     </div>
+    {% include "combos/_category.html" %}
     {% include "combos/_affinity.html" %}
   </div>
   <div class="form-actions">
@@ -54,7 +55,7 @@
   <h2>Add step</h2>
   {% let info_id = "add-step-help" %}
   {% let info_label = "About adding a step" %}
-  {% let info_text = "Choose a provider and connection, then enter a model ID. Model is a free-form string of at most 256 characters, forwarded upstream as-is. Suggestions come from that connection's refreshed model list." %}
+  {% let info_text = "Choose a provider and connection, then enter a model ID. Model is a free-form string of at most 256 characters, forwarded upstream as-is. Suggestions are filtered by category and known output modalities. An unclassified ID is explicitly declared in this combo's category when added." %}
   {% include "combos/_info.html" %}
 </div>
 {% if providers.is_empty() %}

@@ -15,10 +15,12 @@ pub async fn list(
         .await?
         .into_iter()
         .map(|combo| {
-            model_entry(
+            let mut entry = model_entry(
                 format!("combo/{}", combo.name),
                 combo_details.get(&combo.id),
-            )
+            );
+            entry["category"] = json!(combo.category.as_str());
+            entry
         })
         .collect();
     for (id, details) in connection_models::public_model_details(&state.db).await? {

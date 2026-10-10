@@ -14,13 +14,36 @@ use crate::{
 };
 use combo::AttemptTrace;
 
+/// API boundary check before quota admission; direct model IDs are unchanged.
+pub(crate) async fn validate_combo_category(
+    state: &AppState,
+    model: &str,
+    category: crate::db::combos::Category,
+) -> Result<(), AppError> {
+    if let Some(name) = model.strip_prefix("combo/") {
+        let combo = match crate::db::combos::by_name(&state.db, name).await {
+            Ok(combo) => combo,
+            Err(AppError::NotFound(_)) => return Ok(()), // Preserve normal not-found traces/history.
+            Err(error) => return Err(error),
+        };
+        if combo.category != category {
+            return Err(AppError::InvalidRequest(
+                "Combo category does not match this API mode".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Prepare one upstream response. Returning success ends fallback; the body
 /// exclusively owns the committed attempt, including any subsequent failure.
+#[allow(clippy::too_many_arguments)]
 async fn attempt(
     state: &AppState,
     provider: &Provider,
     model: &str,
     body: &Value,
+    context: &affinity::RequestContext,
     trace: AttemptTrace,
     attempts: &mut Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AttemptError> {
@@ -28,11 +51,32 @@ async fn attempt(
         attempts.push(trace);
     }
     let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        providers::call(&state.client, &state.crypto, provider, model, body),
+        Duration::from_secs(if context.media.is_some() { 600 } else { 120 }),
+        async {
+            if let Some(kind) = context.media {
+                providers::media::call(
+                    &state.client,
+                    &state.crypto,
+                    provider,
+                    model,
+                    body,
+                    kind,
+                    context.upload.as_ref(),
+                )
+                .await
+            } else {
+                providers::call(&state.client, &state.crypto, provider, model, body).await
+            }
+        },
     )
     .await
-    .unwrap_or(Err(AttemptError::Retryable));
+    .unwrap_or_else(|_| {
+        Err(if context.media.is_some() {
+            AttemptError::Permanent(AppError::Routing)
+        } else {
+            AttemptError::Retryable
+        })
+    });
     if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
         trace.finish(match &result {
             Ok(_) => "selected",
@@ -51,13 +95,16 @@ pub(crate) async fn route_with_trace(
     context: &affinity::RequestContext,
     attempts: &mut Vec<AttemptTrace>,
 ) -> Result<Response, AppError> {
-    let result = tokio::time::timeout(Duration::from_secs(180), async {
-        if let Some(name) = model.strip_prefix("combo/") {
-            combo::route_with_trace(state, name, body, context, attempts).await
-        } else {
-            direct::route_with_trace(state, model, body, context, attempts).await
-        }
-    })
+    let result = tokio::time::timeout(
+        Duration::from_secs(if context.media.is_some() { 610 } else { 180 }),
+        async {
+            if let Some(name) = model.strip_prefix("combo/") {
+                combo::route_with_trace(state, name, body, context, attempts).await
+            } else {
+                direct::route_with_trace(state, model, body, context, attempts).await
+            }
+        },
+    )
     .await;
     result.unwrap_or_else(|_| {
         if let Some(trace) = attempts

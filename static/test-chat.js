@@ -13,8 +13,33 @@
   const questionsInput = document.getElementById("test-questions");
   const welcomeText = document.querySelector(".test-log-empty p");
   function isEvaluation() { return modeSelect && modeSelect.value === "systemone"; }
+  const mediaPanel = document.getElementById("test-media");
+  const mediaHint = document.getElementById("test-media-hint");
+  const uploadControls = document.getElementById("test-upload-controls");
+  const fileInput = document.getElementById("test-file");
+  const maskControl = document.getElementById("test-mask-control");
+  const maskInput = document.getElementById("test-mask");
+  const voiceControl = document.getElementById("test-voice-control");
+  const voiceInput = document.getElementById("test-voice");
+  const mediaOptions = document.getElementById("test-media-options");
+  const MEDIA = {
+    image: { label: "Image", hint: "Enter an image prompt. For inline previews, request response_format: b64_json where supported." },
+    "image-edit": { label: "Image edit", upload: true, hint: "Upload an image, optionally a mask, and enter an edit prompt. OpenAI-compatible image editing only." },
+    video: { label: "Video", hint: "Enter a video prompt. Native video jobs are polled inline and may take several minutes. Closing the page does not guarantee job cancellation." },
+    music: { label: "Music", hint: "Enter a music prompt, or supply lyrics/tags/composition_plan in advanced options. Account access and supported fields vary by provider." },
+    speech: { label: "Speech", hint: "Enter speech text and a provider-specific voice. OpenAI/MiniMax require a voice; ElevenLabs uses its voice ID; Deepgram selects the voice by model. PCM may require downloading rather than browser playback." },
+    transcription: { label: "Transcription", upload: true, hint: "Upload audio/video for transcription. The entire multipart request must fit 32 MiB. Set language or response_format in advanced options if needed." },
+    translation: { label: "Audio translation", upload: true, hint: "Upload audio/video for translation to English using an OpenAI-compatible provider. The entire multipart request must fit 32 MiB." },
+  };
+  function mediaMode() { return modeSelect ? MEDIA[modeSelect.value] : null; }
   function hasInput() {
-    return isEvaluation() ? stateInput.value.trim() !== "" && questionsInput.value.trim() !== "" : draft.value.trim() !== "";
+    if (!comboSelect.value) return false;
+    if (isEvaluation()) return stateInput.value.trim() !== "" && questionsInput.value.trim() !== "";
+    const media = mediaMode();
+    if (media && media.upload && !(fileInput && fileInput.files && fileInput.files[0] && fileInput.files[0].size > 0)) return false;
+    if (media && media.upload && modeSelect.value !== "image-edit") return true;
+    if (media && modeSelect.value === "music" && mediaOptions && mediaOptions.value.trim() !== "{}") return true;
+    return draft.value.trim() !== "";
   }
   const csrfInput = document.getElementById("test-csrf");
   const comboSelect = document.getElementById("test-combo");
@@ -57,6 +82,8 @@
   let busy = false;
   let requestVersion = 0;
   let pendingRequest = null;
+  let objectUrls = [];
+  let players = [];
 
   function setNote(node, text) {
     node.textContent = text;
@@ -98,6 +125,14 @@
   }
 
   function clearMessages() {
+    for (const player of players) {
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+    }
+    players = [];
+    for (const url of objectUrls) URL.revokeObjectURL(url);
+    objectUrls = [];
     log.querySelectorAll(".test-msg").forEach((message) => message.remove());
     logEmpty.hidden = false;
   }
@@ -192,7 +227,134 @@
     if (httpStatus === 401) {
       return "The gateway rejected the credentials. Check the gateway key and try again.";
     }
-    return "The request failed. The message was kept for retry.";
+    return "The request failed. Inputs were kept for an explicit retry.";
+  }
+
+  function mediaPayload(text) {
+    let extra;
+    try {
+      extra = JSON.parse(mediaOptions.value);
+      if (!extra || typeof extra !== "object" || Array.isArray(extra)) throw new Error();
+    } catch (_) { throw new Error("Advanced media options must be a JSON object."); }
+    const mode = modeSelect.value;
+    const config = MEDIA[mode];
+    // Never let advanced fields change the target, add files, or leak CSRF.
+    const reserved = ["model", "_csrf"].concat(config.upload ? ["file", "image", "image[]", "mask"] : []);
+    for (const key of reserved) delete extra[key];
+    extra.model = "combo/" + comboSelect.value;
+    if (mode === "speech") {
+      extra.input = text;
+      if (voiceInput.value.trim()) extra.voice = voiceInput.value.trim();
+    } else if (["image", "image-edit", "video", "music"].includes(mode) && text) extra.prompt = text;
+    if (!config.upload) return { path: "/test/media/" + mode, body: JSON.stringify(extra), multipart: false };
+    const file = fileInput.files[0];
+    const mask = mode === "image-edit" && maskInput.files ? maskInput.files[0] : null;
+    if (file.size + (mask ? mask.size : 0) >= 32 * 1024 * 1024) throw new Error("Files plus multipart framing must fit 32 MiB. Choose smaller files.");
+    const data = new FormData();
+    for (const [key, value] of Object.entries(extra)) {
+      const values = key.endsWith("[]") && Array.isArray(value) ? value : [value];
+      for (const item of values) data.append(key, typeof item === "string" ? item : JSON.stringify(item));
+    }
+    data.append(mode === "image-edit" ? "image" : "file", file);
+    if (mask) data.append("mask", mask);
+    return { path: "/test/media-upload/" + mode, body: data, multipart: true };
+  }
+
+  function mediaTrace(response) {
+    try {
+      const header = response.headers.get("x-sparkrouter-attempts");
+      if (!header) {
+        attemptsEmpty.textContent = "No routing diagnostics available for this response.";
+        return;
+      }
+      const trace = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(header), c => c.charCodeAt(0))));
+      renderAttempts(trace.attempts);
+      if (trace.truncated) {
+        attemptsEmpty.hidden = false;
+        attemptsEmpty.textContent = "Only the first attempts fit the diagnostic header. Full metadata is in History when logging is enabled.";
+      }
+    } catch (_) {
+      attemptsEmpty.textContent = "Routing diagnostics could not be decoded.";
+      // Missing/bad diagnostics never hide an otherwise valid output.
+    }
+  }
+
+  function blobLink(parent, blob, filename, image) {
+    const url = URL.createObjectURL(blob);
+    objectUrls.push(url);
+    if (image) {
+      const preview = document.createElement("img");
+      preview.src = url;
+      preview.alt = "Generated image";
+      preview.className = "test-media-preview";
+      parent.append(preview);
+    } else {
+      const player = document.createElement("audio");
+      player.controls = true;
+      player.preload = "metadata";
+      player.src = url;
+      player.className = "test-media-player";
+      players.push(player);
+      parent.append(player);
+    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.textContent = "Download " + filename;
+    link.className = "btn";
+    parent.append(link);
+  }
+
+  function renderMedia(value, blob, text) {
+    const article = document.createElement("article");
+    article.className = "test-msg test-msg-assistant";
+    const title = document.createElement("p");
+    title.className = "test-msg-author";
+    title.textContent = MEDIA[modeSelect.value].label + " result";
+    article.append(title);
+    if (blob) {
+      const type = blob.type.split(";")[0];
+      const extension = ({ "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/flac": "flac", "audio/ogg": "ogg", "audio/opus": "opus", "audio/aac": "aac" })[type] || "bin";
+      blobLink(article, blob, "audio." + extension, false);
+    } else {
+      const body = document.createElement("pre");
+      body.className = "test-msg-body";
+      body.textContent = text !== null ? text : JSON.stringify(value, (key, item) => key === "b64_json" && typeof item === "string" ? "[base64 image; preview/download below]" : item, 2);
+      article.append(body);
+      if (value && Array.isArray(value.data)) {
+        for (const item of value.data) {
+          if (!item || typeof item !== "object") continue;
+          if (typeof item.b64_json === "string") {
+            try {
+              const bytes = Uint8Array.from(atob(item.b64_json), c => c.charCodeAt(0));
+              const signature = item.b64_json;
+              const [mime, extension] = signature.startsWith("/9j/") ? ["image/jpeg", "jpg"] : signature.startsWith("R0lGOD") ? ["image/gif", "gif"] : signature.startsWith("UklGR") ? ["image/webp", "webp"] : ["image/png", "png"];
+              blobLink(article, new Blob([bytes], { type: mime }), "image." + extension, true);
+            } catch (_) {
+              const note = document.createElement("p");
+              note.textContent = "Returned image could not be decoded for preview.";
+              article.append(note);
+            }
+          }
+          if (typeof item.url === "string") {
+            try {
+              const url = new URL(item.url);
+              if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) continue;
+              const link = document.createElement("a");
+              link.href = url.href;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.referrerPolicy = "no-referrer";
+              link.className = "btn";
+              link.textContent = "Open remote media";
+              article.append(link);
+            } catch (_) { /* Never create links from unsafe or relative URLs. */ }
+          }
+        }
+      }
+    }
+    log.append(article);
+    logEmpty.hidden = true;
   }
 
   async function send() {
@@ -203,8 +365,18 @@
     const text = originalDraft.trim();
     if (!hasInput() || busy) return;
     const evaluating = isEvaluation();
+    const media = mediaMode();
+    let mediaRequest;
     let payload;
-    if (evaluating) {
+    if (media) {
+      try { mediaRequest = mediaPayload(text); }
+      catch (error) {
+        clearAttempts();
+        setNote(statusNote, "");
+        setNote(errorNote, error.message);
+        return;
+      }
+    } else if (evaluating) {
       try {
         const state = JSON.parse(stateInput.value);
         const questions = JSON.parse(questionsInput.value);
@@ -232,12 +404,16 @@
       "Content-Type": "application/json",
       "X-SparkRouter-Session-Id": sessionId,
     };
+    if (media) {
+      headers["X-SparkRouter-CSRF"] = csrfInput.value;
+      if (mediaRequest.multipart) delete headers["Content-Type"];
+    }
     if (keyInput) {
       const key = keyInput.value.trim();
       if (key) headers.Authorization = "Bearer " + key;
     }
     setNote(errorNote, "");
-    setNote(statusNote, "Sending\u2026");
+    setNote(statusNote, media ? "Generating / processing… This may take several minutes." : "Sending\u2026");
     // Drop the previous trace immediately: a failure that never reaches
     // routing (auth, CSRF, network) must not leave an old trace on screen
     // as if it belonged to this request.
@@ -245,13 +421,35 @@
     setBusy(true);
     let data = null;
     try {
-      const response = await fetch(evaluating ? "/test/systemone" : "/test/chat", {
+      const response = await fetch(media ? mediaRequest.path : evaluating ? "/test/systemone" : "/test/chat", {
         method: "POST",
         credentials: "same-origin",
         headers,
-        body: JSON.stringify(payload),
+        body: media ? mediaRequest.body : JSON.stringify(payload),
         signal: controller.signal,
       });
+      if (version !== requestVersion) return;
+      if (media) {
+        mediaTrace(response);
+        const type = (response.headers.get("content-type") || "").toLowerCase();
+        let blob = null;
+        let resultText = null;
+        if (response.ok && (type.startsWith("audio/") || type.startsWith("application/octet-stream"))) blob = await response.blob();
+        else if (response.ok && (type.startsWith("text/") || type.startsWith("application/x-subrip"))) resultText = await response.text();
+        else {
+          try { data = await response.json(); } catch (_) { data = null; }
+        }
+        if (version !== requestVersion) return;
+        if (response.ok && (blob || resultText !== null || data)) {
+          renderMedia(data, blob, resultText);
+          setNote(statusNote, "Response received. Playback depends on browser codec support; files can be downloaded.");
+          log.lastElementChild.scrollIntoView({ block: "nearest" });
+        } else {
+          setNote(errorNote, failureMessage(data, response.status));
+          setNote(statusNote, "");
+        }
+        return;
+      }
       try {
         data = await response.json();
       } catch (_) {
@@ -290,7 +488,7 @@
       if (version !== requestVersion) return;
       // The connection failed or was lost; the gateway may already have
       // processed and billed the request, so never assume it was not seen.
-      setNote(errorNote, "Unable to reach the gateway. Check the connection and try again.");
+      setNote(errorNote, "Unable to reach the gateway or finish the response. The request may already have been billed; retry only deliberately.");
       setNote(statusNote, "");
     } finally {
       if (version === requestVersion) {
@@ -308,18 +506,46 @@
 
   if (stateInput) stateInput.addEventListener("input", updateSendEnabled);
   if (questionsInput) questionsInput.addEventListener("input", updateSendEnabled);
+  if (fileInput) fileInput.addEventListener("change", updateSendEnabled);
+  if (mediaOptions) mediaOptions.addEventListener("input", updateSendEnabled);
+  function filterCombos() {
+    if (!comboSelect.options) return;
+    const category = ({ chat: "text", systemone: "decision", "image-edit": "image", speech: "tts", transcription: "stt", translation: "stt" })[modeSelect.value] || modeSelect.value;
+    const options = Array.from(comboSelect.options);
+    for (const option of options) {
+      option.hidden = option.dataset.category !== category;
+      option.disabled = option.hidden;
+    }
+    if (!options.some(option => !option.disabled && option.value === comboSelect.value)) {
+      const first = options.find(option => !option.disabled);
+      comboSelect.value = first ? first.value : "";
+    }
+  }
   function updateMode() {
+    filterCombos();
+    const media = mediaMode();
+    const upload = Boolean(media && media.upload);
+    if (mediaPanel) mediaPanel.hidden = !media;
+    if (mediaHint) mediaHint.textContent = media ? media.hint : "";
+    if (uploadControls) uploadControls.hidden = !upload;
+    if (maskControl) maskControl.hidden = !media || modeSelect.value !== "image-edit";
+    if (voiceControl) voiceControl.hidden = !media || modeSelect.value !== "speech";
+    if (fileInput) fileInput.accept = modeSelect.value === "image-edit" ? "image/*" : "audio/*,video/*";
+    draft.placeholder = media ? modeSelect.value === "speech" ? "Text to speak…" : "Generation / edit prompt…" : "Message your combo…";
     const evaluating = isEvaluation();
     if (evaluation) evaluation.hidden = !evaluating;
-    draft.hidden = evaluating;
+    draft.hidden = evaluating || (upload && modeSelect.value !== "image-edit");
     if (modeSelect) {
-      sendButton.textContent = evaluating ? "Evaluate" : "Send ↑";
-      resetButton.textContent = evaluating ? "Clear results" : "New chat";
-      if (welcomeText) welcomeText.textContent = evaluating ? "Enter state and questions below, then evaluate with a SystemOne combo." : "Send a message to your combo to start a conversation.";
+      sendButton.textContent = media ? upload ? "Process" : "Generate" : evaluating ? "Evaluate" : "Send ↑";
+      resetButton.textContent = media || evaluating ? "Clear results" : "New chat";
+      if (welcomeText) welcomeText.textContent = !comboSelect.value ? "No combo in this category. Create a matching combo in the Combos menu." : media ? media.hint : evaluating ? "Enter state and questions below, then evaluate with a SystemOne combo." : "Send a message to your combo to start a conversation.";
     }
     updateSendEnabled();
   }
   if (modeSelect) modeSelect.addEventListener("change", () => {
+    if (fileInput) fileInput.value = "";
+    if (maskInput) maskInput.value = "";
+    if (mediaOptions) mediaOptions.value = "{}";
     conversation = [];
     sessionId = newSessionId();
     clearMessages();
@@ -343,6 +569,8 @@
   // traces across targets. The draft stays so the same question can be retried
   // against the new combo.
   comboSelect.addEventListener("change", () => {
+    filterCombos();
+    updateSendEnabled();
     conversation = [];
     sessionId = newSessionId();
     clearMessages();
@@ -360,8 +588,12 @@
     setNote(errorNote, "");
     setNote(statusNote, "");
     updateSendEnabled();
+    if (fileInput) fileInput.value = "";
+    if (maskInput) maskInput.value = "";
     if (isEvaluation()) stateInput.focus();
+    else if (mediaMode() && mediaMode().upload) fileInput.focus();
     else draft.focus();
+    updateSendEnabled();
   });
 
   // Leaving the page (including a BFCache save) must discard the entered
@@ -374,6 +606,10 @@
     if (keyInput) keyInput.value = "";
     if (stateInput) stateInput.value = "";
     if (questionsInput) questionsInput.value = "";
+    if (fileInput) fileInput.value = "";
+    if (maskInput) maskInput.value = "";
+    if (voiceInput) voiceInput.value = "";
+    if (mediaOptions) mediaOptions.value = "{}";
     conversation = [];
     sessionId = newSessionId();
     clearMessages();

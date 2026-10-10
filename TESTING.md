@@ -46,8 +46,10 @@ cargo test --locked -- --list
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/provider_tags.rs`, `scripts/tests/provider-tags.cjs` | Text/Decision defaults, preset/custom multi-tag edits, empty overrides, validation/CSRF/origin, restart persistence, cascading deletion, combined name/any-tag filtering and empty state |
 | `tests/dashboard.rs` | Provider/combo CRUD, preset tiles and grouped named connections, explicit connection selection, HTMX ordering versus normal redirects, no key leakage, and no-auth provider routing |
+| `tests/test_media.rs`, `scripts/tests/test-chat.cjs` | Media mode controls, native JSON options, uploads/masks, local previews/downloads, safe remote links, auth/CSRF/origin/scopes/shared quotas, binary stream permits, metadata-only history, bounded Unicode diagnostics, cleanup and stale-response protection |
 | `tests/test_chat.rs` | Test chat rendering, authenticated/CSRF-protected combo calls, actual fallback traces, sanitized failures, and shared routing strategy state |
 | `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models with exact cached context/output discovery (configured-first combo step, reorder, disabled/missing details, oldest enabled direct connection, scoped visibility), optional API authentication, JSON passthrough, SSE behavior, Anthropic translation, provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
+| `tests/media.rs` | Compatible/native image/video/music/speech, shared connections, multipart replay, native auth, scope/quota checks, binary commitment/lifecycle, metadata-only capture, redirects, path validation, accepted-job no-fallback, fal queue/result URL credential isolation, fresh media protocols/group defaults |
 | `tests/systemone.rs` | Dashboard evaluation results/traces and shared strategy state, CSRF/origin/auth/scope/validation, shared traffic admission, Native evaluation passthrough, model discovery/direct routing, endpoint protocol isolation, authenticated/scoped boundary, retryable versus permanent failures, invalid success fallback, custom-provider transfer |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
@@ -59,6 +61,7 @@ cargo test --locked -- --list
 | `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
 | `tests/combo_affinity.rs`, `src/routing/affinity.rs` tests | Per-combo Off/Basic/Smart/Sticky, header/body session IDs, exact prompt continuity/separation, caller isolation, clock-controlled expiry/capacity, fallback/rebinding, disabled/edited targets, successful/interrupted/dropped streams, dropdown validation/CSRF, duplication and backward-compatible transfer |
+| `tests/combo_categories.rs`, `scripts/tests/test-chat.cjs` | All seven categories, forms/list/Test filtering and empty states, wrong-mode rejection before quotas/rotation, protocol/modality checks, vision input vs image output, declarations, transactional edits, concurrent conflicts, duplication and credential-free transfer |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
 | `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
 | `src/db/provider_slugs.rs` tests | Readable unique slugs, reserved names, transactional conflicts/concurrency, stable legacy initialization |
@@ -133,6 +136,9 @@ cargo test --locked --test dashboard
 cargo test --locked --test test_chat
 cargo test --locked --test combo_affinity
 cargo test --locked --test systemone
+cargo test --locked --test media
+cargo test --locked --test test_media
+cargo test --locked --test combo_categories
 
 # Library module filters:
 cargo test --locked --lib crypto::tests
@@ -150,6 +156,28 @@ cargo test --locked --test gateway -- --nocapture
 Use `-- --test-threads=1` only to investigate suspected interactions; tests should
 remain independent and pass under the default parallel runner. Rust test-name
 arguments are substring filters, not file paths.
+
+## Media acceptance checks
+
+Use a disposable database and local mocks for automated media checks. In a
+browser, verify that OpenAI, xAI, MiniMax, fal.ai, Deepgram, and ElevenLabs each
+have one provider card with the expected default capability tags and that saved
+manual overrides still win. New custom protocol options must preserve ordinary
+CSRF-protected forms. The Test page includes image/edit, video, music, speech, transcription, and
+translation. Choose compatible media combos; verify prompts, voice IDs, extra
+JSON fields, image/mask/audio uploads, image previews and audio playback/download.
+Remote URLs must remain explicit links without automatic loading. Confirm trace
+truncation notices and full attempts in History, no media body captures even in
+Extended mode, retained inputs for deliberate retry, and cleanup on reset,
+mode/combo change, navigation and BFCache restore. Check desktop/phone layouts
+and both themes; DOM mocks do not prove browser codecs or CSP behavior.
+
+For an opt-in real-provider check, use the curl examples in [MEDIA.md](MEDIA.md),
+a media-specific combo, and credentials for an eligible account. Verify binary
+audio with a player, multipart transcription, signed URL expiration, and native
+video completion. These are billable tests, not prerequisites for `cargo test`.
+Do not claim media quality, provider account access, polling latency, or browser
+layout has been established by local mock tests.
 
 ## Adding regression tests
 

@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub(crate) mod media;
 pub mod openai;
 pub mod systemone;
 // Framing decoder private to the provider adapters.
@@ -33,6 +34,11 @@ pub enum Protocol {
     OpenAi,
     Anthropic,
     SystemOne,
+    Fal,
+    MiniMax,
+    Deepgram,
+    ElevenLabs,
+    Xai,
 }
 
 impl Protocol {
@@ -41,6 +47,11 @@ impl Protocol {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::SystemOne => "systemone",
+            Self::Fal => "fal",
+            Self::MiniMax => "minimax",
+            Self::Deepgram => "deepgram",
+            Self::ElevenLabs => "elevenlabs",
+            Self::Xai => "xai",
         }
     }
 }
@@ -53,6 +64,11 @@ impl FromStr for Protocol {
             "openai" => Ok(Self::OpenAi),
             "anthropic" => Ok(Self::Anthropic),
             "systemone" => Ok(Self::SystemOne),
+            "fal" => Ok(Self::Fal),
+            "minimax" => Ok(Self::MiniMax),
+            "deepgram" => Ok(Self::Deepgram),
+            "elevenlabs" => Ok(Self::ElevenLabs),
+            "xai" => Ok(Self::Xai),
             _ => Err(AppError::InvalidRequest(
                 "Unsupported provider protocol".into(),
             )),
@@ -109,9 +125,12 @@ pub async fn call(
     body: &Value,
 ) -> Result<Response, AttemptError> {
     match provider.protocol {
-        Protocol::OpenAi => openai::call(client, crypto, provider, model, body).await,
+        Protocol::OpenAi | Protocol::MiniMax | Protocol::Xai => {
+            openai::call(client, crypto, provider, model, body).await
+        }
         Protocol::Anthropic => anthropic::call(client, crypto, provider, model, body).await,
         Protocol::SystemOne => systemone::call(client, crypto, provider, model, body).await,
+        _ => Err(AppError::InvalidRequest("Provider does not support chat".into()).into()),
     }
 }
 
@@ -140,7 +159,29 @@ fn request(
             request = request.header("x-api-key", value);
         }
     } else if !key.expose_secret().is_empty() {
-        request = request.bearer_auth(key.expose_secret());
+        match provider.protocol {
+            Protocol::ElevenLabs => {
+                let mut value = reqwest::header::HeaderValue::from_str(key.expose_secret())
+                    .map_err(|_| AppError::Provider)?;
+                value.set_sensitive(true);
+                request = request.header("xi-api-key", value);
+            }
+            Protocol::Deepgram | Protocol::Fal => {
+                let prefix = if provider.protocol == Protocol::Fal {
+                    "Key"
+                } else {
+                    "Token"
+                };
+                let mut value = reqwest::header::HeaderValue::from_str(&format!(
+                    "{prefix} {}",
+                    key.expose_secret()
+                ))
+                .map_err(|_| AppError::Provider)?;
+                value.set_sensitive(true);
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            _ => request = request.bearer_auth(key.expose_secret()),
+        }
     }
     Ok(request)
 }
@@ -160,6 +201,24 @@ pub async fn list_models(
     crypto: &Crypto,
     provider: &Provider,
 ) -> Result<ListedModels, AppError> {
+    if provider.protocol == Protocol::Fal {
+        return Ok(ListedModels {
+            models: media::catalog(provider.protocol)
+                .iter()
+                .map(|id| StoredModel {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    fields: vec![ModelField {
+                        label: "Catalog source".into(),
+                        value: "Documented starter model (not live discovery or an access check)"
+                            .into(),
+                    }],
+                    free: false,
+                })
+                .collect(),
+            truncated: false,
+        });
+    }
     let mut models = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut after: Option<String> = None;
@@ -189,10 +248,12 @@ pub async fn list_models(
         let bytes = read_model_body(response).await?;
         let body: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AppError::InvalidRequest("provider did not return a model list".into()))?;
-        let (page, next) = if provider.protocol == Protocol::SystemOne {
-            (systemone::parse_models(&body)?, None)
-        } else {
-            parse_model_page(&body)?
+        let (page, next) = match provider.protocol {
+            Protocol::SystemOne => (systemone::parse_models(&body)?, None),
+            Protocol::ElevenLabs | Protocol::Deepgram => {
+                (media::parse_models(provider.protocol, &body)?, None)
+            }
+            _ => parse_model_page(&body)?,
         };
         for model in page {
             if seen.insert(model.id.clone()) {
@@ -213,6 +274,26 @@ pub async fn list_models(
                 break;
             }
             None => break,
+        }
+    }
+    // Some vendor model-list APIs omit media products. Merge documented starter
+    // IDs only after a successful authenticated refresh; this does not prove access.
+    for id in media::catalog(media::dialect(provider)) {
+        if !seen.contains(*id) {
+            if models.len() >= MAX_LISTED_MODELS {
+                truncated = true;
+                break;
+            }
+            seen.insert((*id).into());
+            models.push(StoredModel {
+                id: (*id).into(),
+                name: (*id).into(),
+                fields: vec![ModelField {
+                    label: "Catalog source".into(),
+                    value: "Documented media model (account access not verified)".into(),
+                }],
+                free: false,
+            });
         }
     }
     Ok(ListedModels {
@@ -575,6 +656,11 @@ pub async fn test_connection(
     crypto: &Crypto,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    if provider.protocol == Protocol::Fal {
+        return Err(AppError::InvalidRequest(
+            "This protocol has no connectivity probe; test a generation request instead".into(),
+        ));
+    }
     let response = request(client, crypto, provider, reqwest::Method::GET, "models")?
         .timeout(std::time::Duration::from_secs(15))
         .send()

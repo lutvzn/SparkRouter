@@ -1,12 +1,13 @@
 # SparkRouter
 
-A small self-hosted LLM API gateway: one Rust executable, SQLite, and a server-rendered dashboard. Add providers, arrange provider/model pairs into ordered **combos**, and call them using the OpenAI Chat Completions API.
+A small self-hosted AI API gateway: one Rust executable, SQLite, and a server-rendered dashboard. Add providers, arrange provider/model pairs into ordered **combos**, and call them using Chat Completions, SystemOne, or image/video/music/speech APIs.
 
 ## Documentation
 
 - [Build and deployment](BUILD.md)
 - [Architecture and security boundaries](ARCHITECURE.md)
 - [Testing and manual acceptance](TESTING.md)
+- [Media APIs, supported providers, and OmniRoute audit](MEDIA.md)
 - [Contributor and coding-agent guide](AGENTS.md)
 
 ## Run
@@ -56,7 +57,7 @@ management forms still work with ordinary submissions when it is disabled.
    open it to add multiple named API-key connections. Custom providers remain
    separate even when their URLs match. Existing custom connections are
    imported into provider groups without changing keys or combo references.
-3. Open **Combos**, create `coding`, and add provider/model steps in preference order.
+3. Open **Combos**, create `coding` with category **Text**, and add provider/model steps in preference order.
 4. Choose a **provider**, then one of its **connections**, for each step and use the up/down
    buttons to change fallback order. Enter model IDs exactly as your upstream
      accepts them. Each combo step targets one connection; it does not implicitly
@@ -70,6 +71,42 @@ options remain visible and ordinary form submissions still work.
 Choose **Priority**, **Round robin**, or **Random** when creating or editing a
 combo. Existing combos default to Priority. The Combos list shows its strategy
 and cache-aware/sticky mode.
+
+### Category-specific combos
+
+Each combo has one category: **Text**, **Decision / SystemOne**, **Image**,
+**Video**, **Music**, **TTS**, or **STT**. The Combos page has a category filter;
+creation/editing shows the category alongside the routing strategy. `/test`
+only offers combos matching its selected mode and disables sending when none
+exist. Image edits share Image combos; audio translation shares STT combos.
+
+The backend rejects wrong-mode combo requests with `400` before quota admission
+or strategy rotation. Step creation/editing validates protocol compatibility,
+explicit cached output modalities, and speech input modalities when available.
+Image input alone does not classify a vision LLM as an image generator.
+Provider capability tags remain dashboard metadata, not these classifications.
+The step picker's suggestions only include matching declarations, explicit
+capability metadata, or models from single-category protocols such as SystemOne.
+Unknown models on multi-category providers are not offered in every category.
+Audio output alone does not distinguish Music from TTS; those models need a
+matching declaration or clear speech input/output metadata. Manual entry remains
+available when discovery cannot identify the category.
+
+Model names are never guessed. Adding an unclassified/custom ID explicitly
+**declares that connection/model in the combo's category**: make sure it really
+supports that API. The same connection/model cannot be used in conflicting
+categories while referenced by any combo. Remove all references before
+reclassifying it. A missing model list still permits manual IDs. Refresh/protocol
+changes are revalidated before any combo attempt and fail closed if incompatible.
+Remove all steps before changing a combo's category; category changes and step
+mutations are transactional. Duplication and configuration transfer preserve
+categories. `/v1/models` adds `category` to combo entries; direct routes are
+unchanged.
+
+Migration 0019 preserves other installations' existing combos: SystemOne-only
+chains become Decision; remaining chains default to Text. Legacy media/mixed
+chains must be rebuilt in their correct categories; incompatible chains cannot
+route. It does not delete configuration automatically.
 
 ### Per-combo cache-aware and sticky routing
 
@@ -142,8 +179,9 @@ Retryable failures and the selected target appear in request order, including
 when a request fails. Tests use the same routing and round-robin state as API
 requests and make real, potentially billable upstream calls. Enter a gateway
 API key if authentication is configured; keys are not saved in browser storage.
-The **Mode** selector switches between **Chat** and **SystemOne**. For
-SystemOne, select a combo containing SystemOne connections, edit **State** as a
+The **Mode** selector offers **Chat**, **SystemOne**, **Image**, **Image edit**,
+**Video**, **Music**, **TTS / Speech**, **STT / Transcription**, and **Audio translation**. For
+SystemOne, select a Decision-category combo containing SystemOne connections, edit **State** as a
 JSON string/object/array and **Questions** as a JSON object, then click
 **Evaluate**. A Noul example is prefilled; Choice and Score questions and structured
 instructions/criteria are supported too. Results display the native model,
@@ -153,9 +191,28 @@ clears results and starts a new session. Mode/combo changes clear previous resul
 and chat context. Inputs, results, and gateway keys are never saved in browser
 storage and are discarded when leaving the page.
 
-The playground requires JavaScript, uses non-streaming responses, and keeps conversation
-history only in the current page. Changing combos or clearing the chat starts a
-fresh conversation.
+For media, choose a compatible combo, enter a prompt or speech text, and supply
+files for image editing/transcription/translation. Image edits optionally accept
+a mask. Enter a provider-specific voice for speech where required. **Advanced
+media options** accepts a JSON object for native fields such as size, duration,
+lyrics, language, and response format. The combo and file controls own their
+reserved fields. Inputs stay available after success/failure for deliberate
+repeat tests; media results never enter chat context.
+
+Inline base64 images display a local preview/download; binary audio displays a
+player/download after its body finishes. Browser codecs vary; raw PCM may need
+downloading. Remote image/video/music URLs are explicit no-referrer links, never
+automatically loaded or proxied through the gateway. Video may take several
+minutes, and leaving the page does not guarantee upstream job cancellation or
+prevent charges. Routing diagnostics use a bounded header for media, so audio
+stays binary/streaming; any omitted tail attempts are identified, with full
+metadata in History when logging is enabled. Media remains metadata-only even
+in Extended logging.
+
+The playground requires JavaScript. Chat/evaluations are non-streaming; media
+uses the same adapters and stream guards as the API. Conversation history,
+media, and file selections stay page-local. Reset/mode/combo changes discard
+results and release preview URLs; leaving the page also clears keys and inputs.
 
 ```sh
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -175,8 +232,8 @@ Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and mod
 Generated API keys optionally support **Requests per minute** (1–1,000,000) and
 **Maximum concurrent requests** (1–10,000). Set these when generating a key or
 under **Edit access / expiry / limits**; blank means unlimited. Existing keys
-remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions, SystemOne evaluations, and
-test chat together; `/v1/models` is exempt.
+remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions, SystemOne evaluations, media generation/transcription,
+and test chat together; `/v1/models` is exempt.
 
 Rate accounting uses fixed 60-second windows beginning with the first admitted
 request for that key. Each admitted gateway request counts once, including
@@ -284,11 +341,14 @@ The parent database directory must already exist and be writable. SQLite WAL/SHM
 ## Providers and protocols
 
 Provider cards display capability tags: **Text, Image, Video, Music, TTS, STT,
-and Decision**. Chat providers default to Text; SystemOne providers default to
-Decision. Open any preset or custom provider, check its **Provider tags**, and
-click **Save tags** to assign multiple tags or clear them all. Tags are manual
-organizational labels, not verified model capabilities and do not enable image,
-video, music, or speech endpoints in SparkRouter.
+and Decision**. Defaults reflect documented capabilities for supported media presets; other chat
+providers default to Text and SystemOne to Decision. Open any preset or custom
+provider, check its **Provider tags**, and click **Save tags** to assign multiple
+tags or clear them all. Tags are organizational labels, not model/account access
+checks or routing permissions. Media APIs are enabled by their protocol adapters,
+not by changing tags. Multi-capability services share one provider card and key.
+See [Media APIs](MEDIA.md) for supported integrations, request examples, limits,
+and the OmniRoute source audit.
 
 Checkbox filters to the right of the Providers search bar match **any** checked
 tag and combine with the name search. No checked tags means show all. Filtering
@@ -311,9 +371,10 @@ curl http://127.0.0.1:8080/v1/systemone \
   -d '{"model":"typesafe/jev-latest","state":"Help! My payouts are failing.","questions":{"urgent":{"type":"noul","instructions":"Does this convey urgency?"}}}'
 ```
 
-Use `combo/<name>` instead for combo routing. `/v1/systemone` tries only enabled
-SystemOne connections; chat completions and Test chat skip SystemOne connections.
-Mixed combos therefore use only the targets compatible with the incoming endpoint.
+Use `combo/<name>` instead for combo routing. `/v1/systemone` requires a
+Decision-category combo with SystemOne connections; chat requires a Text combo.
+Mixed-category combos are rejected rather than silently filtering incompatible
+steps.
 SystemOne forwards the original evaluation JSON with only `model` replaced and
 returns native `model`, `answers`, and `usage` JSON without chat translation.
 Noul, Choice, Score, structured instructions/criteria, and unknown extension
@@ -329,7 +390,7 @@ catalog, not a guarantee that every model supports every endpoint. The Test page
 Smart without a session ID has no chat-message fingerprint and uses the strategy.
 
 
-Providers are configuration, not vendor-specific implementations. The dashboard includes OmniRoute's API-key chat presets that use the **OpenAI** or **Anthropic** adapters, including OpenRouter, Groq, DeepSeek, Together, and Fireworks. Local OpenAI-compatible servers use the **OpenAI** protocol too. Include any required API prefix (usually `/v1`) in the base URL. Trailing slashes are normalized; URL credentials, query strings, and fragments are rejected. HTTP is supported for local servers. An empty API key is allowed for unauthenticated local servers.
+Vendors sharing a protocol use the same adapter through configuration; native media protocols have explicit translators. The dashboard includes OmniRoute's API-key chat presets that use the **OpenAI** or **Anthropic** adapters, including OpenRouter, Groq, DeepSeek, Together, and Fireworks. Local OpenAI-compatible servers use the **OpenAI** protocol too. Include any required API prefix (usually `/v1`) in the base URL. Trailing slashes are normalized; URL credentials, query strings, and fragments are rejected. HTTP is supported for local servers. An empty API key is allowed for unauthenticated local servers.
 
 The **Anthropic** protocol uses `https://api.anthropic.com/v1` and translates Chat Completions to `/messages`, including text, system instructions, tools, and streaming. Vendor-specific protocol limitations are described below.
 
@@ -344,7 +405,7 @@ reserved. Existing custom providers receive saved slugs on startup without
 changing credentials or combo references. Ungrouped non-preset connections use
 a reserved connection-specific namespace.
 
-The connection test sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** stores that list. Model cards show and copy the provider-prefixed **public ID** (Copy uses the modern Clipboard API on HTTPS/localhost, with a legacy fallback for plain HTTP LAN access); model details also show the **upstream ID** used by combo steps. Cards support search and show only a compact context-size tag (for example, `128k ctx` or `1.05M ctx`, rounded to at most two decimal places); output limits, pricing, and free-model status stay in the info popup. Combo suggestions retain raw upstream IDs, and you can still type any model. Some servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
+The connection test normally sends `GET {base_url}/models` with the saved credentials. It verifies that endpoint, not model access or generation. **Refresh models** stores that list. Deepgram and ElevenLabs use their native list shapes; MiniMax/ElevenLabs lists are supplemented with documented media IDs. fal.ai refresh uses a labeled starter catalog instead of a live discovery/access check, and its connection probe asks for a generation test. See [media discovery](MEDIA.md#availability-and-discovery). Model cards show and copy the provider-prefixed **public ID** (Copy uses the modern Clipboard API on HTTPS/localhost, with a legacy fallback for plain HTTP LAN access); model details also show the **upstream ID** used by combo steps. Cards support search and show only a compact context-size tag (for example, `128k ctx` or `1.05M ctx`, rounded to at most two decimal places); output limits, pricing, and free-model status stay in the info popup. Combo suggestions retain raw upstream IDs, and you can still type any model. Some servers do not implement model listing; a failed refresh does not mean their chat endpoint is unusable. Save changes before testing them.
 
 Saved API keys are never rendered back into HTML. Leaving the key field blank
 when editing a connection preserves the existing encrypted value. To clear a
@@ -435,7 +496,7 @@ clear, transfer and status work without it.
 
 ### Request history and configuration transfer
 
-**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. **Basic** (default) stores metadata only. **Off** records no new routed history. **Extended**, explicitly confirmed in Settings, also stores sensitive request/response body captures. Retention defaults to the newest 10,000 requests (a lower cap can be selected in Settings), with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; inserts do not delay response commitment and finalization is bounded. Reading the logging preference before routing has a 200 ms deadline (failure disables recording for that request); database write failures do not fail generation. Streaming finalization waits for the insert so a fast completion is not left recorded as still streaming. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
+**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. **Basic** (default) stores metadata only. **Off** records no new routed history. **Extended**, explicitly confirmed in Settings, also stores sensitive chat/SystemOne request/response body captures. Media requests always remain metadata-only, including binary audio completion/interruption tracking; uploads, prompts, output bodies, and signed media URLs are not captured. Retention defaults to the newest 10,000 requests (a lower cap can be selected in Settings), with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; inserts do not delay response commitment and finalization is bounded. Reading the logging preference before routing has a 200 ms deadline (failure disables recording for that request); database write failures do not fail generation. Streaming finalization waits for the insert so a fast completion is not left recorded as still streaming. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
 
 Extended is a development tool, not an HTTP wire logger: it captures the validated
 gateway request JSON (public model ID, after removing Test chat CSRF) and final
@@ -468,7 +529,10 @@ reported as USD; non-USD or missing prices are not estimated and display as
 unknown. Clearing history clears these statistics, not lifetime totals.
 
 **Settings → Backup & restore** (`/settings`) exports versioned JSON containing provider groups, named connections, and combos with ordered steps/strategies. It excludes provider credentials, gateway API keys, cached model lists, and history. This is configuration transfer, **not a complete backup**. Paste JSON to preview it, then confirm import. Imports are validated again and applied in one transaction with fresh IDs; existing configuration is never overwritten, and conflicting combo names reject the entire import. Combo affinity modes and
-Sticky timeouts are included; older version 1 files without those fields default
+Combo categories are included; older version 1 files without a category default
+to Text and must still pass category/protocol validation. Conflicting model
+classifications within a document are rejected before import. Unused model
+classifications are not exported. Sticky timeouts are included; older version 1 files without those fields default
 to Off and 5 minutes. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
 Group slugs are exported too. Version 1 documents without a slug remain accepted;
 imports preserve requested slugs when available and add a suffix on conflicts.
@@ -481,7 +545,8 @@ documents with their required references. Ungrouped custom connections receive
 their own new provider groups so they remain manageable in the dashboard.
 
 The test page itself is a dashboard page, but `POST /test/chat` and
-`POST /test/systemone` additionally require the same gateway authentication as `/v1/*`, plus dashboard CSRF and
+`POST /test/systemone`, `POST /test/media/{mode}`, and
+`POST /test/media-upload/{mode}` additionally require the same gateway authentication as `/v1/*`, plus dashboard CSRF and
 origin checks. It never reveals saved provider credentials or raw upstream errors.
 
 The dashboard uses `Referrer-Policy: same-origin`: native form submissions retain their Origin for validation, and external destinations receive no referrer. If a submission is rejected, reload the form after a server restart (CSRF tokens change), use one consistent hostname and port, and ensure a reverse proxy preserves the browser-facing Host header.
@@ -531,6 +596,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-`/v1/chat/completions`, `/v1/systemone`, and `/v1/models` are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No embeddings, Responses API, Gemini, OAuth, adaptive routing optimization, price optimization, queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+`/v1/chat/completions`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No embeddings, Responses API, Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
-Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing requires a `/models` endpoint. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow in this version.
+Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking blocks are not exposed as answer text. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow in this version.

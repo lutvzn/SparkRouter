@@ -5,7 +5,7 @@
 {% block topbar_heading %}
 <div class="topbar-heading">
   <h1>Test</h1>
-  <p class="topbar-subtitle">Try chat or SystemOne evaluations with a combo and inspect its routing.</p>
+  <p class="topbar-subtitle">Test chat, evaluations, images, video, music, and speech with a combo and inspect its routing.</p>
 </div>
 {% endblock %}
 {% block content %}
@@ -20,13 +20,20 @@
       <select id="test-mode" autocomplete="off">
         <option value="chat">Chat</option>
         <option value="systemone">SystemOne</option>
+        <option value="image">Image</option>
+        <option value="image-edit">Image edit</option>
+        <option value="video">Video</option>
+        <option value="music">Music</option>
+        <option value="speech">TTS / Speech</option>
+        <option value="transcription">STT / Transcription</option>
+        <option value="translation">Audio translation</option>
       </select>
     </div>
     <div class="test-combo-picker">
       <label for="test-combo">Combo</label>
       <select id="test-combo" autocomplete="off" aria-describedby="test-target-hint">
         {% for c in combos %}
-        <option value="{{ c.name }}">{{ c.name }} &middot; {{ c.strategy.label() }}</option>
+        <option value="{{ c.name }}" data-category="{{ c.category.as_str() }}">{{ c.name }} &middot; {{ c.category.label() }} &middot; {{ c.strategy.label() }}</option>
         {% endfor %}
       </select>
     </div>
@@ -72,7 +79,28 @@
   }
 }</textarea>
       </div>
-      <label for="test-draft" class="test-draft-label">Message</label>
+      <div id="test-media" class="test-evaluation" hidden>
+        <p id="test-media-hint" class="hint"></p>
+        <div id="test-upload-controls" hidden>
+          <label for="test-file">Input file</label>
+          <input id="test-file" type="file" accept="audio/*,video/*">
+          <div id="test-mask-control" hidden>
+            <label for="test-mask">Mask image (optional)</label>
+            <input id="test-mask" type="file" accept="image/*">
+          </div>
+        </div>
+        <div id="test-voice-control" hidden>
+          <label for="test-voice">Voice (provider-specific; optional for model-selected voices)</label>
+          <input id="test-voice" type="text" autocomplete="off" spellcheck="false" placeholder="alloy, MiniMax voice ID, or ElevenLabs voice ID">
+        </div>
+        <details>
+          <summary>Advanced media options (JSON)</summary>
+          <label for="test-media-options">Extra upstream fields</label>
+          <textarea id="test-media-options" rows="4" spellcheck="false" aria-describedby="test-media-options-hint">{}</textarea>
+          <p id="test-media-options-hint" class="hint">Provider-specific options, e.g. {"response_format":"b64_json"} for supported inline images, {"response_format":"mp3"} for speech, or {"language":"en"} for STT. Model and uploaded files come from the controls above.</p>
+        </details>
+      </div>
+      <label for="test-draft" class="test-draft-label">Message / prompt / speech text</label>
       <div class="test-compose-row">
         <input id="test-draft" type="text" autocomplete="off" placeholder="Message your combo…">
         <button type="submit" id="test-send" class="btn primary" disabled>Send <span aria-hidden="true">↑</span></button>
@@ -80,7 +108,7 @@
       <p id="test-status" class="hint" role="status" aria-live="polite" hidden></p>
       <p id="test-error" class="test fail" role="alert" hidden></p>
     </form>
-    <p class="hint test-disclaimer">Sends real upstream requests; provider charges may apply. Replies are non-streaming.</p>
+    <p class="hint test-disclaimer">Sends real upstream requests; provider charges may apply. Chat and evaluations are non-streaming; audio is downloaded before playback. Video may take several minutes. Remote media URLs are links, never automatically fetched; inline images and binary audio can be previewed here. Inputs and results stay in this page only.</p>
   </div>
 </div>
 <script src="/static/test-chat.js" defer></script>

@@ -76,7 +76,13 @@ async fn load_tags(
     Ok(crate::db::provider_tags::list(&state.db)
         .await?
         .remove(identity)
-        .unwrap_or_else(|| crate::db::provider_tags::defaults(protocol)))
+        .unwrap_or_else(|| {
+            identity
+                .strip_prefix("/providers/catalog/")
+                .and_then(provider_catalog::find)
+                .map(|preset| preset.default_tags())
+                .unwrap_or_else(|| crate::db::provider_tags::defaults(protocol))
+        }))
 }
 
 pub(crate) async fn save_tags(
@@ -700,7 +706,7 @@ fn build_tiles(
         .map(|(preset, (connection_count, enabled_count))| ProviderTile {
             name: preset.name.to_string(),
             protocol: preset.protocol.as_str().to_string(),
-            tags: crate::db::provider_tags::defaults(&preset.protocol),
+            tags: preset.default_tags(),
             href: format!("/providers/catalog/{}", preset.slug),
             connection_count,
             enabled_count,
@@ -794,6 +800,11 @@ fn protocol_options(selected: Option<&Protocol>) -> Vec<ProtocolOption> {
         (Protocol::OpenAi.as_str(), "OpenAI"),
         (Protocol::Anthropic.as_str(), "Anthropic"),
         (Protocol::SystemOne.as_str(), "SystemOne"),
+        (Protocol::Fal.as_str(), "fal.ai"),
+        (Protocol::MiniMax.as_str(), "MiniMax"),
+        (Protocol::Deepgram.as_str(), "Deepgram"),
+        (Protocol::ElevenLabs.as_str(), "ElevenLabs"),
+        (Protocol::Xai.as_str(), "xAI"),
     ]
     .into_iter()
     .map(|(value, label)| ProtocolOption {

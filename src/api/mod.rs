@@ -1,4 +1,5 @@
 pub mod chat;
+pub(crate) mod media;
 pub mod models;
 
 use crate::app::AppState;
@@ -12,4 +13,5 @@ pub fn router() -> Router<AppState> {
         .route("/chat/completions", post(chat::complete))
         .route("/systemone", post(chat::systemone))
         .route("/models", get(models::list))
+        .merge(media::router())
 }

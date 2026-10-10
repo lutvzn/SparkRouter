@@ -22,9 +22,15 @@ async fn dashboard_systemone_testing_preserves_native_results_and_actual_trace()
     for (id, mock) in [("first", &first), ("backup", &backup)] {
         save(&state, id, &mock.url(), Protocol::SystemOne).await;
     }
-    let combo = combos::create_with_strategy(&state.db, "eval", combos::Strategy::RoundRobin)
-        .await
-        .unwrap();
+    let combo = combos::create_typed(
+        &state.db,
+        "eval",
+        combos::Category::Decision,
+        combos::Strategy::RoundRobin,
+        combos::AffinityOptions::default(),
+    )
+    .await
+    .unwrap();
     for id in ["first", "backup"] {
         combos::add_step(&state.db, &combo.id, id, "jev-latest")
             .await
@@ -76,7 +82,15 @@ async fn dashboard_systemone_rejects_invalid_csrf_auth_scope_origin_and_payload(
     let mock =
         spawn_upstream(Router::new().route("/systemone", post(|| async { StatusCode::OK }))).await;
     save(&state, "eval", &mock.url(), Protocol::SystemOne).await;
-    let combo = combos::create(&state.db, "eval").await.unwrap();
+    let combo = combos::create_typed(
+        &state.db,
+        "eval",
+        combos::Category::Decision,
+        combos::Strategy::Priority,
+        combos::AffinityOptions::default(),
+    )
+    .await
+    .unwrap();
     combos::add_step(&state.db, &combo.id, "eval", "jev-latest")
         .await
         .unwrap();
@@ -277,7 +291,16 @@ async fn systemone_shares_generated_key_admission_with_chat() {
     ))
     .await;
     save(&state, "eval", &mock.url(), Protocol::SystemOne).await;
-    let combo = combos::create(&state.db, "eval").await.unwrap();
+    combos::create(&state.db, "chat").await.unwrap();
+    let combo = combos::create_typed(
+        &state.db,
+        "eval",
+        combos::Category::Decision,
+        combos::Strategy::Priority,
+        combos::AffinityOptions::default(),
+    )
+    .await
+    .unwrap();
     combos::add_step(&state.db, &combo.id, "eval", "jev-latest")
         .await
         .unwrap();
@@ -312,6 +335,9 @@ async fn systemone_shares_generated_key_admission_with_chat() {
     for path in ["/v1/systemone", "/v1/chat/completions", "/test/systemone"] {
         let mut body = payload();
         body["_csrf"] = json!(state.csrf_token.as_str());
+        if path == "/v1/chat/completions" {
+            body["model"] = json!("combo/chat");
+        }
         let response = call(&state, path, body, Some(secret)).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().contains_key("retry-after"));
@@ -340,10 +366,20 @@ async fn native_passthrough_direct_discovery_and_protocol_isolation() {
     ))
     .await;
     save(&state, "chat", &chat.url(), Protocol::OpenAi).await;
-    let combo = combos::create(&state.db, "eval").await.unwrap();
-    combos::add_step(&state.db, &combo.id, "chat", "chat-model")
-        .await
-        .unwrap();
+    let combo = combos::create_typed(
+        &state.db,
+        "eval",
+        combos::Category::Decision,
+        combos::Strategy::Priority,
+        combos::AffinityOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        combos::add_step(&state.db, &combo.id, "chat", "chat-model")
+            .await
+            .is_err()
+    );
     combos::add_step(&state.db, &combo.id, "eval", "jev-latest")
         .await
         .unwrap();
@@ -388,9 +424,9 @@ async fn native_passthrough_direct_discovery_and_protocol_isolation() {
         )
         .await
         .status(),
-        StatusCode::OK
+        StatusCode::BAD_REQUEST
     );
-    assert_eq!(chat.hits.count(), 1);
+    assert_eq!(chat.hits.count(), 0);
 }
 
 #[tokio::test]
@@ -415,7 +451,15 @@ async fn retryable_and_invalid_success_fall_back_but_422_stops() {
         .await;
         save(&state, "first", &first.url(), Protocol::SystemOne).await;
         save(&state, "backup", &backup.url(), Protocol::SystemOne).await;
-        let combo = combos::create(&state.db, "eval").await.unwrap();
+        let combo = combos::create_typed(
+            &state.db,
+            "eval",
+            combos::Category::Decision,
+            combos::Strategy::Priority,
+            combos::AffinityOptions::default(),
+        )
+        .await
+        .unwrap();
         for id in ["first", "backup"] {
             combos::add_step(&state.db, &combo.id, id, "jev-latest")
                 .await

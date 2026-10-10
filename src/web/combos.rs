@@ -1,10 +1,10 @@
 //! Combo admin pages and actions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use askama::Template;
 use axum::{
-    extract::{Form, Path, State},
+    extract::{Form, Path, Query, State},
     http::HeaderMap,
     response::{Html, IntoResponse, Response},
 };
@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
 use crate::db::{
-    combos::{self, AffinityMode, AffinityOptions, Strategy},
+    combos::{self, AffinityMode, AffinityOptions, Category, Strategy},
     provider_groups::ConnectionGroup,
     providers::Provider,
 };
@@ -27,12 +27,14 @@ pub(crate) struct CombosPage {
     app_name: &'static str,
     csrf_token: String,
     combos: Vec<ComboRow>,
+    category: String,
 }
 
 pub(crate) struct ComboRow {
     id: String,
     name: String,
     step_summary: String,
+    category_label: String,
     strategy_label: String,
     affinity_label: String,
 }
@@ -42,6 +44,7 @@ pub(crate) struct ComboRow {
 pub(crate) struct ComboNewPage {
     app_name: &'static str,
     csrf_token: String,
+    category: String,
     affinity_mode: String,
     sticky_minutes: String,
 }
@@ -53,6 +56,7 @@ pub(crate) struct ComboEditPage {
     csrf_token: String,
     combo_id: String,
     combo_name: String,
+    category: String,
     /// Stored strategy as its form value (`as_str`) so the select can mark
     /// the matching option selected.
     strategy: String,
@@ -105,6 +109,8 @@ pub(crate) struct ProviderOption {
 pub(crate) struct ComboForm {
     _csrf: String,
     name: String,
+    #[serde(default)]
+    category: Option<String>,
     /// Absent for legacy name-only posts: creation then defaults to
     /// `priority`, while edits preserve the stored strategy.
     #[serde(default)]
@@ -122,10 +128,23 @@ pub(crate) struct StepForm {
     model: String,
 }
 
-pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+#[derive(Default, Deserialize)]
+pub(crate) struct CategoryFilter {
+    category: Option<String>,
+}
+
+pub(crate) async fn list(
+    State(state): State<AppState>,
+    Query(filter): Query<CategoryFilter>,
+) -> Result<Html<String>, AppError> {
+    let category = filter.category.filter(|c| !c.is_empty());
+    let selected = category.as_deref().map(Category::parse).transpose()?;
     let stored = crate::db::combos::list(&state.db).await?;
     let mut combos = Vec::with_capacity(stored.len());
     for combo in stored {
+        if selected.is_some_and(|category| category != combo.category) {
+            continue;
+        }
         let step_count = crate::db::combos::steps(&state.db, &combo.id).await?.len();
         combos.push(ComboRow {
             step_summary: match step_count {
@@ -133,6 +152,7 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
                 1 => "1 step".to_string(),
                 n => format!("{n} steps"),
             },
+            category_label: combo.category.label().to_owned(),
             strategy_label: combo.strategy.label().to_owned(),
             affinity_label: if combo.affinity.mode == AffinityMode::Sticky {
                 format!("Sticky · {} min", combo.affinity.sticky_minutes)
@@ -147,13 +167,25 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
         combos,
+        category: category.unwrap_or_default(),
     })
 }
 
-pub(crate) async fn new(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+pub(crate) async fn new(
+    State(state): State<AppState>,
+    Query(filter): Query<CategoryFilter>,
+) -> Result<Html<String>, AppError> {
     render(ComboNewPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
+        category: filter
+            .category
+            .as_deref()
+            .map(Category::parse)
+            .transpose()?
+            .unwrap_or_default()
+            .as_str()
+            .to_owned(),
         affinity_mode: AffinityMode::Off.as_str().to_owned(),
         sticky_minutes: AffinityOptions::default().sticky_minutes.to_string(),
     })
@@ -168,8 +200,14 @@ pub(crate) async fn create(
     // Parse before the insert so an unknown value is a 400, never a row.
     let strategy = parse_strategy(form.strategy.as_deref())?.unwrap_or(Strategy::Priority);
     let affinity = parse_affinity(&form)?.unwrap_or_default();
+    let category = form
+        .category
+        .as_deref()
+        .map(Category::parse)
+        .transpose()?
+        .unwrap_or_default();
     let combo =
-        crate::db::combos::create_with_options(&state.db, &name, strategy, affinity).await?;
+        crate::db::combos::create_typed(&state.db, &name, category, strategy, affinity).await?;
     Ok(see_other(&format!("/combos/{}", combo.id)))
 }
 
@@ -184,6 +222,7 @@ pub(crate) async fn edit(
         csrf_token: state.csrf_token.as_str().to_owned(),
         combo_id: combo.id,
         combo_name: combo.name,
+        category: combo.category.as_str().to_owned(),
         strategy: combo.strategy.as_str().to_owned(),
         affinity_mode: combo.affinity.mode.as_str().to_owned(),
         sticky_minutes: combo.affinity.sticky_minutes.to_string(),
@@ -204,7 +243,8 @@ pub(crate) async fn rename(
     // a partial rename; `None` preserves the stored strategy.
     let strategy = parse_strategy(form.strategy.as_deref())?;
     let affinity = parse_affinity(&form)?;
-    crate::db::combos::update_with_options(&state.db, &id, &name, strategy, affinity).await?;
+    let category = form.category.as_deref().map(Category::parse).transpose()?;
+    crate::db::combos::update_typed(&state.db, &id, &name, strategy, affinity, category).await?;
     state.affinity.forget(&id);
     Ok(see_other(&format!("/combos/{id}")))
 }
@@ -360,7 +400,48 @@ async fn editor_data(
     let providers = crate::db::providers::list(&state.db).await?;
     let memberships = crate::db::provider_groups::connection_groups(&state.db).await?;
     let steps = step_rows(state, combo_id, &providers, &memberships).await?;
-    let (groups, options) = provider_options(state, providers, &memberships).await?;
+    let category = combos::get(&state.db, combo_id).await?.category;
+    // A single-purpose protocol is positive evidence even when discovery
+    // supplies IDs only (e.g. SystemOne or Anthropic). Multi-purpose providers
+    // must not leak their entire catalog into every category's suggestions.
+    let single_category: HashSet<String> = providers
+        .iter()
+        .filter(|provider| Category::ALL.iter().filter(|c| c.accepts(provider)).count() == 1)
+        .map(|provider| provider.id.clone())
+        .collect();
+    let providers = providers
+        .into_iter()
+        .filter(|provider| category.accepts(provider))
+        .collect();
+    let (groups, mut options) = provider_options(state, providers, &memberships).await?;
+    let assigned: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT provider_id, model, category FROM model_categories")
+            .fetch_all(&state.db)
+            .await?;
+    let lists = crate::db::connection_models::for_connections(
+        &state.db,
+        &options.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+    )
+    .await?;
+    for option in &mut options {
+        option.models.retain(|model| {
+            let classification = assigned
+                .iter()
+                .find(|(provider, id, _)| provider == &option.id && id == model);
+            let fields = lists
+                .get(&option.id)
+                .and_then(|list| list.models.iter().find(|m| &m.id == model))
+                .map(|model| model.fields.as_slice())
+                .unwrap_or_default();
+            category.matches_fields(fields)
+                && match classification {
+                    Some((_, _, mode)) => mode == category.as_str(),
+                    None => {
+                        single_category.contains(&option.id) || category.suggests_fields(fields)
+                    }
+                }
+        });
+    }
     Ok((steps, groups, options))
 }
 
@@ -648,10 +729,12 @@ mod tests {
         let page = CombosPage {
             app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
+            category: String::new(),
             combos: vec![ComboRow {
                 id: "default".to_string(),
                 name: "default".to_string(),
                 step_summary: "2 steps".to_string(),
+                category_label: "Text".into(),
                 strategy_label: "Round robin".to_string(),
                 affinity_label: "Affinity: Off".to_string(),
             }],
@@ -695,6 +778,7 @@ mod tests {
         let new = ComboNewPage {
             app_name: crate::APP_NAME,
             csrf_token: CSRF.to_string(),
+            category: "text".into(),
             affinity_mode: "off".into(),
             sticky_minutes: "5".into(),
         }
@@ -713,6 +797,7 @@ mod tests {
             csrf_token: CSRF.to_string(),
             combo_id: "default".to_string(),
             combo_name: "default".to_string(),
+            category: "text".into(),
             strategy: "round_robin".to_string(),
             affinity_mode: "smart".into(),
             sticky_minutes: "7".into(),
@@ -762,15 +847,21 @@ mod tests {
                 .split("</form>")
                 .next()
                 .unwrap();
-            assert_eq!(settings.matches("class=\"combo-field\"").count(), 4);
+            assert_eq!(settings.matches("class=\"combo-field\"").count(), 5);
             assert_eq!(
                 settings
                     .matches("class=\"info-button\" type=\"button\"")
                     .count(),
-                4
+                5
             );
             assert!(!settings.contains("<p class=\"hint\">"));
-            for id in ["name-help", "strategy-help", "affinity-help", "sticky-help"] {
+            for id in [
+                "name-help",
+                "strategy-help",
+                "category-help",
+                "affinity-help",
+                "sticky-help",
+            ] {
                 assert_eq!(
                     page.matches(&format!("id=\"{id}\" role=\"tooltip\""))
                         .count(),

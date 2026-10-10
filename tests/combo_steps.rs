@@ -303,7 +303,10 @@ async fn htmx_edit_returns_escaped_independent_forms_and_refreshed_model_suggest
         &[db::connection_models::StoredModel {
             id: "suggested<&>".into(),
             name: "Suggested".into(),
-            fields: vec![],
+            fields: vec![db::connection_models::ModelField {
+                label: "Output modalities".into(),
+                value: "text".into(),
+            }],
             free: false,
         }],
         false,

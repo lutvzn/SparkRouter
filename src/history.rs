@@ -123,6 +123,10 @@ pub(crate) async fn record_response(
         .is_some_and(|c| c.mode == crate::db::settings::LoggingMode::Extended);
     let success = response.status().is_success();
     let is_stream = success && streaming;
+    let is_binary = response
+        .extensions()
+        .get::<crate::providers::media::BinaryStream>()
+        .is_some();
     let usage = response
         .extensions()
         .get::<Usage>()
@@ -225,7 +229,7 @@ pub(crate) async fn record_response(
     // dropped body records cancellation. Bytes/errors are forwarded unchanged.
     let stream = async_stream::stream! {
         let mut guard = guard;
-        let mut decoder = Some(SseDecoder::default());
+        let mut decoder = if is_binary { None } else { Some(SseDecoder::default()) };
         let mut source = body.into_data_stream();
         while let Some(chunk) = source.next().await {
             match &chunk {
@@ -251,7 +255,7 @@ pub(crate) async fn record_response(
             yield chunk;
             if failed { return; }
         }
-        guard.finish(if guard.done { "success" } else { "interrupted" }).await;
+        guard.finish(if guard.done || is_binary { "success" } else { "interrupted" }).await;
     };
     Response::from_parts(parts, Body::from_stream(stream))
 }

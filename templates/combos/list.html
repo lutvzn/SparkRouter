@@ -9,9 +9,21 @@
 </div>
 {% endblock %}
 {% block content %}
-<div class="page-head page-actions">
-  <a class="btn primary" href="/combos/new"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Add combo</a>
-</div>
+<form method="get" action="/combos" class="page-head page-actions">
+  <label for="combo-category">Category</label>
+  <select id="combo-category" name="category">
+    <option value="">All categories</option>
+    <option value="text"{% if category == "text" %} selected{% endif %}>Text</option>
+    <option value="decision"{% if category == "decision" %} selected{% endif %}>Decision / SystemOne</option>
+    <option value="image"{% if category == "image" %} selected{% endif %}>Image</option>
+    <option value="video"{% if category == "video" %} selected{% endif %}>Video</option>
+    <option value="music"{% if category == "music" %} selected{% endif %}>Music</option>
+    <option value="tts"{% if category == "tts" %} selected{% endif %}>TTS</option>
+    <option value="stt"{% if category == "stt" %} selected{% endif %}>STT</option>
+  </select>
+  <button class="btn" type="submit">Filter</button>
+  <a class="btn primary" href="/combos/new{% if !category.is_empty() %}?category={{ category }}{% endif %}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Add combo</a>
+</form>
 {% if combos.is_empty() %}
 <p class="empty">No combos configured yet. <a href="/combos/new">Add one</a> to start routing with ordered fallbacks.</p>
 {% else %}
@@ -24,6 +36,7 @@
         <button type="button" class="btn small combo-copy" data-copy-model="combo/{{ c.name }}" aria-label="Copy model ID for {{ c.name }}" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label">Copy</span></button>
       </div>
       <span class="hint">{{ c.step_summary }}</span>
+      <span class="badge">{{ c.category_label }}</span>
       <span class="badge">{{ c.strategy_label }}</span>
         <span class="badge">{{ c.affinity_label }}</span>
     </div>

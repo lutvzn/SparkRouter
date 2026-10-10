@@ -67,6 +67,17 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Provider, AppError> {
 /// An existing group membership owns the endpoint. Resolve it in the same SQL
 /// statement as the write so a stale concurrent edit cannot change that target.
 pub async fn save(pool: &SqlitePool, provider: &Provider) -> Result<(), AppError> {
+    // New presets must not adopt a public namespace already owned by a custom
+    // group from an earlier catalog. That would silently broaden exact scopes.
+    // Explicit custom membership still owns its saved namespace and endpoint.
+    if let Some(preset) = crate::provider_catalog::matching(&provider.base_url, &provider.protocol)
+    {
+        let conflict: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_slugs WHERE slug = ?) AND NOT EXISTS(SELECT 1 FROM provider_group_connections WHERE provider_id = ?)")
+            .bind(preset.routing_slug()).bind(&provider.id).fetch_one(pool).await?;
+        if conflict {
+            return Err(AppError::InvalidRequest("This preset routing slug belongs to an existing custom provider; use a custom media provider with a distinct slug instead".into()));
+        }
+    }
     let result = sqlx::query(
         "INSERT INTO providers (id, name, base_url, protocol, encrypted_api_key, enabled)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)

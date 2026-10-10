@@ -5,6 +5,7 @@ pub mod api_keys;
 pub mod combos;
 pub mod config_transfer;
 pub mod connection_models;
+pub mod model_categories;
 pub mod provider_groups;
 pub mod provider_slugs;
 pub mod provider_tags;

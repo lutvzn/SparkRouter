@@ -29,6 +29,8 @@ pub(crate) struct RequestContext {
     scope: String,
     session_header: Option<HeaderValue>,
     pub(crate) systemone: bool,
+    pub(crate) media: Option<crate::providers::media::Kind>,
+    pub(crate) upload: Option<crate::providers::media::Upload>,
 }
 
 impl Default for RequestContext {
@@ -37,6 +39,8 @@ impl Default for RequestContext {
             scope: "anonymous".into(),
             session_header: None,
             systemone: false,
+            media: None,
+            upload: None,
         }
     }
 }
@@ -48,8 +52,46 @@ impl RequestContext {
         self
     }
 
-    pub(crate) fn accepts(&self, protocol: crate::providers::Protocol) -> bool {
-        self.systemone == (protocol == crate::providers::Protocol::SystemOne)
+    pub(crate) fn for_media(
+        mut self,
+        kind: crate::providers::media::Kind,
+        upload: Option<crate::providers::media::Upload>,
+    ) -> Self {
+        self.media = Some(kind);
+        self.upload = upload;
+        self.scope.push(':');
+        self.scope.push_str(kind.name());
+        self
+    }
+
+    pub(crate) fn category(&self) -> crate::db::combos::Category {
+        use crate::{db::combos::Category, providers::media::Kind};
+        if self.systemone {
+            return Category::Decision;
+        }
+        match self.media {
+            Some(Kind::Image | Kind::ImageEdit) => Category::Image,
+            Some(Kind::Video) => Category::Video,
+            Some(Kind::Music) => Category::Music,
+            Some(Kind::Speech) => Category::Tts,
+            Some(Kind::Transcription | Kind::Translation) => Category::Stt,
+            None => Category::Text,
+        }
+    }
+
+    pub(crate) fn accepts(&self, provider: &crate::db::providers::Provider) -> bool {
+        use crate::providers::Protocol;
+        if let Some(kind) = self.media {
+            return kind.accepts(crate::providers::media::dialect(provider));
+        }
+        if self.systemone {
+            provider.protocol == Protocol::SystemOne
+        } else {
+            matches!(
+                provider.protocol,
+                Protocol::OpenAi | Protocol::Anthropic | Protocol::MiniMax | Protocol::Xai
+            )
+        }
     }
 
     pub(crate) fn new(scope: String, headers: &HeaderMap) -> Self {
@@ -66,6 +108,8 @@ impl RequestContext {
             scope,
             session_header,
             systemone: false,
+            media: None,
+            upload: None,
         }
     }
 }
@@ -309,6 +353,7 @@ mod tests {
         Combo {
             id: "combo".into(),
             name: "test".into(),
+            category: crate::db::combos::Category::Text,
             strategy: Strategy::RoundRobin,
             affinity: AffinityOptions {
                 mode,
@@ -485,8 +530,7 @@ mod tests {
         );
         let other = RequestContext {
             scope: "other-key".into(),
-            session_header: None,
-            systemone: false,
+            ..RequestContext::default()
         };
         assert!(
             memory
@@ -517,8 +561,7 @@ mod tests {
         for i in 0..=MAX_ENTRIES {
             let context = RequestContext {
                 scope: format!("key-{i}"),
-                session_header: None,
-                systemone: false,
+                ..RequestContext::default()
             };
             memory.remember_at(
                 binding(&combo, &context, &crypto, &Value::Null)

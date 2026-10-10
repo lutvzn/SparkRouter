@@ -30,9 +30,12 @@ placement hints are bounded process-local state, not saved prompt/completion dat
 | `crypto.rs` | Versioned AES-256-GCM credential envelopes |
 | `db/mod.rs` | SQLite pool setup and embedded SQLx migrations |
 | `db/providers.rs` | Provider CRUD and ciphertext persistence |
-| `db/combos.rs` | Combo CRUD, step order, transactional mutations |
+| `db/combos.rs` | Typed combo CRUD, step order, transactional mutations |
+| `db/model_categories.rs` | Explicit connection/model classification, protocol/modality validation |
 | `web/` | Form validation, CSRF verification, rendering and dashboard actions |
 | `api/chat.rs` | JSON boundary validation, authorization/admission, and response history/permit wrapping |
+| `api/media.rs` | Shared media validation/admission and bounded replayable multipart inputs |
+| `providers/media.rs` | Compatible media, fal inference/queue polling, MiniMax/xAI native generation, Deepgram/ElevenLabs speech, binary commitment |
 | `api/models.rs` | Scoped OpenAI model discovery with optional cached token limits; combos inherit first configured step details |
 | `routing/mod.rs` | Combo-or-direct dispatch, shared attempt execution/traces, and pre-commit deadlines |
 | `routing/combo.rs` | Sequential combo fallback loop and retryable status helper |
@@ -46,6 +49,36 @@ placement hints are bounded process-local state, not saved prompt/completion dat
 
 `APP_NAME` in `src/lib.rs` centralizes the dashboard's display name. The package,
 binary, and API `owned_by` value are separate identifiers.
+
+## Combo category policy
+
+Combos persist one category: text, decision, image, video, music, tts, or stt.
+RequestContext maps the selected endpoint to its category (image edits share
+image; translation shares stt). API/dashboard handlers reject category mismatch
+before key admission; routing repeats the check and revalidates all step
+classifications before affinity/rotation or any upstream attempt. A metadata or
+protocol change cannot silently turn an existing chain into a mixed-category
+fallback. Provider tags remain independent display labels.
+
+Step add/edit declares unknown connection/model IDs in the selected category in
+the same immediate transaction as the mutation. Explicit cached output and speech
+input modalities constrain declarations; IDs are never classified by name and
+missing lists do not block manual entries. Existing declarations cannot change
+while referenced; removing every reference permits explicit reclassification.
+Changing a combo category requires an empty chain, atomically with its other
+settings. Duplication/import validates classifications and preserves category;
+transfer rejects cross-category declarations even before its transaction.
+
+Migration 0019 adds categories and declaration storage without deleting existing
+configuration. SystemOne-only legacy chains become decision; other chains default
+to text, with incompatible legacy configurations failing closed. The current
+installation's one-time, user-approved combo deletion is not embedded in migrations.
+The Test picker filters options by mode; the Combos list filters via ordinary GET
+forms. Step picker suggestions require positive evidence (a matching explicit
+declaration, suitable modalities, or a single-category protocol); missing
+metadata is not treated as a match for every category. Add/edit and HTMX
+fragments share the same filtering. Discovery exposes an additive category field
+for combos only.
 
 ## Startup and state
 
@@ -164,6 +197,9 @@ The public router is mounted at `/v1` separately from the dashboard:
 - `POST /v1/chat/completions`
 - `POST /v1/systemone` (native, non-streaming evaluations)
 - `GET /v1/models`
+- `POST /v1/images/generations`, `/v1/images/edits`
+- `POST /v1/videos/generations`, `/v1/music/generations`
+- `POST /v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`
 
 If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
 exists, API middleware requires `Authorization: Bearer <key>`. The environment
@@ -253,7 +289,8 @@ not forwarded to the client as redirect instructions.
 
 ## Protocols rather than vendors
 
-`Protocol::{OpenAi, Anthropic, SystemOne}` is the dispatch boundary. The dashboard catalog
+`Protocol::{OpenAi, Anthropic, SystemOne, Fal, MiniMax, Xai, Deepgram, ElevenLabs}`
+is the dispatch boundary. The dashboard catalog
 is static public metadata for OmniRoute API-key chat presets whose endpoint and
 auth header match one of these adapters. OpenRouter, Groq, DeepSeek, and similar
 vendors share OpenAI handling through configuration. No trait hierarchy or
@@ -270,8 +307,12 @@ accepted. HTTP/private endpoints are intentionally allowed for self-hosted model
 
 | SystemOne | `{base_url}/systemone` | Bearer key when configured | Preserve evaluation fields and native valid JSON response bytes; no streaming |
 
-All protocols test connectivity with `GET {base_url}/models`. That is not a
-generation test or a guarantee of access to a particular model.
+Protocols normally test connectivity with `GET {base_url}/models`. That is not a
+generation test or a guarantee of access to a particular model. fal.ai has no
+such probe: refresh provides labeled documented starter models, and a connection
+test reports that generation must be tested. Deepgram/ElevenLabs use native model
+list shapes; MiniMax/ElevenLabs catalogs add documented media IDs after an
+authenticated successful refresh.
 
 Anthropic translation deliberately rejects unsupported semantics rather than
 pretending to provide full OpenAI parity. Its default token budget is 8192.
@@ -282,14 +323,43 @@ current supported subset.
 SystemOne model listing reads the native `models` array with `name` IDs.
 The shared API handler applies authentication, model scopes, admission, capture,
 and history to evaluations. The request context carries endpoint compatibility:
-SystemOne routes skip chat providers and chat/Test-chat routes skip SystemOne providers,
-before strategy selection and again before attempts. SystemOne affinity namespaces
+SystemOne requires Decision combos and chat/Test-chat requires Text combos;
+mismatched categories and incompatible configured steps are rejected before
+strategy selection. Per-attempt compatibility guards remain in place. SystemOne affinity namespaces
 are separate from chat. The gateway checks top-level state/questions and rejects
 streaming; question validation remains upstream. The adapter bounds and validates
 the native success envelope (`model`, `answers`, no non-null `error`) before
 commitment; invalid success bodies are retryable. Unknown fields and successful
 response bytes are preserved. An additive migration widens the custom-provider
 protocol constraint while retaining group IDs, membership, slugs, and credentials.
+
+## Media routing
+
+Media shares combo/direct routing, exact model authorization, traffic admission,
+traces, and metadata history. Request context isolates affinity by endpoint and
+filters protocol-incompatible steps before strategy selection and before calls.
+Compatible services use JSON passthrough or bounded replayable multipart buffers;
+files are shared `Bytes`, not copied/base64-encoded on each attempt. Existing
+MiniMax/xAI OpenAI preset connections keep their identity; documented hosts select
+the native media dialect, while custom mirrors explicitly select the protocol.
+Saving an ungrouped preset connection rejects a slug already owned by a custom
+group, rather than merging provider namespaces and silently broadening scopes.
+
+Binary output is prefetched before commitment, then streamed with backpressure,
+a size bound, and sanitized body failures. Its completion marker is clean EOF,
+not SSE `[DONE]`; admission/affinity/history own its complete body lifetime.
+Media is metadata-only even with Extended enabled. No remote media URLs are
+fetched, keys are never sent to a CDN, and no raw errors are returned/logged.
+
+Native xAI/MiniMax video and fal queue tasks submit once and poll inline. A rejected submission
+can use fallback; accepted/ambiguously accepted tasks never submit a backup job.
+Polling errors, malformed accepted results, timeout, or cancellation stop the
+request. Dropping polling does not promise upstream task cancellation. fal poll
+URLs are restricted to the configured origin/base path and submitted request ID
+before credentials are attached; redirects remain disabled. Custom fal direct
+endpoints are supported too. No SDK, gateway queue, worker, or persistent job
+store was introduced. See [MEDIA.md](MEDIA.md) for supported adapters,
+provider-specific restrictions, deferred integrations, and upstream references.
 
 ## Streaming ownership and limits
 
@@ -318,13 +388,16 @@ dropped on completion, cancellation, or error. Streams remain backpressured.
 
 | Setting | Current limit |
 | --- | --- |
-| Incoming request body | 4 MiB |
+| Incoming JSON/dashboard body | 4 MiB |
+| Multipart media body (including framing) | 32 MiB; 64 fields; 64 KiB/text field |
+| Binary media output | 64 MiB |
 | Non-streaming upstream response | 16 MiB |
 | Individual SSE event | 1 MiB |
 | Connect timeout | 10 seconds |
 | Upstream idle read timeout | 120 seconds |
-| Each attempt's response-preparation deadline | 120 seconds |
-| Whole pre-commit fallback deadline | 180 seconds |
+| Each attempt's response-preparation deadline | 120 seconds chat/SystemOne; 600 seconds media |
+| Whole pre-commit fallback deadline | 180 seconds chat/SystemOne; 610 seconds media |
+| Native video/fal queue polling | Every 2 seconds, up to 570 seconds after submission |
 | Provider connection test and model refresh | 15 seconds |
 | HTTP pool idle lifetime / idle connections per host | 90 seconds / 4 |
 
@@ -333,7 +406,7 @@ longer while data arrives. The individual read timeout still applies.
 
 ## Dashboard and trust boundaries
 
-The Test page offers Chat and SystemOne modes. `POST /test/systemone` uses the
+The Test page offers Chat, SystemOne, and all seven media endpoint modes. `POST /test/systemone` uses the
 same dashboard CSRF/origin checks, gateway authentication/scopes, traffic
 admission, history/capture, and diagnostic wrapper as Test chat. It validates
 native state/questions, removes `_csrf`, rejects streaming, and routes only to
@@ -345,7 +418,28 @@ keys and evaluation inputs too. The SystemOne form keeps state/questions after
 success or failure for explicit repeat/retry and does not replay past results as
 chat messages.
 
-`GET /test` renders a combo chat playground with embedded JavaScript.
+Media uses `POST /test/media/{mode}` (JSON image/video/music/speech) or
+`POST /test/media-upload/{mode}` (multipart image-edit/transcription/translation).
+Both require a CSRF header, dashboard origin/login checks, gateway authentication,
+and a combo target. They remove CSRF fields and reuse `api/media.rs` validation,
+scopes, admission, routing, metadata-only history (`source: test`), and complete
+binary stream guards. Files remain shared bounded buffers. The original response
+bytes/format are preserved, including binary streaming. A dashboard-only base64
+JSON diagnostic header is capped at 4096 decoded bytes, dropping whole trailing
+attempts and setting a truncation flag; full attempts still go to History when
+enabled. No public API format/header is changed.
+
+Browser media controls support native extra fields, voice IDs and file/mask
+uploads. Binary audio becomes a page-local Blob only after successful body EOF;
+interrupted downloads do not produce a successful preview. Inline base64 images
+use local raster Blob previews. CSP permits blob images/media, not arbitrary
+remote sources. Remote URLs are validated HTTP(S) links opened explicitly with
+noopener/noreferrer; no remote fetch/proxy or bearer forwarding is introduced.
+Reset/mode/combo changes pause players and revoke Blob URLs; pagehide aborts
+fetches, clears files/options/voices/keys and rejects stale responses. Media never
+enters chat history or browser storage; rendered JSON/transcripts use textContent.
+
+`GET /test` renders a combo playground with embedded JavaScript.
 `POST /test/chat` requires dashboard CSRF/origin checks and the same gateway
 authentication as the public API. It forces non-streaming responses and invokes
 the existing combo fallback loop with an optional request-local attempt trace.
@@ -394,7 +488,8 @@ The list's clipboard control uses embedded JavaScript to copy `combo/<name>`;
 it is hidden when the browser's clipboard API is unavailable.
 
 The providers index is a preset/custom tile catalog. Cards show fixed capability
-labels (Text, Image, Video, Music, TTS, STT, Decision) with protocol-derived defaults.
+labels (Text, Image, Video, Music, TTS, STT, Decision) with documented preset or
+protocol-derived defaults. Multi-capability vendors use one tile and connections.
 CSRF/origin-protected tag forms save optional per-provider overrides in SQLite;
 these labels never affect protocol dispatch, model scopes, or routing. Custom
 overrides cascade on group deletion; preset overrides persist without connections.

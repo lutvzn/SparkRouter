@@ -84,6 +84,7 @@ async fn execute(
     } else {
         context
     };
+    routing::validate_combo_category(&state, model, context.category()).await?;
     let permit = auth.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();

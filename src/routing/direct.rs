@@ -76,7 +76,7 @@ async fn route_inner(
             };
         // Endpoint edits can change an unassigned connection's namespace.
         // Validate the namespace from the same snapshot as its credentials/URL.
-        if namespace != slug || !context.accepts(provider.protocol) {
+        if namespace != slug || !context.accepts(&provider) {
             continue;
         }
         if !provider.enabled {
@@ -95,7 +95,16 @@ async fn route_inner(
             slug: namespace,
             name: group_name,
         });
-        let attempt = super::attempt(state, &provider, &model, body, trace, &mut attempts).await;
+        let attempt = super::attempt(
+            state,
+            &provider,
+            &model,
+            body,
+            context,
+            trace,
+            &mut attempts,
+        )
+        .await;
         match attempt {
             Ok(response) => {
                 tracing::info!(

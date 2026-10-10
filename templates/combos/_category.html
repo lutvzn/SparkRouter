@@ -1,0 +1,18 @@
+<div class="combo-field">
+  <div class="field-label">
+    <label for="category">Category</label>
+    {% let info_id = "category-help" %}
+    {% let info_label = "About combo categories" %}
+    {% let info_text = "Each combo serves one API category. Connections and known output modalities must match. Adding an unclassified model explicitly declares it in this category; an already-used model cannot belong to another category on the same connection. Remove all steps before changing the category." %}
+    {% include "combos/_info.html" %}
+  </div>
+  <select id="category" name="category" required>
+    <option value="text"{% if category == "text" %} selected{% endif %}>Text</option>
+    <option value="decision"{% if category == "decision" %} selected{% endif %}>Decision / SystemOne</option>
+    <option value="image"{% if category == "image" %} selected{% endif %}>Image</option>
+    <option value="video"{% if category == "video" %} selected{% endif %}>Video</option>
+    <option value="music"{% if category == "music" %} selected{% endif %}>Music</option>
+    <option value="tts"{% if category == "tts" %} selected{% endif %}>TTS</option>
+    <option value="stt"{% if category == "stt" %} selected{% endif %}>STT</option>
+  </select>
+</div>

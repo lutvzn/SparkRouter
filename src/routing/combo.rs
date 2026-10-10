@@ -127,16 +127,39 @@ async fn route_inner(
     mut attempts: Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let combo = combos::by_name(&state.db, name).await?;
+    if combo.category != context.category() {
+        return Err(AppError::InvalidRequest(
+            "Combo category does not match this API mode".into(),
+        ));
+    }
     let mut steps = combos::steps(&state.db, &combo.id).await?;
+    // Revalidate every step before reserving a turn or making any provider call.
+    // This also fails closed after metadata/protocol edits or legacy imports.
+    let mut connection = state.db.acquire().await?;
+    for step in &steps {
+        crate::db::model_categories::validate(
+            &mut connection,
+            &step.provider_id,
+            &step.model,
+            combo.category,
+            false,
+        )
+        .await?;
+    }
+    drop(connection);
     let binding = super::affinity::binding(&combo, context, &state.crypto, body)?;
-    if combo.strategy != combos::Strategy::Priority || binding.is_some() || context.systemone {
+    if combo.strategy != combos::Strategy::Priority
+        || binding.is_some()
+        || context.systemone
+        || context.media.is_some()
+    {
         // Disabled connections do not consume turns. Snapshot eligible steps
         // before selecting a start, but recheck providers below before calls so
         // concurrent deletion/disable edits retain the existing safety behavior.
         let mut eligible = Vec::with_capacity(steps.len());
         for step in steps {
             match provider_db::get(&state.db, &step.provider_id).await {
-                Ok(provider) if provider.enabled && context.accepts(provider.protocol) => {
+                Ok(provider) if provider.enabled && context.accepts(&provider) => {
                     eligible.push(step)
                 }
                 Ok(_) | Err(AppError::NotFound(_)) => {}
@@ -174,7 +197,7 @@ async fn route_inner(
                 // provider while an earlier upstream attempt is still in progress.
                 None => continue,
             };
-        if !context.accepts(provider.protocol) {
+        if !context.accepts(&provider) {
             continue;
         }
         if !provider.enabled {
@@ -193,8 +216,16 @@ async fn route_inner(
             slug,
             name: group_name,
         });
-        let attempt =
-            super::attempt(state, &provider, &step.model, body, trace, &mut attempts).await;
+        let attempt = super::attempt(
+            state,
+            &provider,
+            &step.model,
+            body,
+            context,
+            trace,
+            &mut attempts,
+        )
+        .await;
         match attempt {
             Ok(response) => {
                 tracing::info!(combo = name, provider = %provider.id, model = %step.model,
@@ -203,7 +234,12 @@ async fn route_inner(
                 // MUST terminate that body; they cannot re-enter this fallback loop.
                 if let Some(binding) = binding {
                     let target = super::affinity::Target::from_step(&step);
-                    if body.get("stream").and_then(Value::as_bool) == Some(true) {
+                    if body.get("stream").and_then(Value::as_bool) == Some(true)
+                        || response
+                            .extensions()
+                            .get::<crate::providers::media::BinaryStream>()
+                            .is_some()
+                    {
                         return Ok(super::affinity::on_complete(
                             response,
                             state.affinity.clone(),

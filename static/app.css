@@ -917,9 +917,12 @@ main.combo-page { max-width: 90rem; }
 
 /* Compact combo settings; descriptions stay available on hover or focus. */
 .card.combo-settings { width: 100%; max-width: none; padding: 1rem 1.25rem; }
+.combo-page .page-actions { flex-wrap: wrap; align-items: center; }
+.combo-page .page-actions select { width: auto; max-width: 18rem; margin: 0; }
+.combo-page .page-actions label { margin: 0; }
 .combo-settings-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.3fr) repeat(4, minmax(0, 1fr));
   gap: .85rem 1rem;
 }
 .combo-field { min-width: 0; }
@@ -1061,6 +1064,11 @@ main.test-chat-page { max-width: 56rem; margin-top: 1rem; }
 .test-evaluation textarea { font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; width: 100%; resize: vertical; }
 .test-evaluation .hint { margin-top: 0; }
 .test-msg-body { max-width: 100%; }
+.test-media-preview { display: block; max-width: 100%; max-height: 28rem; object-fit: contain; margin: 0.75rem 0; }
+.test-media-player { display: block; width: 100%; max-width: 30rem; margin: 0.75rem 0; }
+.test-msg .btn { margin: 0.5rem 0.5rem 0 0; }
+#test-media details { margin: 0.75rem 0; }
+#test-media input[type="file"] { max-width: 100%; }
 .test-compose-row:has(input[hidden]) { justify-content: flex-end; }
 .test-routing { margin-bottom: 0.75rem; }
 .test-routing summary .hint { margin-left: 0.5rem; font-weight: 400; }

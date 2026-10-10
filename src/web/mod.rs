@@ -82,6 +82,12 @@ pub fn router() -> Router<AppState> {
         .route("/test", get(test::page))
         .route("/test/chat", post(test::chat))
         .route("/test/systemone", post(test::systemone))
+        .route("/test/media/{mode}", post(test::media))
+        .merge(
+            Router::new()
+                .route("/test/media-upload/{mode}", post(test::media_upload))
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/combos/new", get(combos::new))
         .route("/combos/{id}", get(combos::edit).post(combos::rename))
         .route("/combos/{id}/delete", post(combos::delete))
