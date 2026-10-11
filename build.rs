@@ -37,16 +37,30 @@ fn main() {
         &fs::read("data/models-dev-categories.json").expect("bundled models.dev snapshot"),
     )
     .expect("valid bundled models.dev snapshot");
-    let entries = if env::var_os("SPARKROUTER_MODELS_DEV_OFFLINE").is_some() {
-        bundled
+    let (entries, source) = if env::var_os("SPARKROUTER_MODELS_DEV_OFFLINE").is_some() {
+        (bundled, "bundled snapshot (2026-10-10)")
     } else {
-        download().unwrap_or_else(|()| {
-            println!(
-                "cargo:warning=models.dev unavailable or invalid; using bundled category snapshot"
-            );
-            bundled
-        })
+        match download() {
+            Ok(entries) => (entries, "live download"),
+            Err(()) => {
+                println!(
+                    "cargo:warning=models.dev unavailable or invalid; using bundled category snapshot"
+                );
+                (bundled, "bundled snapshot (2026-10-10); download failed")
+            }
+        }
     };
+    let imported_at = if source == "live download" {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("build clock after epoch")
+            .as_secs()
+    } else {
+        // The checked-in snapshot date, not the offline build clock.
+        1_791_590_400
+    };
+    println!("cargo:rustc-env=MODELS_DEV_SOURCE={source}");
+    println!("cargo:rustc-env=MODELS_DEV_IMPORTED_AT={imported_at}");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     fs::write(
         out.join("models_dev_categories.rs"),

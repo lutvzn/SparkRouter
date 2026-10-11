@@ -252,6 +252,75 @@ pub async fn by_name(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
         .ok_or_else(|| AppError::NotFound(format!("no combo named '{name}' exists")))
 }
 
+/// A consistent, validated routing setup. Provider credentials are deliberately
+/// not loaded here: each actual attempt reloads its live provider configuration.
+pub(crate) struct RoutingStep {
+    pub step: ComboStep,
+    pub provider: super::providers::Provider,
+}
+
+/// Two SELECTs regardless of chain length, in a short read transaction. Validate
+/// all steps (including disabled ones) before callers reserve strategy/affinity.
+/// The transaction is closed before any upstream I/O.
+pub(crate) async fn routing_snapshot(
+    pool: &SqlitePool,
+    name: &str,
+    category: Category,
+) -> Result<(Combo, Vec<RoutingStep>), AppError> {
+    let mut transaction = pool.begin().await?;
+    let row = sqlx::query("SELECT id, name, category, strategy, affinity_mode, sticky_minutes, routing_revision FROM combos WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("no combo named '{name}' exists")))?;
+    let combo = combo_from_row(&row)?;
+    if combo.category != category {
+        return Err(AppError::InvalidRequest(
+            "Combo category does not match this API mode".into(),
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT s.id, s.combo_id, s.position, s.provider_id, s.model,
+                p.id AS connection_id, p.protocol, p.base_url, p.enabled,
+                m.details, c.category AS assigned_category
+         FROM combo_steps s
+         LEFT JOIN providers p ON p.id = s.provider_id
+         LEFT JOIN connection_models m ON m.provider_id = s.provider_id AND m.model_id = s.model
+         LEFT JOIN model_categories c ON c.provider_id = s.provider_id AND c.model = s.model
+         WHERE s.combo_id = ? ORDER BY s.position",
+    )
+    .bind(&combo.id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let mut steps = Vec::with_capacity(rows.len());
+    for row in rows {
+        let step = step_from_row(&row)?;
+        let id: Option<String> = row.try_get("connection_id")?;
+        let provider = super::providers::Provider {
+            id: id.ok_or_else(|| {
+                AppError::InvalidRequest("Selected connection does not exist".into())
+            })?,
+            name: String::new(),
+            protocol: row.try_get::<String, _>("protocol")?.parse()?,
+            base_url: row.try_get("base_url")?,
+            enabled: row.try_get::<i64, _>("enabled")? != 0,
+            encrypted_api_key: Vec::new(),
+        };
+        let details: Option<String> = row.try_get("details")?;
+        let assigned: Option<String> = row.try_get("assigned_category")?;
+        super::model_categories::validate_snapshot(
+            &provider,
+            &step.model,
+            category,
+            details.as_deref(),
+            assigned.as_deref(),
+        )?;
+        steps.push(RoutingStep { step, provider });
+    }
+    transaction.commit().await?;
+    Ok((combo, steps))
+}
+
 /// Create a combo with a fresh UUID id and the default strategy.
 pub async fn create(pool: &SqlitePool, name: &str) -> Result<Combo, AppError> {
     create_with_strategy(pool, name, Strategy::default()).await
@@ -834,6 +903,127 @@ mod tests {
         steps(pool, combo_id).await.expect("steps")[index]
             .id
             .clone()
+    }
+
+    #[tokio::test]
+    async fn routing_snapshot_preserves_order_and_validates_disabled_steps() {
+        let pool = pool_with_providers().await;
+        let combo = create(&pool, "snapshot").await.unwrap();
+        add_step(&pool, &combo.id, "provider-b", "second-provider")
+            .await
+            .unwrap();
+        add_step(&pool, &combo.id, "provider-a", "first-provider")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE providers SET enabled = 0 WHERE id = 'provider-a'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (loaded, snapshot) = routing_snapshot(&pool, "snapshot", Category::Text)
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.routing_revision,
+            get(&pool, &combo.id).await.unwrap().routing_revision
+        );
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].step.model, "second-provider");
+        assert_eq!(snapshot[1].step.model, "first-provider");
+        assert!(snapshot[0].provider.enabled);
+        assert!(!snapshot[1].provider.enabled);
+        assert!(
+            snapshot
+                .iter()
+                .all(|entry| entry.provider.encrypted_api_key.is_empty())
+        );
+        // A one-connection pool is reusable immediately after loading; the
+        // snapshot does not retain a transaction through upstream execution.
+        assert!(
+            routing_snapshot(&pool, "snapshot", Category::Image)
+                .await
+                .is_err()
+        );
+        sqlx::query(
+            "UPDATE model_categories SET category = 'image' WHERE provider_id = 'provider-a'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            routing_snapshot(&pool, "snapshot", Category::Text)
+                .await
+                .is_err()
+        );
+        // Compare batched read validation with mutation validation's read mode.
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            super::super::model_categories::validate(
+                &mut connection,
+                "provider-a",
+                "first-provider",
+                Category::Text,
+                false,
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_snapshot_requires_positive_evidence_and_rejects_bad_metadata() {
+        let pool = pool_with_providers().await;
+        let combo = create(&pool, "evidence").await.unwrap();
+        add_step(&pool, &combo.id, "provider-a", "custom")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM model_categories")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            routing_snapshot(&pool, "evidence", Category::Text)
+                .await
+                .is_err()
+        );
+        crate::db::connection_models::replace(
+            &pool,
+            "provider-a",
+            &[crate::db::connection_models::StoredModel {
+                id: "custom".into(),
+                name: "Custom".into(),
+                free: false,
+                fields: vec![crate::db::connection_models::ModelField {
+                    label: "Supported endpoints".into(),
+                    value: "chat/completions".into(),
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            routing_snapshot(&pool, "evidence", Category::Text)
+                .await
+                .is_ok()
+        );
+        sqlx::query("UPDATE connection_models SET details = 'not JSON'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            routing_snapshot(&pool, "evidence", Category::Text).await,
+            Err(AppError::Configuration(_))
+        ));
+        let empty = create(&pool, "empty-snapshot").await.unwrap();
+        let (loaded, steps) = routing_snapshot(&pool, &empty.name, Category::Text)
+            .await
+            .unwrap();
+        assert_eq!(loaded.id, empty.id);
+        assert!(steps.is_empty());
+        assert!(matches!(
+            routing_snapshot(&pool, "missing", Category::Text).await,
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

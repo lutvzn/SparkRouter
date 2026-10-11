@@ -44,6 +44,7 @@ struct HistoryRow {
     latency_ms: i64,
     tokens: String,
     attempts: Vec<AttemptView>,
+    routing: String,
 }
 
 /// One line inside a row's attempts disclosure; the surrounding ordered list
@@ -55,6 +56,7 @@ struct AttemptView {
     outcome: String,
     outcome_class: &'static str,
     latency_ms: i64,
+    reason: String,
 }
 
 #[derive(Deserialize)]
@@ -78,12 +80,26 @@ pub(crate) async fn page(
     let page = requested.clamp(1, total_pages);
     let stored = request_history::list_page(&state.db, PAGE_SIZE, (page - 1) * PAGE_SIZE).await?;
     let stats = request_history::stats(&state.db).await?;
+    let mut rows = Vec::with_capacity(stored.len());
+    for record in stored {
+        let diagnostics = request_history::diagnostics(&state.db, &record.record.id).await?;
+        let mut row = HistoryRow::from_stored(record);
+        row.routing = diagnostics.selection.map_or_else(
+            || "Direct routing or historical record without selection metadata".into(),
+            |selection| format!("Strategy: {} · strategy start: step {} · actual start: step {} · affinity: {} ({})",
+                selection.strategy, selection.strategy_position, selection.starting_position,
+                selection.affinity_mode, selection.affinity));
+        for (attempt, reason) in row.attempts.iter_mut().zip(diagnostics.reasons) {
+            attempt.reason = reason;
+        }
+        rows.push(row);
+    }
     render(HistoryPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
         stats,
         max_retained: crate::db::settings::history_retention(&state.db).await?,
-        rows: stored.into_iter().map(HistoryRow::from_stored).collect(),
+        rows,
         page,
         total_pages,
     })
@@ -127,6 +143,7 @@ impl HistoryRow {
         let record = stored.record;
         Self {
             id: record.id,
+            routing: String::new(),
             created_at: stored.created_at,
             source: record.source,
             model: record.model,
@@ -155,6 +172,7 @@ impl HistoryRow {
                         outcome: attempt.outcome,
                         outcome_class,
                         latency_ms: attempt.latency_ms,
+                        reason: "Reason unavailable for this historical record".into(),
                     }
                 })
                 .collect(),

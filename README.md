@@ -142,6 +142,45 @@ chains become Decision; remaining chains default to Text. Legacy media/mixed
 chains must be rebuilt in their correct categories; incompatible chains cannot
 route. It does not delete configuration automatically.
 
+### Model classification and connection refresh diagnostics
+
+Each refreshed model card shows a category icon immediately left of Copy, the
+same size as the action icons, with an accessible category label. Its Info popup
+shows the category and evidence source: upstream metadata, built-in catalog,
+models.dev, manual declaration, or single-category protocol. Unclassified models
+use a question-mark icon; conflicting evidence uses a warning icon. Contradictory known
+evidence/declarations show **Needs review**, not a guessed category. The Info
+popup explains which saved declaration, catalog category, connection protocol,
+or upstream endpoint/modality metadata caused the conflict. Classification
+controls now live inside each model's Info popup, alongside the embedded catalog
+source/date. Select a category and **Save**, or select **Default** and Save
+to remove the saved declaration and use automatic metadata/catalog/protocol
+evidence (or Unclassified if none exists). Known capability constraints still
+apply. A reset is blocked if its automatic default would invalidate any
+referencing combo; unknown referenced models require an explicit declaration.
+Remove referencing steps before changing their declared category. Known automatic
+models can route after reset without a saved declaration, but changed metadata is
+still revalidated before every combo request. Unlisted IDs can still be declared
+through combo step entry. Declarations do not add models to direct discovery or
+prove account access.
+
+Connection model controls show the last successful refresh, last attempt,
+discovered count, and sanitized refresh failure. Failed refreshes keep the last
+successful list and the error survives page reloads. Lists older than 24 hours
+are labeled stale; this is advisory and does not disable routing. Successful
+refresh clears the error. Refresh remains user-triggered; no background polling
+or generation calls are introduced.
+
+History's attempts disclosure includes the snapshotted strategy, strategy-selected
+and actual starting step, affinity mode and hit/miss/unavailable-target result,
+and an execution-ordered attempt timeline with sanitized failures and latency.
+Retryable HTTP failures retain their numeric status; transport/invalid-response
+failures have a generic reason. No prompts, session IDs, URLs, credentials, or
+raw upstream errors are recorded in these diagnostics. Selection is not stream
+completion: the final request outcome still reports interrupted/cancelled bodies.
+Older records do not reconstruct routing settings from today's configuration.
+Logging Off skips these new diagnostics too; retention/clear cascade to them.
+
 ### Per-combo cache-aware and sticky routing
 
 Each combo has one **Cache-aware / sticky routing** dropdown:

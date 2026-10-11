@@ -27,6 +27,47 @@ models.dev download. Cargo caches build-script output; repeated builds do not
 necessarily refetch. A network failure falls back to the bundled snapshot with
 a Cargo warning, not a build failure. See [BUILD.md](BUILD.md#build-time-modelsdev-categories).
 
+## Dashboard diagnostics
+
+`cargo test --locked --test dashboard_diagnostics` uses local mocks to verify
+refresh timestamps/counts, stale-cache labels, failure persistence across page
+reloads, sanitized HTTP failures, cached-list preservation and success recovery;
+manual declaration CSRF, referenced-category protection and catalog constraints;
+per-model Info editing/reset, removal of the connection-level editor, automatic
+routing after reset, and fail-closed reset for unknown or incompatible referenced
+models;
+and recorded round-robin/affinity/fallback snapshots, HTTP 429 reasons, privacy,
+and cascading clear. `cargo test --locked --lib db::model_categories` covers
+all provenance sources, exact provider scoping, precedence and conflicts.
+
+`cargo test --locked --lib web::providers` also checks icons for all seven model
+categories, unclassified/review states, accessible labels, placement before Copy,
+and classification reasons appearing only inside the model Info popup.
+Conflict-detail coverage names conflicting saved/catalog categories, unsupported
+protocols and contradictory upstream modalities; the dashboard integration test
+checks that a changed upstream endpoint produces an explanation in Info only.
+
+Manual browser acceptance: inspect model Info classification editing and reset,
+check category icons match the Copy/Info size without overlapping model names,
+verify the compact classification dropdown/Save row wraps on narrow screens
+and selecting Default then Save removes the manual declaration
+and Classification help stays collapsed until opened,
+declare an unknown ID, check stale/failed refresh feedback, and expand History
+attempts at narrow/wide widths in both themes. Verify ordinary forms without
+JavaScript and keyboard focus. Tests do not establish browser visuals or real
+provider access.
+
+## Batched combo routing setup
+
+`cargo test --locked --lib db::combos::tests::routing_snapshot` checks ordered
+joined steps, disabled-step validation, classification conflicts, positive
+automatic evidence, malformed metadata, empty/missing combos, category mismatch,
+and release of the read transaction on a single-connection pool. Existing
+`combo_categories`, `combo_affinity`, and `gateway` integration tests cover
+fail-closed category checks, strategy accounting, fallback and live provider
+rechecks. Setup uses two SELECTs independent of step count; this is a structural
+query reduction, not a measured throughput or latency claim.
+
 ## Required checks
 
 From the repository root, using the toolchain described in [BUILD.md](BUILD.md):

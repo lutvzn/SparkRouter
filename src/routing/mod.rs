@@ -78,9 +78,16 @@ async fn attempt(
         })
     });
     if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
+        trace.reason = match &result {
+            Ok(response) => format!("Upstream selected (HTTP {}); body owns any subsequent failure", response.status().as_u16()),
+            Err(AttemptError::Retryable) => "Retryable upstream failure: transport or invalid/incomplete response".into(),
+            Err(AttemptError::RetryableStatus(status)) => format!("Retryable upstream HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("target unavailable")),
+            Err(AttemptError::Permanent(AppError::Upstream(status))) => format!("Non-retryable upstream HTTP {}", status.as_u16()),
+            Err(AttemptError::Permanent(_)) => "Non-retryable request/provider failure or possibly accepted media job; fallback stopped".into(),
+        };
         trace.finish(match &result {
             Ok(_) => "selected",
-            Err(AttemptError::Retryable) => "retryable_failure",
+            Err(AttemptError::Retryable | AttemptError::RetryableStatus(_)) => "retryable_failure",
             Err(AttemptError::Permanent(_)) => "permanent_failure",
         });
     }
@@ -111,6 +118,7 @@ pub(crate) async fn route_with_trace(
             .last_mut()
             .filter(|trace| trace.outcome == "in_progress")
         {
+            trace.reason = "Gateway preparation deadline exceeded".into();
             trace.finish("timed_out");
         }
         Err(AppError::Routing)

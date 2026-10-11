@@ -117,7 +117,7 @@ async fn route_inner(
                 // The response body now exclusively owns this attempt.
                 return Ok(response);
             }
-            Err(AttemptError::Retryable) => {
+            Err(AttemptError::Retryable | AttemptError::RetryableStatus(_)) => {
                 tracing::warn!(
                     provider = %provider.id,
                     model = %model,

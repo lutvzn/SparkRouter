@@ -112,6 +112,36 @@ pub async fn save_with_usage(
     usage: UsageMetrics,
     snapshots: &[Option<ProviderSnapshot>],
 ) -> Result<(), AppError> {
+    save_with_diagnostics(pool, record, usage, snapshots, None).await
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RoutingDiagnostics {
+    pub selection: Option<crate::routing::combo::RoutingSelection>,
+    pub reasons: Vec<String>,
+}
+
+pub(crate) async fn diagnostics(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<RoutingDiagnostics, AppError> {
+    let details: Option<String> =
+        sqlx::query_scalar("SELECT details FROM request_routing WHERE request_id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(details
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default())
+}
+
+pub(crate) async fn save_with_diagnostics(
+    pool: &SqlitePool,
+    record: &Record,
+    usage: UsageMetrics,
+    snapshots: &[Option<ProviderSnapshot>],
+    diagnostics: Option<&RoutingDiagnostics>,
+) -> Result<(), AppError> {
     validate_usage(usage)?;
     if !snapshots.is_empty() && snapshots.len() != record.attempts.len() {
         return Err(AppError::InvalidRequest(
@@ -201,6 +231,13 @@ pub async fn save_with_usage(
         )
         .execute(&mut *transaction)
         .await?;
+    }
+    if let Some(diagnostics) = diagnostics {
+        sqlx::query("INSERT INTO request_routing(request_id, details) VALUES (?, ?)")
+            .bind(&record.id)
+            .bind(serde_json::to_string(diagnostics).map_err(|_| AppError::Routing)?)
+            .execute(&mut *transaction)
+            .await?;
     }
     // Read the cap under the same write lock as the insert and pruning.
     sqlx::query(

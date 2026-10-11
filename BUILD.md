@@ -52,7 +52,10 @@ When Cargo runs `build.rs`, it downloads public metadata from
 index. The request has a 20-second timeout, a 16 MiB size limit, and no redirects
 or provider credentials. Failure or invalid data uses the checked-in
 `data/models-dev-categories.json` snapshot; builds do not require models.dev to
-be available. The runtime executable never contacts this service.
+be available. The runtime executable never contacts this service. Model classification review
+shows the embedded source and date: successful live-download time, or the bundled
+snapshot date (2026-10-10), including when a download failed. Offline builds retain
+the fixed snapshot date rather than embedding a changing build timestamp.
 
 Cargo caches build-script output; an unchanged build does not fetch again. Force
 a new import by changing `SPARKROUTER_MODELS_DEV_REFRESH`, for example:

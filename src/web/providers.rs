@@ -198,9 +198,69 @@ pub(crate) struct ProviderRow {
     models_known: bool,
     models_truncated: bool,
     model_error: String,
+    diagnostics: ConnectionDiagnostics,
+}
+
+#[derive(Default)]
+struct ConnectionDiagnostics {
+    refreshed_at: String,
+    attempted_at: String,
+    stale: bool,
+    classifications: HashMap<String, (String, String)>,
+    conflicts: HashMap<String, String>,
+    catalog_date: String,
+    declarations: Vec<(String, String)>,
 }
 
 impl ProviderRow {
+    fn classification(&self, model: &str) -> String {
+        self.diagnostics
+            .classifications
+            .get(model)
+            .map(|(category, source)| format!("{category} · {source}"))
+            .unwrap_or_else(|| "Unclassified".into())
+    }
+    fn declared_category(&self, model: &str) -> &str {
+        self.diagnostics
+            .declarations
+            .iter()
+            .find(|(id, _)| id == model)
+            .map(|(_, category)| category.as_str())
+            .unwrap_or("default")
+    }
+    fn classification_conflict(&self, model: &str) -> &str {
+        self.diagnostics
+            .conflicts
+            .get(model)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+    fn classification_label(&self, model: &str) -> &str {
+        match self.diagnostics.classifications.get(model) {
+            Some((_, source)) if source.starts_with("Needs review") => "Needs review",
+            Some((category, _)) => category,
+            None => "Unclassified",
+        }
+    }
+    fn classification_icon(&self, model: &str) -> &'static str {
+        match self.classification_label(model) {
+            "Text" => "message-square",
+            "Decision / SystemOne" => "git-branch",
+            "Image" => "image",
+            "Video" => "video",
+            "Music" => "music",
+            "TTS" => "volume-2",
+            "STT" => "mic",
+            "Needs review" => "triangle-alert",
+            _ => "circle-help",
+        }
+    }
+    fn categories(&self) -> Vec<crate::db::model_categories::Category> {
+        crate::db::model_categories::Category::ALL.to_vec()
+    }
+    fn catalog_source(&self) -> &'static str {
+        crate::providers::model_catalog::IMPORT_SOURCE
+    }
     fn public_model_id(&self, upstream_model: &str) -> String {
         format!("{}/{upstream_model}", self.slug)
     }
@@ -216,6 +276,7 @@ impl ProviderRow {
             models_known: false,
             models_truncated: false,
             model_error: String::new(),
+            diagnostics: ConnectionDiagnostics::default(),
         }
     }
 }
@@ -562,15 +623,114 @@ async fn attach_models(
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let lists = crate::db::connection_models::for_connections(&state.db, &ids).await?;
     let namespaces = crate::db::provider_slugs::for_connections(&state.db).await?;
+    let statuses = crate::db::connection_models::refresh_statuses(&state.db).await?;
+    let declarations: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT provider_id, model, category FROM model_categories")
+            .fetch_all(&state.db)
+            .await?;
+    let catalog_date: String = sqlx::query_scalar("SELECT datetime(?, 'unixepoch') || ' UTC'")
+        .bind(crate::providers::model_catalog::IMPORTED_AT)
+        .fetch_one(&state.db)
+        .await?;
     for row in &mut rows {
+        row.diagnostics.catalog_date.clone_from(&catalog_date);
+        if let Some(status) = statuses.get(&row.id) {
+            row.diagnostics
+                .attempted_at
+                .clone_from(&status.attempted_at);
+            row.model_error.clone_from(&status.error);
+        }
         row.slug = namespaces.get(&row.id).cloned().unwrap_or_default();
         if let Some(list) = lists.get(&row.id) {
             row.models.clone_from(&list.models);
             row.models_known = true;
             row.models_truncated = list.truncated;
+            row.diagnostics.refreshed_at.clone_from(&list.refreshed_at);
+            row.diagnostics.stale = list.stale;
+        }
+        row.diagnostics.declarations = declarations
+            .iter()
+            .filter(|(id, _, _)| id == &row.id)
+            .map(|(_, model, category)| (model.clone(), category.clone()))
+            .collect();
+        let provider = crate::db::providers::get(&state.db, &row.id).await?;
+        for model in &row.models {
+            let declared = declarations
+                .iter()
+                .find(|(id, name, _)| id == &row.id && name == &model.id)
+                .and_then(|(_, _, category)| {
+                    crate::db::model_categories::Category::parse(category).ok()
+                });
+            let (category, source) = crate::db::model_categories::evidence(
+                &provider,
+                &model.id,
+                &model.fields,
+                declared,
+            );
+            let conflict = crate::db::model_categories::conflict_details(
+                &provider,
+                &model.id,
+                &model.fields,
+                declared,
+            );
+            if !conflict.is_empty() {
+                row.diagnostics.conflicts.insert(model.id.clone(), conflict);
+            }
+            row.diagnostics.classifications.insert(
+                model.id.clone(),
+                (
+                    category.map_or_else(|| "Unclassified".into(), |c| c.label().into()),
+                    source.into(),
+                ),
+            );
         }
     }
     Ok(rows)
+}
+
+fn refresh_error(error: &AppError) -> String {
+    match error {
+        AppError::Upstream(status) => {
+            format!("Model refresh failed: upstream HTTP {}", status.as_u16())
+        }
+        AppError::HttpClient => "Model refresh failed: transport or timeout error".into(),
+        AppError::Provider => {
+            "Model refresh failed: credential or provider configuration error".into()
+        }
+        _ => "Model refresh failed: invalid response or unavailable provider".into(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ClassificationForm {
+    _csrf: String,
+    model: String,
+    category: String,
+}
+
+pub(crate) async fn classify_model(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<ClassificationForm>,
+) -> Result<Html<String>, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    if form.category == "default" {
+        crate::db::model_categories::reset(&state.db, &id, form.model.trim()).await?;
+    } else {
+        crate::db::model_categories::declare(
+            &state.db,
+            &id,
+            form.model.trim(),
+            crate::db::model_categories::Category::parse(&form.category)?,
+        )
+        .await?;
+    }
+    let provider = crate::db::providers::get(&state.db, &id).await?;
+    let mut rows = attach_models(&state, vec![ProviderRow::from_stored(provider)]).await?;
+    render(ModelsFragment {
+        csrf_token: state.csrf_token.as_str().to_owned(),
+        provider: rows.pop().expect("classified connection"),
+    })
 }
 
 /// Fetches the connection's `/models` list, replaces the stored snapshot, and
@@ -593,20 +753,18 @@ pub(crate) async fn refresh_models(
                 listed.truncated,
             )
             .await?;
-            let mut row = ProviderRow::from_stored(provider);
-            row.models = listed.models;
-            row.models_known = true;
-            row.models_truncated = listed.truncated;
-            row.model_error.clear();
+            let mut rows = attach_models(&state, vec![ProviderRow::from_stored(provider)]).await?;
+            let row = rows.pop().expect("refreshed connection");
             ModelsFragment {
                 csrf_token: state.csrf_token.as_str().to_owned(),
                 provider: row,
             }
         }
         Err(error) => {
+            let message = refresh_error(&error);
+            crate::db::connection_models::refresh_failed(&state.db, &id, &message).await?;
             let mut rows = attach_models(&state, vec![ProviderRow::from_stored(provider)]).await?;
-            let mut row = rows.pop().expect("the refreshed connection is present");
-            row.model_error = error.to_string();
+            let row = rows.pop().expect("the refreshed connection is present");
             ModelsFragment {
                 csrf_token: state.csrf_token.as_str().to_owned(),
                 provider: row,
@@ -908,6 +1066,73 @@ mod tests {
     }
 
     #[test]
+    fn model_category_icons_precede_copy_and_keep_reasons_in_info() {
+        let mut provider = ProviderRow::from_stored(stored_provider(&test_crypto(), "test-key"));
+        provider.slug = "test".into();
+        provider.models_known = true;
+        provider.models = vec![crate::db::connection_models::StoredModel {
+            id: "model".into(),
+            name: "Model".into(),
+            fields: vec![],
+            free: false,
+        }];
+        for (category, icon) in [
+            ("Text", "message-square"),
+            ("Decision / SystemOne", "git-branch"),
+            ("Image", "image"),
+            ("Video", "video"),
+            ("Music", "music"),
+            ("TTS", "volume-2"),
+            ("STT", "mic"),
+            ("Unclassified", "circle-help"),
+        ] {
+            provider.diagnostics.classifications.insert(
+                "model".into(),
+                (category.into(), "Upstream metadata".into()),
+            );
+            assert_eq!(provider.classification_icon("model"), icon);
+            assert_eq!(provider.classification_label("model"), category);
+            assert!(include_str!("../../static/icons.svg").contains(&format!("id=\"{icon}\"")));
+        }
+        provider
+            .diagnostics
+            .classifications
+            .insert("model".into(), ("Text".into(), "Upstream metadata".into()));
+        let html = ModelsFragment {
+            csrf_token: "csrf".into(),
+            provider,
+        }
+        .render()
+        .unwrap();
+        let category = html.find("class=\"model-card-category\"").unwrap();
+        let copy = html.find("class=\"model-card-copy\"").unwrap();
+        let info = html.find("class=\"model-info-body\"").unwrap();
+        assert!(category < copy);
+        assert!(html.contains("role=\"img\" aria-label=\"Text\" title=\"Text\""));
+        assert!(!html[..info].contains("Upstream metadata"));
+        assert!(html[info..].contains("Text · Upstream metadata"));
+        assert!(html.contains("class=\"model-classification-controls\""));
+        assert!(html.contains("class=\"model-classification-save\""));
+        assert!(!html.contains("class=\"model-classification-reset\""));
+        assert!(html.contains("aria-label=\"Save classification\">Save</button>"));
+        assert!(!html.contains("aria-label=\"Reset to default\""));
+        assert!(html.contains(">Default</option>"));
+        assert!(html.contains("<details class=\"model-classification-help\">"));
+        assert!(!html.contains("<h3>Model classification</h3>"));
+        let mut provider = ProviderRow::from_stored(stored_provider(&test_crypto(), "test-key"));
+        assert_eq!(provider.classification_icon("missing"), "circle-help");
+        provider.diagnostics.classifications.insert(
+            "model".into(),
+            (
+                "Unclassified".into(),
+                "Needs review: conflicting evidence".into(),
+            ),
+        );
+        assert_eq!(provider.classification_icon("model"), "triangle-alert");
+        assert_eq!(provider.classification_label("model"), "Needs review");
+    }
+
+    #[test]
     fn blank_api_key_edit_preserves_identical_ciphertext() {
         let crypto = test_crypto();
         let provider = stored_provider(&crypto, "sk-original-secret");
@@ -1074,6 +1299,7 @@ mod tests {
                 models_known: true,
                 models_truncated: false,
                 model_error: String::new(),
+                diagnostics: ConnectionDiagnostics::default(),
             })
             .collect();
         let html = ProviderGroupPage {
@@ -1189,6 +1415,7 @@ mod tests {
                 models_known: true,
                 models_truncated: false,
                 model_error: String::new(),
+                diagnostics: ConnectionDiagnostics::default(),
             }],
             is_custom: true,
         }
@@ -1225,7 +1452,8 @@ mod tests {
         assert!(group.contains("popovertargetaction=\"hide\" aria-label=\"Close model details\""));
         assert!(group.contains("class=\"connection-list\""));
         assert!(group.contains("action=\"/providers/p1/models\""));
-        assert_eq!(group.matches("name=\"_csrf\"").count(), 6);
+        assert_eq!(group.matches("name=\"_csrf\"").count(), 7);
+        assert!(group.contains("action=\"/providers/p1/classification\""));
         // The add form posts back to the group and pins the endpoint.
         assert!(group.contains("action=\"/providers/groups/custom-g1\""));
         assert!(
@@ -1252,6 +1480,7 @@ mod tests {
                 models_known: false,
                 models_truncated: false,
                 model_error: String::new(),
+                diagnostics: ConnectionDiagnostics::default(),
             }],
             is_custom: false,
         }

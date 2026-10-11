@@ -109,6 +109,8 @@ pub fn replace_model(body: &Value, model: &str) -> Result<Value, AppError> {
 #[derive(Debug)]
 pub enum AttemptError {
     Retryable,
+    /// Sanitized numeric status, retained for diagnostics without upstream bodies.
+    RetryableStatus(StatusCode),
     Permanent(AppError),
 }
 
@@ -685,7 +687,7 @@ fn check_status(response: &reqwest::Response) -> Result<(), AttemptError> {
     if status.is_success() {
         Ok(())
     } else if crate::routing::combo::is_retryable_status(status) {
-        Err(AttemptError::Retryable)
+        Err(AttemptError::RetryableStatus(status))
     } else {
         Err(AttemptError::Permanent(AppError::Upstream(status)))
     }

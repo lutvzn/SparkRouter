@@ -2,6 +2,13 @@
   {% if !provider.model_error.is_empty() %}
   <span class="test fail model-error" title="{{ provider.model_error }}">{{ provider.model_error }}</span>
   {% endif %}
+  <p class="hint">
+    {% if provider.models_known %}Last successful refresh: {{ provider.diagnostics.refreshed_at }}.
+    {% if provider.diagnostics.stale %}<span class="badge fail">Stale (over 24 hours)</span>{% endif %}
+    {% else %}Never successfully refreshed.{% endif %}
+    {% if !provider.diagnostics.attempted_at.is_empty() %}Last attempt: {{ provider.diagnostics.attempted_at }}.{% endif %}
+    {% if !provider.model_error.is_empty() && provider.models_known %}Using the last successful cached list.{% endif %}
+  </p>
   {% if provider.models_known %}
   <details class="model-dropdown">
     <summary class="btn small">
@@ -23,6 +30,7 @@
         {% for model in provider.models %}
         <article class="model-card" data-model-text="{{ model.search_text() }}">
           <div class="model-card-tools">
+            <span class="model-card-category" role="img" aria-label="{{ provider.classification_label(model.id) }}" title="{{ provider.classification_label(model.id) }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#{{ provider.classification_icon(model.id) }}"></use></svg></span>
             <button type="button" class="model-card-copy" data-copy-model="{{ provider.public_model_id(model.id) }}" aria-label="Copy {{ provider.public_model_id(model.id) }}" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label visually-hidden">Copy</span></button>
              <button type="button" class="model-card-info" popovertarget="model-info-{{ provider.id }}-{{ loop.index }}" aria-haspopup="dialog" aria-label="Details for {{ model.name }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#info"></use></svg></button>
           </div>
@@ -45,6 +53,29 @@
              <h2 id="model-info-heading-{{ provider.id }}-{{ loop.index }}">{{ model.name }}</h2>
              <p>Public ID: <code>{{ provider.public_model_id(model.id) }}</code></p>
              <p class="hint">Upstream ID (for combo steps): <code>{{ model.id }}</code></p>
+             <p>Category: <strong>{{ provider.classification(model.id) }}</strong></p>
+             {% if !provider.classification_conflict(model.id).is_empty() %}
+             <p class="hint"><strong>Why review is needed:</strong> {{ provider.classification_conflict(model.id) }}</p>
+             {% endif %}
+             <section class="model-classification" aria-label="Model classification">
+               <div class="model-classification-controls">
+               <form class="model-classification-save" method="post" action="/providers/{{ provider.id }}/classification" hx-post="/providers/{{ provider.id }}/classification" hx-target="#models-{{ provider.id }}" hx-swap="outerHTML">
+                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                 <input type="hidden" name="model" value="{{ model.id }}">
+                 <label class="visually-hidden" for="class-category-{{ provider.id }}-{{ loop.index }}">Model classification</label>
+                 <select id="class-category-{{ provider.id }}-{{ loop.index }}" name="category">
+                   <option value="default"{% if provider.declared_category(model.id) == "default" %} selected{% endif %}>Default</option>
+                   {% for category in provider.categories() %}<option value="{{ category.as_str() }}"{% if provider.declared_category(model.id) == category.as_str() %} selected{% endif %}>{{ category.label() }}</option>{% endfor %}
+                 </select>
+                 <button class="btn small" type="submit" aria-label="Save classification">Save</button>
+               </form>
+               </div>
+               <details class="model-classification-help">
+                 <summary>Classification help</summary>
+                 <p class="hint">Default uses upstream metadata, the catalog, or protocol evidence. Manual declarations cannot bypass known capabilities. Remove referencing combo steps before changing category; reset is blocked if the default would invalidate them.</p>
+                 <p class="hint">models.dev: {{ provider.catalog_source() }}. Catalog date (download or bundled snapshot): {{ provider.diagnostics.catalog_date }}. No runtime lookup. Capability evidence is not a guarantee of account access.</p>
+               </details>
+             </section>
             {% if model.info_fields().is_empty() && !model.is_free() %}
             <p class="hint">This model did not include any extra fields.</p>
             {% else %}

@@ -98,6 +98,35 @@ metadata is not treated as a match for every category. Add/edit and HTMX
 fragments share the same filtering. Discovery exposes an additive category field
 for combos only.
 
+## Dashboard diagnostics
+
+`model_categories::evidence` uses existing compatibility/positive-evidence rules
+to expose classification provenance without broad name heuristics. Upstream
+metadata precedes advisory catalogs, and conflicting declarations are flagged for
+review. The declaration editor uses the same immediate-transaction validation
+as combo step mutations; referenced models cannot change category. Classification
+editing/reset lives in each model's Info popup. Reset deletes a declaration under
+an immediate write lock only if automatic evidence preserves every referencing
+combo category. Routing permits a missing declaration only with positive automatic
+evidence matching the requested category; unknown IDs still require declarations.
+Build metadata
+records live-download time or the fixed bundled snapshot date.
+
+Migration 0021 adds connection refresh status and metadata-only routing snapshots.
+Successful list replacement clears refresh errors in the same transaction; failed
+refreshes update only a fixed sanitized error/attempt timestamp, leaving the last
+successful model list intact. Staleness is computed against SQLite's clock at
+24 hours, advisory only. No worker or automatic polling is added.
+
+Combo attempt traces carry selection snapshots (strategy start, actual start,
+affinity mode/result) and sanitized failure reasons. Retryable HTTP errors retain
+only status codes. `history` saves these with the normal record transaction,
+without extra pre-response I/O. `request_routing` cascades on history deletion;
+Logging Off bypasses it. Selected attempts never imply successful stream EOF.
+Historical rows without snapshots show unavailable diagnostics rather than using
+current combo settings. No session identifiers, prompts, endpoint URLs or raw
+upstream error bodies are retained.
+
 ## Startup and state
 
 1. Initialize `tracing-subscriber`, respecting `RUST_LOG`.
@@ -192,9 +221,14 @@ revision, so an in-flight old snapshot cannot seed hints for an edited combo.
 Dashboard combo edits/deletion also clear hints; older revisions expire naturally.
 Duplication copies settings but uses fresh combo/step IDs and no runtime hints.
 
-Routing snapshots the ordered step list, then loads each provider as its attempt
-begins. Changes made during an active request are not a single transactional
-configuration snapshot. A provider removed after its snapshotted step is deleted
+Combo routing loads settings and joined ordered steps/provider eligibility/model
+metadata/declarations in two SELECTs within one short read transaction, regardless
+of chain length. The same pure capability checks used by mutations validate every
+step, including disabled steps, before strategy reservation. The transaction ends
+before upstream I/O; no provider credentials are loaded into this setup snapshot.
+The API boundary still checks the combo category separately before quota admission.
+Each actual attempt reloads its live provider configuration and namespace, so
+changes made during an active request are not frozen for the entire request. A provider removed after its snapshotted step is deleted
 is skipped when no longer found; other database failures remain errors.
 
 ## Public API and fallback
@@ -270,8 +304,8 @@ For chat requests:
 1. Parse the body into `serde_json::Value`, requiring an object, a nonempty model
    string, and a boolean `stream` if supplied. `combo/<name>` selects a combo.
    Any other ID is a direct model.
-2. Combo requests look up the combo by name and load steps in ascending position
-    order. Direct requests split off the first provider slug and load only its
+2. Combo requests load the combo and its ordered, validated step configuration
+    in a batched read transaction. Direct requests split off the first provider slug and load only its
     connections whose list contains the remaining upstream ID, oldest first.
     Custom membership overrides endpoint/preset matching. A missing list is not
     a direct target. Unassigned non-preset rows get reserved connection namespaces.

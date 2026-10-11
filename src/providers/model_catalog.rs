@@ -34,9 +34,17 @@ fn lookup_imported(
 }
 
 pub(crate) fn category(provider: &Provider, model: &str) -> Option<Category> {
-    // Hand-reviewed native entries remain authoritative (including audio).
-    documented_category(provider, model).or_else(|| imported_category(provider, model))
+    evidence(provider, model).map(|(category, _)| category)
 }
+
+pub(crate) fn evidence(provider: &Provider, model: &str) -> Option<(Category, &'static str)> {
+    documented_category(provider, model)
+        .map(|category| (category, "Built-in catalog"))
+        .or_else(|| imported_category(provider, model).map(|category| (category, "models.dev")))
+}
+
+pub(crate) const IMPORT_SOURCE: &str = env!("MODELS_DEV_SOURCE");
+pub(crate) const IMPORTED_AT: &str = env!("MODELS_DEV_IMPORTED_AT");
 
 fn documented_category(provider: &Provider, model: &str) -> Option<Category> {
     use Category::*;
@@ -52,9 +60,18 @@ fn documented_category(provider: &Provider, model: &str) -> Option<Category> {
                 "gpt-4o" | "gpt-4o-mini" | "gpt-4.1" | "gpt-4.1-mini" | "gpt-4.1-nano" => {
                     Some(Text)
                 }
-                "gpt-image-1" | "gpt-image-1-mini" | "gpt-image-1.5" | "dall-e-2" | "dall-e-3" => {
-                    Some(Image)
-                }
+                "gpt-image-1"
+                | "gpt-image-1-mini"
+                | "gpt-image-1.5"
+                | "gpt-image-2"
+                | "gpt-image-2-2026-04-21"
+                | "gpt-image-2.5-flare"
+                | "gpt-image-2.5-flare-2026-09-08"
+                | "gpt-image-2.5-sunburst"
+                | "gpt-image-2.5-sunburst-2026-09-08"
+                | "chatgpt-image-latest"
+                | "dall-e-2"
+                | "dall-e-3" => Some(Image),
                 "tts-1" | "tts-1-hd" | "gpt-4o-mini-tts" => Some(Tts),
                 "whisper-1"
                 | "gpt-4o-transcribe"
@@ -136,6 +153,32 @@ mod tests {
         provider.base_url = "https://api.openai.com/v1".into();
         provider.protocol = Protocol::Anthropic;
         assert_eq!(lookup_imported(&provider, "new-model", &catalog), None);
+    }
+
+    #[test]
+    fn discovered_openai_image_ids_are_exact_and_provider_scoped() {
+        let mut provider = Provider {
+            id: "test".into(),
+            name: "test".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol: Protocol::OpenAi,
+            encrypted_api_key: vec![],
+            enabled: true,
+        };
+        for id in [
+            "gpt-image-2",
+            "gpt-image-2-2026-04-21",
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-flare-2026-09-08",
+            "gpt-image-2.5-sunburst",
+            "gpt-image-2.5-sunburst-2026-09-08",
+            "chatgpt-image-latest",
+        ] {
+            assert_eq!(documented_category(&provider, id), Some(Category::Image));
+        }
+        assert_eq!(documented_category(&provider, "gpt-image-custom"), None);
+        provider.base_url = "https://custom.invalid/v1".into();
+        assert_eq!(documented_category(&provider, "gpt-image-2"), None);
     }
 
     #[test]

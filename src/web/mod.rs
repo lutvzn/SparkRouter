@@ -78,6 +78,10 @@ pub fn router() -> Router<AppState> {
         .route("/providers/{id}/delete", post(providers::delete))
         .route("/providers/{id}/test", post(providers::test))
         .route("/providers/{id}/models", post(providers::refresh_models))
+        .route(
+            "/providers/{id}/classification",
+            post(providers::classify_model),
+        )
         .route("/api-keys", get(api_keys::list).post(api_keys::create))
         .route("/api-keys/{id}", get(api_keys::created))
         .route("/api-keys/{id}/delete", post(api_keys::delete))

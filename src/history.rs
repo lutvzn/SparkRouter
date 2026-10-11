@@ -165,6 +165,10 @@ pub(crate) async fn record_response(
         .iter()
         .map(|trace| trace.provider_snapshot.clone())
         .collect();
+    let diagnostics = request_history::RoutingDiagnostics {
+        selection: attempts.first().and_then(|trace| trace.routing.clone()),
+        reasons: attempts.iter().map(|trace| trace.reason.clone()).collect(),
+    };
     // Database contention or recording failures must never fail a generation,
     // and the insert must not delay the first response byte.
     let gate = InsertGate::pending();
@@ -176,7 +180,13 @@ pub(crate) async fn record_response(
         let ok = matches!(
             tokio::time::timeout(
                 Duration::from_secs(2),
-                request_history::save_with_usage(&pool, &record, metrics, &provider_snapshots)
+                request_history::save_with_diagnostics(
+                    &pool,
+                    &record,
+                    metrics,
+                    &provider_snapshots,
+                    Some(&diagnostics)
+                )
             )
             .await,
             Ok(Ok(()))

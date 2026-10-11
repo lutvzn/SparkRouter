@@ -724,6 +724,7 @@ a.provider-tile:focus-visible {
   display: flex;
   gap: 0;
 }
+.model-card-category,
 .model-card-copy,
 .model-card-info {
   display: inline-flex;
@@ -738,6 +739,8 @@ a.provider-tile:focus-visible {
   color: var(--muted);
   cursor: pointer;
 }
+.model-card-category { cursor: default; }
+.model-card-category .icon,
 .model-card-copy .icon,
 .model-card-info .icon { width: 0.85rem; height: 0.85rem; margin: 0; }
 .model-card-copy:hover,
@@ -778,7 +781,7 @@ a.provider-tile:focus-visible {
   min-height: 1.05rem;
 }
 .model-card-tools + .model-card-line {
-  padding-right: 2.9rem;
+  padding-right: 4.3rem;
   padding-bottom: 3px;
 }
 .model-card-name {
@@ -844,6 +847,26 @@ a.provider-tile:focus-visible {
 .model-info-body h2 { margin: 0 2rem 0.35rem 0; overflow-wrap: anywhere; }
 .model-info-body p { margin: 0 0 0.7rem; }
 .model-info-body code { overflow-wrap: anywhere; }
+.model-classification { margin: 0.65rem 0; }
+.model-classification-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.model-classification-save {
+  display: flex;
+  flex: 1 1 12rem;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.model-classification-save select {
+  flex: 1;
+  min-width: 0;
+  min-height: 2rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 0.8rem;
+}
+.model-classification-controls .btn { white-space: nowrap; margin: 0; }
+.model-classification-help { margin-top: 0.35rem; font-size: 0.75rem; color: var(--muted); }
+.model-classification-help summary { cursor: pointer; }
+.model-classification-help p { margin: 0.4rem 0 0; }
 .model-info-body dl { margin: 0; }
 .model-info-body dl div {
   display: grid;

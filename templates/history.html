@@ -64,9 +64,11 @@
         {% else %}
         <details>
           <summary>{{ row.attempts.len() }} attempts</summary>
+          <p class="hint">{{ row.routing }}</p>
+          <p class="hint">Attempts are ordered by execution. Selected means response preparation succeeded, not necessarily stream completion; see the request's final outcome.</p>
           <ol>
             {% for attempt in row.attempts %}
-            <li><code>{{ attempt.provider_name }}</code> &middot; <code>{{ attempt.model }}</code> &middot; position {{ attempt.position }} &middot; <span class="{{ attempt.outcome_class }}">{{ attempt.outcome }}</span> &middot; {{ attempt.latency_ms }} ms</li>
+            <li><code>{{ attempt.provider_name }}</code> &middot; <code>{{ attempt.model }}</code> &middot; position {{ attempt.position }} &middot; <span class="{{ attempt.outcome_class }}">{{ attempt.outcome }}</span> &middot; {{ attempt.latency_ms }} ms<p class="hint">{{ attempt.reason }}</p></li>
             {% endfor %}
           </ol>
         </details>

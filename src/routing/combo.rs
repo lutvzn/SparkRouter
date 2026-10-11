@@ -1,9 +1,4 @@
-use crate::{
-    app::AppState,
-    db::{combos, providers as provider_db},
-    error::AppError,
-    providers::AttemptError,
-};
+use crate::{app::AppState, db::combos, error::AppError, providers::AttemptError};
 use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use axum::{http::StatusCode, response::Response};
 use serde_json::Value;
@@ -78,10 +73,21 @@ pub(crate) struct AttemptTrace {
     pub position: i64,
     pub outcome: &'static str,
     pub latency_ms: u128,
+    pub reason: String,
+    pub routing: Option<RoutingSelection>,
     #[serde(skip)]
     pub provider_snapshot: Option<crate::db::request_history::ProviderSnapshot>,
     #[serde(skip)]
     started: std::time::Instant,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RoutingSelection {
+    pub strategy: String,
+    pub affinity_mode: String,
+    pub affinity: String,
+    pub strategy_position: i64,
+    pub starting_position: i64,
 }
 
 impl AttemptTrace {
@@ -99,6 +105,8 @@ impl AttemptTrace {
             position,
             outcome: "in_progress",
             latency_ms: 0,
+            reason: "Preparation not completed".into(),
+            routing: None,
             provider_snapshot: None,
             started,
         }
@@ -126,47 +134,17 @@ async fn route_inner(
     context: &super::affinity::RequestContext,
     mut attempts: Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AppError> {
-    let combo = combos::by_name(&state.db, name).await?;
-    if combo.category != context.category() {
-        return Err(AppError::InvalidRequest(
-            "Combo category does not match this API mode".into(),
-        ));
-    }
-    let mut steps = combos::steps(&state.db, &combo.id).await?;
-    // Revalidate every step before reserving a turn or making any provider call.
-    // This also fails closed after metadata/protocol edits or legacy imports.
-    let mut connection = state.db.acquire().await?;
-    for step in &steps {
-        crate::db::model_categories::validate(
-            &mut connection,
-            &step.provider_id,
-            &step.model,
-            combo.category,
-            false,
-        )
-        .await?;
-    }
-    drop(connection);
+    let (combo, snapshot) = combos::routing_snapshot(&state.db, name, context.category()).await?;
+    let mut steps: Vec<_> = snapshot
+        .into_iter()
+        .filter(|entry| entry.provider.enabled && context.accepts(&entry.provider))
+        .map(|entry| entry.step)
+        .collect();
     let binding = super::affinity::binding(&combo, context, &state.crypto, body)?;
-    if combo.strategy != combos::Strategy::Priority
-        || binding.is_some()
-        || context.systemone
-        || context.media.is_some()
     {
         // Disabled connections do not consume turns. Snapshot eligible steps
         // before selecting a start, but recheck providers below before calls so
         // concurrent deletion/disable edits retain the existing safety behavior.
-        let mut eligible = Vec::with_capacity(steps.len());
-        for step in steps {
-            match provider_db::get(&state.db, &step.provider_id).await {
-                Ok(provider) if provider.enabled && context.accepts(&provider) => {
-                    eligible.push(step)
-                }
-                Ok(_) | Err(AppError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        steps = eligible;
         if steps.is_empty() {
             return Err(AppError::Routing);
         }
@@ -179,14 +157,31 @@ async fn route_inner(
         // cyclically from the selected start without advancing the cursor again.
         steps.rotate_left(start);
     }
+    let strategy_position = steps.first().map_or(0, |step| step.position + 1);
+    let mut affinity = if binding.is_some() {
+        "Miss or expired"
+    } else {
+        "Off or no usable identity"
+    };
     // Reserve the normal strategy once even on affinity hits. Override only
     // the start; cyclic configured fallback still visits every step once.
     if let Some(binding) = &binding
         && let Some(target) = state.affinity.preferred(binding)
-        && let Some(start) = steps.iter().position(|step| target.matches(step))
     {
-        steps.rotate_left(start);
+        if let Some(start) = steps.iter().position(|step| target.matches(step)) {
+            steps.rotate_left(start);
+            affinity = "Hit: preferred target selected";
+        } else {
+            affinity = "Preferred target unavailable; strategy used";
+        }
     }
+    let selection = RoutingSelection {
+        strategy: combo.strategy.label().into(),
+        affinity_mode: combo.affinity.mode.label().into(),
+        affinity: affinity.into(),
+        strategy_position,
+        starting_position: steps.first().map_or(0, |step| step.position + 1),
+    };
     for step in steps {
         let (provider, slug, group_name) =
             match crate::db::provider_slugs::connection_with_name(&state.db, &step.provider_id)
@@ -212,6 +207,7 @@ async fn route_inner(
             step.position + 1,
             started,
         );
+        trace.routing = Some(selection.clone());
         trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
             slug,
             name: group_name,
@@ -251,7 +247,7 @@ async fn route_inner(
                 }
                 return Ok(response);
             }
-            Err(AttemptError::Retryable) => {
+            Err(AttemptError::Retryable | AttemptError::RetryableStatus(_)) => {
                 if let Some(binding) = &binding {
                     state
                         .affinity
@@ -283,6 +279,8 @@ mod tests {
             position: 2,
             outcome: "in_progress",
             latency_ms: 0,
+            reason: "Preparation not completed".into(),
+            routing: None,
             provider_snapshot: None,
             started: std::time::Instant::now(),
         };
@@ -290,7 +288,9 @@ mod tests {
         let value = serde_json::to_value(trace).unwrap();
         assert_eq!(value["outcome"], "timed_out");
         assert_eq!(value["position"], 2);
-        assert_eq!(value.as_object().unwrap().len(), 6);
+        assert_eq!(value.as_object().unwrap().len(), 8);
+        assert_eq!(value["reason"], "Preparation not completed");
+        assert!(value["routing"].is_null());
         assert!(value.get("started").is_none());
     }
 

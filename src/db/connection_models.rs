@@ -247,6 +247,46 @@ pub struct ModelList {
     pub ids: Vec<String>,
     pub models: Vec<StoredModel>,
     pub truncated: bool,
+    pub refreshed_at: String,
+    pub stale: bool,
+}
+
+pub struct RefreshStatus {
+    pub attempted_at: String,
+    pub error: String,
+}
+
+pub async fn refresh_failed(
+    pool: &SqlitePool,
+    provider_id: &str,
+    error: &str,
+) -> Result<(), AppError> {
+    // Callers supply only fixed, sanitized messages, never upstream bodies/URLs.
+    sqlx::query("INSERT INTO connection_refresh_status(provider_id, attempted_at, error)
+        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+        ON CONFLICT(provider_id) DO UPDATE SET attempted_at = excluded.attempted_at, error = excluded.error")
+        .bind(provider_id).bind(error).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn refresh_statuses(
+    pool: &SqlitePool,
+) -> Result<HashMap<String, RefreshStatus>, AppError> {
+    let rows =
+        sqlx::query("SELECT provider_id, attempted_at, error FROM connection_refresh_status")
+            .fetch_all(pool)
+            .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("provider_id")?,
+                RefreshStatus {
+                    attempted_at: row.try_get("attempted_at")?,
+                    error: row.try_get("error")?,
+                },
+            ))
+        })
+        .collect()
 }
 
 pub async fn replace(
@@ -286,6 +326,14 @@ pub async fn replace(
         .execute(&mut *transaction)
         .await?;
     }
+    sqlx::query(
+        "INSERT INTO connection_refresh_status(provider_id, attempted_at, error)
+        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), '')
+        ON CONFLICT(provider_id) DO UPDATE SET attempted_at = excluded.attempted_at, error = ''",
+    )
+    .bind(provider_id)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -407,9 +455,12 @@ pub async fn for_connections(
     if provider_ids.is_empty() {
         return Ok(lists);
     }
-    let rows = sqlx::query("SELECT provider_id, truncated FROM connection_model_lists")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT provider_id, truncated, refreshed_at,
+        (julianday('now') - julianday(refreshed_at) >= 1) AS stale FROM connection_model_lists",
+    )
+    .fetch_all(pool)
+    .await?;
     for row in rows {
         let id: String = row.try_get("provider_id")?;
         if !provider_ids.iter().any(|candidate| candidate == &id) {
@@ -422,6 +473,8 @@ pub async fn for_connections(
                 ids: Vec::new(),
                 models: Vec::new(),
                 truncated: truncated != 0,
+                refreshed_at: row.try_get("refreshed_at")?,
+                stale: row.try_get::<i64, _>("stale")? != 0,
             },
         );
     }
