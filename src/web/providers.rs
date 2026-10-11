@@ -45,6 +45,9 @@ fn tag_options(tags: &[String]) -> Vec<TagOption> {
 }
 
 impl ProvidersPage {
+    fn favorites(&self) -> Vec<&ProviderTile> {
+        self.tiles.iter().filter(|tile| tile.is_favorite).collect()
+    }
     fn tag_options(&self) -> Vec<TagOption> {
         tag_options(&[])
     }
@@ -110,18 +113,53 @@ pub(crate) async fn save_tags(
     Ok(see_other(&identity))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct FavoriteForm {
+    _csrf: String,
+    favorite: bool,
+}
+
+pub(crate) async fn save_favorite(
+    State(state): State<AppState>,
+    Path((kind, id)): Path<(String, String)>,
+    Form(form): Form<FavoriteForm>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    let group_id = match kind.as_str() {
+        "catalog" => {
+            provider_catalog::find(&id)
+                .ok_or_else(|| AppError::NotFound("provider preset was not found".into()))?;
+            None
+        }
+        "groups" => {
+            provider_groups::get(&state.db, &id).await?;
+            Some(id.as_str())
+        }
+        _ => return Err(AppError::NotFound("provider was not found".into())),
+    };
+    crate::db::provider_favorites::save(
+        &state.db,
+        &format!("/providers/{kind}/{id}"),
+        group_id,
+        form.favorite,
+    )
+    .await?;
+    Ok(see_other("/providers"))
+}
+
 #[derive(Template)]
 #[template(path = "providers/list.html")]
 pub(crate) struct ProvidersPage {
     app_name: &'static str,
+    csrf_token: String,
     tiles: Vec<ProviderTile>,
 }
 
 /// One square tile on the providers page: a catalog preset or a persisted
 /// custom provider group linking to its group page.
 pub(crate) struct ProviderTile {
+    is_favorite: bool,
     name: String,
-    protocol: String,
     tags: Vec<String>,
     href: String,
     connection_count: usize,
@@ -255,25 +293,6 @@ fn deserialize_api_key<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(SecretString::from)
 }
 
-/// Custom Askama filters for the provider templates. Askama resolves
-/// `{{ value|first_char }}` in templates declared in this module to
-/// [`filters::first_char`].
-mod filters {
-    /// The uppercased first character of a tile name, for the square avatar.
-    /// Empty names render an empty avatar; the output is auto-escaped.
-    pub fn first_char<S: std::fmt::Display>(
-        source: S,
-        _values: &dyn askama::Values,
-    ) -> Result<String, askama::Error> {
-        Ok(source
-            .to_string()
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_default())
-    }
-}
-
 pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let stored = crate::db::providers::list(&state.db).await?;
     let memberships = provider_groups::connection_group_names(&state.db).await?;
@@ -285,8 +304,14 @@ pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, 
             tile.tags.clone_from(tags);
         }
     }
+    let favorites = crate::db::provider_favorites::list(&state.db).await?;
+    for tile in &mut tiles {
+        tile.is_favorite = favorites.get(&tile.href).copied().unwrap_or(false);
+    }
+    tiles.sort_by_cached_key(|tile| (tile.name.to_lowercase(), tile.href.clone()));
     render(ProvidersPage {
         app_name: crate::APP_NAME,
+        csrf_token: state.csrf_token.to_string(),
         tiles,
     })
 }
@@ -704,8 +729,8 @@ fn build_tiles(
         .iter()
         .zip(preset_counts)
         .map(|(preset, (connection_count, enabled_count))| ProviderTile {
+            is_favorite: false,
             name: preset.name.to_string(),
-            protocol: preset.protocol.as_str().to_string(),
             tags: preset.default_tags(),
             href: format!("/providers/catalog/{}", preset.slug),
             connection_count,
@@ -715,8 +740,8 @@ fn build_tiles(
         .collect();
 
     tiles.extend(group_summaries.into_iter().map(|summary| ProviderTile {
+        is_favorite: false,
         name: summary.group.name,
-        protocol: summary.group.protocol.as_str().to_string(),
         tags: crate::db::provider_tags::defaults(&summary.group.protocol),
         href: format!("/providers/groups/{}", summary.group.id),
         connection_count: summary.connection_count,
@@ -1010,7 +1035,6 @@ mod tests {
         let empty = &tiles[provider_catalog::PRESETS.len()];
         assert_eq!(empty.href, "/providers/groups/custom-empty");
         assert_eq!(empty.name, "Empty <Group>");
-        assert_eq!(empty.protocol, Protocol::Anthropic.as_str());
         assert_eq!(empty.connection_count, 0);
         assert_eq!(empty.enabled_count, 0);
         assert!(empty.is_custom, "persisted groups are custom");
@@ -1095,10 +1119,11 @@ mod tests {
 
         let page = ProvidersPage {
             app_name: crate::APP_NAME,
+            csrf_token: CSRF.into(),
             tiles: vec![
                 ProviderTile {
+                    is_favorite: false,
                     name: "Preset <A> & Co".to_string(),
-                    protocol: "openai".to_string(),
                     tags: vec!["text".into()],
                     href: "/providers/catalog/preset-a".to_string(),
                     connection_count: 2,
@@ -1106,8 +1131,8 @@ mod tests {
                     is_custom: false,
                 },
                 ProviderTile {
+                    is_favorite: false,
                     name: "Custom <Host>".to_string(),
-                    protocol: "anthropic".to_string(),
                     tags: vec!["text".into()],
                     href: "/providers/groups/g1".to_string(),
                     connection_count: 0,
@@ -1127,8 +1152,9 @@ mod tests {
         assert!(page.contains("href=\"/providers/new\""));
         assert!(page.contains("Custom provider"));
         assert!(page.contains("Create a provider, then add connections."));
-        // Tiles are links only: no forms, so no CSRF inputs.
-        assert!(!page.contains("name=\"_csrf\""));
+        // Favorite forms are separate from the navigation links and carry CSRF.
+        assert!(page.contains("name=\"_csrf\" value=\"csrf-test-token\""));
+        assert!(page.contains("action=\"/providers/catalog/preset-a/favorite\""));
         // Only the persisted custom-group tile carries the Custom tag; the
         // preset tile and the static create tile do not.
         assert_eq!(

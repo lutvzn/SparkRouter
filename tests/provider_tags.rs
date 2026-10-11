@@ -77,7 +77,8 @@ async fn tags_defaults_overrides_validation_and_persistence() {
     let html = get(&state, "/providers").await;
     assert!(html.contains("data-provider-tags=\"decision\""));
     assert!(html.contains("data-provider-tags=\"text\""));
-    assert!(html.contains("<span class=\"badge\">SystemOne</span>"));
+    assert!(!html.contains("<span class=\"badge\">SystemOne</span>"));
+    assert!(html.contains("class=\"badge provider-capability-tag\">Decision</span>"));
     assert_eq!(html.matches("data-provider-tag-filter").count(), 7);
     let path = "/providers/catalog/openai/tags";
     assert_eq!(

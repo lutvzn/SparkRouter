@@ -125,22 +125,33 @@ document.body.addEventListener("htmx:afterSwap", revealCopyButtons);
 // it ignores protocol badges so "open" does not keep every OpenAI-compatible card.
 function filterProviderTiles() {
   const input = document.getElementById("provider-search");
-  const grid = document.getElementById("provider-grid");
-  if (!input || !grid) return;
+  const grids = Array.from(document.querySelectorAll("[data-provider-grid]"));
+  if (!input || grids.length === 0) return;
+  const favoritesEmpty = document.getElementById("provider-favorites-empty");
   const empty = document.getElementById("provider-search-empty");
   const filters = Array.from(document.querySelectorAll("[data-provider-tag-filter]"));
   const apply = () => {
     const selected = filters.filter((filter) => filter.checked).map((filter) => filter.value);
     const query = input.value.trim().toLowerCase();
     let visible = 0;
-    grid.querySelectorAll(".provider-tile").forEach((tile) => {
-      const title = tile.querySelector(".provider-tile-title");
-      const name = title ? title.textContent.toLowerCase() : "";
-      const tags = (tile.getAttribute("data-provider-tags") || "").split(" ");
-      const match = (query === "" || name.includes(query))
-        && (selected.length === 0 || selected.some((tag) => tags.includes(tag)));
-      tile.hidden = !match;
-      if (match) visible += 1;
+    grids.forEach((grid) => {
+      let gridVisible = 0;
+      const tiles = grid.querySelectorAll(":scope > .provider-card, :scope > .provider-tile");
+      tiles.forEach((tile) => {
+        const title = tile.querySelector(".provider-tile-title");
+        const name = title ? title.textContent.toLowerCase() : "";
+        const tags = (tile.getAttribute("data-provider-tags") || "").split(" ");
+        const match = (query === "" || name.includes(query))
+          && (selected.length === 0 || selected.some((tag) => tags.includes(tag)));
+        tile.hidden = !match;
+        if (match) { visible += 1; gridVisible += 1; }
+      });
+      if (grid.id === "provider-favorites-grid" && favoritesEmpty) {
+        favoritesEmpty.hidden = gridVisible !== 0;
+        favoritesEmpty.textContent = tiles.length === 0
+          ? "No favorites yet. Use a provider's star to add it here."
+          : "No favorite providers match these filters.";
+      }
     });
     if (empty) {
       empty.textContent = query ? "No providers match \u201c" + query + "\u201d." : "No providers match.";

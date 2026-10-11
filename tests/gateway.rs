@@ -1968,8 +1968,8 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
         "/models",
         get(|| async {
             Json(json!({"data": [
-                {"id": "alpha", "display_name": "Alpha", "context_length": 128000, "max_output_tokens": 16384, "pricing": {"prompt": "0", "completion": "0"}, "architecture": {"output_modalities": ["text"]}},
-                {"id": " beta "}
+                {"id": "alpha", "display_name": "Alpha", "context_length": 128000, "max_output_tokens": 16384, "pricing": {"prompt": "0", "completion": "0"}, "architecture": {"output_modalities": ["text"]}, "supportedEndpoints": ["chat"]},
+                {"id": " beta ", "supported_endpoints": ["/v1/images/generations"]}
             ]}))
         }),
     ))
@@ -2026,8 +2026,27 @@ async fn refreshing_models_stores_ids_for_combo_suggestions() -> TestResult {
     assert!(editor.contains("value=\"alpha\""));
     assert!(
         !editor.contains("value=\"beta\""),
-        "unclassified IDs remain cached but are not category suggestions"
+        "image-only endpoints must not leak into Text suggestions"
     );
+    let images = combos::create_typed(
+        &state.db,
+        "image-suggest",
+        combos::Category::Image,
+        combos::Strategy::Priority,
+        combos::AffinityOptions::default(),
+    )
+    .await?;
+    let image_editor = send(
+        &state,
+        Request::get(format!("/combos/{}", images.id))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(image_editor.status(), StatusCode::OK);
+    let image_editor = String::from_utf8(body_bytes(image_editor).await.to_vec())?;
+    assert!(image_editor.contains("value=\"beta\""));
+    assert!(!image_editor.contains("value=\"alpha\""));
     Ok(())
 }
 

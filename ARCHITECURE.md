@@ -30,6 +30,7 @@ placement hints are bounded process-local state, not saved prompt/completion dat
 | `crypto.rs` | Versioned AES-256-GCM credential envelopes |
 | `db/mod.rs` | SQLite pool setup and embedded SQLx migrations |
 | `db/providers.rs` | Provider CRUD and ciphertext persistence |
+| `db/provider_favorites.rs` | Dashboard-only tile favorites; migration 0020 seeds defaults once, custom preferences cascade on group deletion |
 | `db/combos.rs` | Typed combo CRUD, step order, transactional mutations |
 | `db/model_categories.rs` | Explicit connection/model classification, protocol/modality validation |
 | `web/` | Form validation, CSRF verification, rendering and dashboard actions |
@@ -74,8 +75,25 @@ configuration. SystemOne-only legacy chains become decision; other chains defaul
 to text, with incompatible legacy configurations failing closed. The current
 installation's one-time, user-approved combo deletion is not embedded in migrations.
 The Test picker filters options by mode; the Combos list filters via ordinary GET
-forms. Step picker suggestions require positive evidence (a matching explicit
-declaration, suitable modalities, or a single-category protocol); missing
+forms. `providers/model_catalog.rs` holds a small, exact provider-scoped mapping
+of documented IDs. OpenAI requires its actual host; native media protocols scope
+their own entries. `build.rs` additionally projects models.dev metadata into an
+embedded exact-ID index, scoped by matching preset endpoint and protocol. It
+uses a bounded, timeout-limited, redirect-disabled public download with a bundled
+snapshot fallback; there are no runtime external lookups. Only conservative
+category evidence is retained (image/video outputs, audio-only input to text,
+or text-input/text-output tool-capable chat). Ambiguous audio and text-only
+non-tool models remain unknown. Hand-reviewed entries take precedence. No ID
+prefixes, substrings or automatic model-list additions are used, and OpenAI
+Sora is excluded. `Category::matches_model`
+is shared by picker, transactional mutations/import, and pre-attempt routing.
+Explicit endpoint metadata overrides advisory catalog entries, while contradictory
+modalities always fail closed. Persisted declarations cannot bypass this policy;
+newly recognized incompatible legacy declarations require manual correction.
+Direct routing remains unchanged and does not enforce combo classifications.
+
+Step picker suggestions require positive evidence (a matching explicit
+declaration, catalog entry, suitable modalities/endpoints, or a single-category protocol); missing
 metadata is not treated as a match for every category. Add/edit and HTMX
 fragments share the same filtering. Discovery exposes an additive category field
 for combos only.

@@ -99,6 +99,217 @@ async fn get(state: &AppState, path: &str) -> String {
 }
 
 #[tokio::test]
+async fn documented_catalog_is_exact_scoped_and_used_by_mutations_and_import() {
+    let state = state().await;
+    for (id, url, protocol, ids) in [
+        (
+            "o",
+            "https://api.openai.com/v1",
+            Protocol::OpenAi,
+            vec![
+                "gpt-image-1",
+                "tts-1",
+                "whisper-1",
+                "gpt-4o",
+                "gpt-image-future",
+                "sora-2",
+                "nested/gpt-image-1",
+            ],
+        ),
+        (
+            "e",
+            "http://localhost:1",
+            Protocol::ElevenLabs,
+            vec!["eleven_multilingual_v2", "scribe_v2", "music_v2_5"],
+        ),
+        (
+            "m",
+            "http://localhost:1",
+            Protocol::MiniMax,
+            vec![
+                "image-01",
+                "MiniMax-Hailuo-2.3",
+                "music-3.0",
+                "speech-2.8-hd",
+                "asr-1.0",
+            ],
+        ),
+        (
+            "f",
+            "http://localhost:1",
+            Protocol::Fal,
+            vec![
+                "fal-ai/flux/dev",
+                "fal-ai/wan/v2.2-a14b/text-to-video",
+                "fal-ai/ace-step",
+            ],
+        ),
+        (
+            "custom",
+            "http://localhost:1",
+            Protocol::OpenAi,
+            vec!["gpt-image-1"],
+        ),
+    ] {
+        provider(&state, id, url, protocol).await;
+        let models: Vec<_> = ids
+            .into_iter()
+            .map(|id| StoredModel {
+                id: id.into(),
+                name: id.into(),
+                fields: vec![],
+                free: false,
+            })
+            .collect();
+        db::connection_models::replace(&state.db, id, &models, false)
+            .await
+            .unwrap();
+    }
+    let text = typed(&state, "catalog-text", Category::Text).await;
+    let images = typed(&state, "catalog-image", Category::Image).await;
+    let music = typed(&state, "catalog-music", Category::Music).await;
+    let speech = typed(&state, "catalog-speech", Category::Tts).await;
+    let stt = typed(&state, "catalog-stt", Category::Stt).await;
+    let video = typed(&state, "catalog-video", Category::Video).await;
+    let image_html = get(&state, &format!("/combos/{}", images.id)).await;
+    for id in ["gpt-image-1", "image-01", "fal-ai/flux/dev"] {
+        assert!(image_html.contains(&format!("<option value=\"{id}\"></option>")));
+    }
+    for id in ["tts-1", "gpt-image-future", "sora-2", "nested/gpt-image-1"] {
+        assert!(!image_html.contains(&format!("<option value=\"{id}\"></option>")));
+    }
+    // Only the real OpenAI catalog, not the custom same-name model, is suggested.
+    assert_eq!(
+        image_html
+            .matches("<option value=\"gpt-image-1\"></option>")
+            .count(),
+        1
+    );
+    for (combo, expected) in [
+        (&text, "gpt-4o"),
+        (&music, "music_v2_5"),
+        (&speech, "eleven_multilingual_v2"),
+        (&stt, "whisper-1"),
+        (&video, "MiniMax-Hailuo-2.3"),
+    ] {
+        let html = get(&state, &format!("/combos/{}", combo.id)).await;
+        assert!(html.contains(&format!("<option value=\"{expected}\"></option>")));
+    }
+    assert!(
+        combos::add_step(&state.db, &text.id, "o", "gpt-image-1")
+            .await
+            .is_err()
+    );
+    assert!(
+        combos::add_step(&state.db, &music.id, "e", "scribe_v2")
+            .await
+            .is_err()
+    );
+    combos::add_step(&state.db, &images.id, "o", "gpt-image-1")
+        .await
+        .unwrap();
+    // Reusing a documented vendor ID on a custom service is not a global alias.
+    combos::add_step(&state.db, &text.id, "custom", "gpt-image-1")
+        .await
+        .unwrap();
+    let invalid = json!({"version":1,"groups":[],"connections":[{"id":"c","name":"c","base_url":"https://api.openai.com/v1","protocol":"openai","group_id":null,"enabled":false}],"combos":[{"name":"wrong","category":"text","strategy":"priority","steps":[{"provider_id":"c","model":"gpt-image-1"}]}]});
+    assert!(
+        db::config_transfer::apply(&state.db, &invalid.to_string(), &|_, _| false)
+            .await
+            .is_err()
+    );
+    assert!(combos::by_name(&state.db, "wrong").await.is_err());
+}
+
+#[tokio::test]
+async fn explicit_endpoints_classify_all_modes_and_reject_unsupported_or_changed_capabilities() {
+    let state = state().await;
+    provider(&state, "p", "http://localhost:1", Protocol::OpenAi).await;
+    provider(&state, "d", "http://localhost:1", Protocol::SystemOne).await;
+    for (category, endpoint, label) in [
+        (Category::Text, "/v1/chat/completions", "SupportedEndpoints"),
+        (Category::Decision, "systemone", "Supported endpoints"),
+        (Category::Image, "images-generations", "Supported endpoints"),
+        (Category::Video, "videos", "Supported_endpoints"),
+        (
+            Category::Music,
+            "/v1/music/generations",
+            "Supported endpoints",
+        ),
+        (Category::Tts, "audio-speech", "Supported endpoints"),
+        (Category::Stt, "audio-transcriptions", "Supported endpoints"),
+    ] {
+        let combo = typed(
+            &state,
+            &format!("endpoints-{}", category.as_str()),
+            category,
+        )
+        .await;
+        let id = if category == Category::Decision {
+            "d"
+        } else {
+            "p"
+        };
+        let models = [
+            StoredModel {
+                id: "capable".into(),
+                name: "capable".into(),
+                fields: vec![ModelField {
+                    label: label.into(),
+                    value: endpoint.into(),
+                }],
+                free: false,
+            },
+            StoredModel {
+                id: "unsupported".into(),
+                name: "unsupported".into(),
+                fields: vec![ModelField {
+                    label: label.into(),
+                    value: "embeddings".into(),
+                }],
+                free: false,
+            },
+        ];
+        db::connection_models::replace(&state.db, id, &models, false)
+            .await
+            .unwrap();
+        let html = get(&state, &format!("/combos/{}", combo.id)).await;
+        assert!(html.contains("<option value=\"capable\"></option>"));
+        assert!(!html.contains("<option value=\"unsupported\"></option>"));
+        assert!(
+            combos::add_step(&state.db, &combo.id, id, "unsupported")
+                .await
+                .is_err()
+        );
+        // Separate IDs avoid deliberately cross-classifying the same connection/model.
+        let mut unique = models[0].clone();
+        unique.id = category.as_str().into();
+        db::connection_models::replace(&state.db, id, &[unique.clone()], false)
+            .await
+            .unwrap();
+        combos::add_step(&state.db, &combo.id, id, &unique.id)
+            .await
+            .unwrap();
+        unique.fields[0].value = "embeddings".into();
+        db::connection_models::replace(&state.db, id, &[unique.clone()], false)
+            .await
+            .unwrap();
+        assert!(
+            combos::add_step(&state.db, &combo.id, id, &unique.id)
+                .await
+                .is_err()
+        );
+        if category == Category::Text {
+            let result = sparkrouter::routing::combo::route(&state, &combo.name, &json!({})).await;
+            assert!(
+                result.is_err(),
+                "changed endpoint metadata must fail before an upstream attempt"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn picker_only_suggests_models_with_positive_category_evidence() {
     let state = state().await;
     for (id, protocol) in [
@@ -488,6 +699,58 @@ async fn known_output_metadata_and_existing_declarations_prevent_mixed_models() 
         StatusCode::BAD_REQUEST
     );
     assert_eq!(mock.hits.count(), 0);
+}
+
+#[tokio::test]
+async fn models_dev_categories_feed_picker_and_step_validation_without_upstream_metadata() {
+    let state = state().await;
+    provider(
+        &state,
+        "vendor",
+        "https://api.groq.com/openai/v1",
+        Protocol::OpenAi,
+    )
+    .await;
+    provider(
+        &state,
+        "custom",
+        "https://custom.example/v1",
+        Protocol::OpenAi,
+    )
+    .await;
+    for id in ["vendor", "custom"] {
+        db::connection_models::replace(
+            &state.db,
+            id,
+            &[StoredModel {
+                id: "whisper-large-v3".into(),
+                name: "Whisper".into(),
+                free: false,
+                fields: vec![],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let speech = typed(&state, "speech", Category::Stt).await;
+    let text = typed(&state, "text", Category::Text).await;
+    let editor = get(&state, &format!("/combos/{}", speech.id)).await;
+    assert!(editor.contains("<option value=\"whisper-large-v3\""));
+    let editor = get(&state, &format!("/combos/{}", text.id)).await;
+    assert!(!editor.contains("<option value=\"whisper-large-v3\""));
+    assert!(
+        combos::add_step(&state.db, &text.id, "vendor", "whisper-large-v3")
+            .await
+            .is_err()
+    );
+    combos::add_step(&state.db, &speech.id, "vendor", "whisper-large-v3")
+        .await
+        .unwrap();
+    // The same ID on an unknown host retains manual classification.
+    combos::add_step(&state.db, &text.id, "custom", "whisper-large-v3")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

@@ -394,9 +394,10 @@ fn parse_and_validate(
                 encrypted_api_key: Vec::new(),
                 enabled: false,
             };
-            if !category.accepts(&provider) {
+            if !category.accepts(&provider) || !category.matches_model(&provider, &step.model, &[])
+            {
                 return Err(AppError::InvalidRequest(
-                    "Imported step protocol is incompatible with its combo category".into(),
+                    "Imported step protocol or known model category is incompatible with its combo category".into(),
                 ));
             }
             if classified

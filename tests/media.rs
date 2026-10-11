@@ -794,7 +794,7 @@ async fn fresh_schema_supports_all_media_protocols_and_grouped_catalog_defaults(
     let html = String::from_utf8(body_bytes(response).await.to_vec()).unwrap();
     assert_eq!(
         html.matches("href=\"/providers/catalog/openai\"").count(),
-        1
+        2 // Favorites shortcut plus the single All providers tile.
     );
     assert_eq!(
         html.matches("href=\"/providers/catalog/minimax\"").count(),
@@ -803,7 +803,7 @@ async fn fresh_schema_supports_all_media_protocols_and_grouped_catalog_defaults(
     assert!(html.contains("data-provider-tags=\"text image tts stt\""));
     assert!(html.contains("data-provider-tags=\"music tts stt\""));
     for label in ["fal.ai", "Deepgram", "ElevenLabs", "MiniMax", "xAI"] {
-        assert!(html.contains(&format!("<span class=\"badge\">{label}</span>")));
+        assert!(!html.contains(&format!("<span class=\"badge\">{label}</span>")));
     }
     assert!(!html.contains("OpenAI-video"));
     // A newly added preset must not silently take an existing custom namespace.

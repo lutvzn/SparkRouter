@@ -85,14 +85,48 @@ or strategy rotation. Step creation/editing validates protocol compatibility,
 explicit cached output modalities, and speech input modalities when available.
 Image input alone does not classify a vision LLM as an image generator.
 Provider capability tags remain dashboard metadata, not these classifications.
-The step picker's suggestions only include matching declarations, explicit
-capability metadata, or models from single-category protocols such as SystemOne.
+The step picker's suggestions only include matching declarations, known catalog
+entries, explicit capability/endpoint metadata, or models from single-category
+protocols such as SystemOne.
 Unknown models on multi-category providers are not offered in every category.
 Audio output alone does not distinguish Music from TTS; those models need a
 matching declaration or clear speech input/output metadata. Manual entry remains
 available when discovery cannot identify the category.
 
-Model names are never guessed. Adding an unclassified/custom ID explicitly
+Automatic classification uses **exact, provider-scoped documented IDs**, not
+name prefixes or substring guesses. A small built-in catalog covers selected
+OpenAI, MiniMax, ElevenLabs, xAI, Deepgram, and fal.ai models. OpenAI IDs are only
+recognized on `api.openai.com`; native vendor protocols also support custom
+mirrors. A custom OpenAI-compatible host reusing the same ID does not inherit
+OpenAI's classification. The catalog does not add connections, fetch models,
+prove account access, or advertise OpenAI Sora.
+
+Builds also import category evidence from **models.dev** using
+`https://models.dev/api.json?type=all`, with a bundled snapshot fallback. Matches
+require the preset's exact endpoint and protocol plus the exact upstream model
+ID; custom hosts do not inherit vendor classifications. Image/video output is
+recognized; audio-only input with text-only output indicates STT. Text-only
+output plus text input and explicit tool support provides conservative chat
+evidence (text modalities alone can also describe embeddings). Ambiguous audio
+output and models without sufficient evidence remain manually classifiable.
+Hand-reviewed catalog entries still win over imported entries, and upstream
+endpoint/modality metadata retains its existing precedence. The import does not
+populate refreshed model lists or change direct routing. Only categories are
+imported; pricing, limits, and other model information are not added to the UI.
+No runtime network lookup is added. See [build controls](BUILD.md#build-time-modelsdev-categories)
+for offline/reproducible builds and forcing a fresh import despite Cargo caching.
+
+Explicit `supported_endpoints` / `supportedEndpoints` discovery metadata is
+also recognized (chat, images, videos, music, speech, transcription/translation,
+and SystemOne, including common `/v1/` paths and hyphenated aliases). Endpoint
+metadata takes precedence over advisory catalog entries; contradictory modality
+metadata still blocks the model. Unknown/non-gateway-only endpoints, such as
+embeddings, do not silently become Text. The same policy applies to suggestions,
+step mutations, imports, and combo routing. Existing wrong-category declarations
+fail closed and must be corrected, not silently reassigned. Imports revalidate
+catalog entries; cached endpoint metadata is not transferred.
+
+Adding an unclassified/custom ID explicitly
 **declares that connection/model in the combo's category**: make sure it really
 supports that API. The same connection/model cannot be used in conflicting
 categories while referenced by any combo. Remove all references before
@@ -307,21 +341,23 @@ Windows. Both offer `start`, `run`, `stop`, `restart`, `status`, `logs`, `health
 for setup and options.
 
 ```sh
-# Explicitly load a prepared .env; never replace an existing master key.
-bash scripts/sparkrouter.sh start --env-file .env
-bash scripts/sparkrouter.sh health --env-file .env
+# Automatically load a prepared .env; never replace an existing master key.
+bash scripts/sparkrouter.sh start
+bash scripts/sparkrouter.sh health
 bash scripts/sparkrouter.sh stop
 ```
 
 ```powershell
-.\scripts\sparkrouter.ps1 start -EnvFile .env
-.\scripts\sparkrouter.ps1 health -EnvFile .env
+.\scripts\sparkrouter.ps1 start
+.\scripts\sparkrouter.ps1 health
 .\scripts\sparkrouter.ps1 stop
 ```
 
 **Windows background stop is forced and interrupts active requests.** For
 graceful Windows shutdown, use `run` instead of `start` and press Ctrl+C.
-Scripts never load `.env` implicitly. The executable itself still reads only
+Scripts automatically load `.env` from the caller's working directory if it exists.
+Use `--env-file FILE` / `-EnvFile FILE` to select a different file. Without a `.env`,
+they use the inherited process environment. The executable itself still reads only
 process environment variables.
 
 ## Configuration
@@ -339,6 +375,17 @@ process environment variables.
 The parent database directory must already exist and be writable. SQLite WAL/SHM sidecar files are normal while running. For backups, stop the application first or use SQLite's online backup facility rather than copying an active database file alone.
 
 ## Providers and protocols
+
+The Providers page has a **Favorites** section above **All providers**. Use the
+star on any preset or custom provider to favorite/unfavorite it. **Anthropic,
+OpenAI, and OpenRouter** are favorites by default. Explicit unfavorites persist
+across restarts; no connection or API key is required to favorite a preset.
+Favorites remain listed under All providers, and name/tag filters apply to both
+sections. Providers are sorted A–Z by name (case-insensitively), with custom
+providers interleaved with presets. These are shared dashboard preferences stored in SQLite, not routing
+priorities or per-browser settings. They are included in full database backups,
+not configuration export/import. Deleting a custom provider removes its favorite
+preference too.
 
 Provider cards display capability tags: **Text, Image, Video, Music, TTS, STT,
 and Decision**. Defaults reflect documented capabilities for supported media presets; other chat

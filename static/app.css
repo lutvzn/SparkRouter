@@ -480,7 +480,38 @@ main.provider-page { max-width: 90rem; }
   gap: 1rem;
 }
 
-a.provider-tile {
+.provider-section { margin-block: 1.5rem; }
+.provider-section > h2 { margin-bottom: 0.8rem; }
+#provider-favorites-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, max(12rem, calc((100% - 5rem) / 6))), 1fr)); }
+.provider-card { position: relative; min-width: 0; }
+.provider-card > .provider-tile { height: 100%; box-sizing: border-box; }
+.provider-card .provider-title-row { flex: 1; flex-wrap: nowrap; gap: 0.25rem; }
+.provider-title-link { min-width: 0; color: inherit; text-decoration: none; overflow-wrap: anywhere; }
+/* Stretch navigation over the card without nesting the favorite form in a link. */
+.provider-title-link::after { content: ""; position: absolute; inset: 0; z-index: 1; border-radius: var(--radius-card); }
+.provider-title-link:focus-visible::after { outline: 2px solid var(--accent); outline-offset: 2px; }
+.provider-favorite-form { position: relative; z-index: 2; flex-shrink: 0; margin: 0; margin-inline-start: auto; }
+.provider-favorite-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+.provider-favorite-button .icon { width: 1.1rem; height: 1.1rem; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
+.provider-favorite-button[aria-pressed="true"] { color: var(--accent); }
+.provider-favorite-button[aria-pressed="true"] .icon { fill: currentColor; }
+.provider-favorite-button:hover { color: var(--accent); }
+.provider-favorite-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.provider-tile {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
@@ -492,8 +523,9 @@ a.provider-tile {
   color: var(--fg);
   text-decoration: none;
 }
-a.provider-tile:hover,
-a.provider-tile:focus {
+.provider-tile:hover,
+.provider-tile:focus,
+.provider-card:focus-within > .provider-tile {
   border-color: var(--accent);
   background: var(--soft);
   text-decoration: none;
@@ -503,20 +535,7 @@ a.provider-tile:focus-visible {
   outline-offset: 2px;
 }
 
-.provider-initial {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 2.2rem;
-  height: 2.2rem;
-  border-radius: 4px;
-  background: var(--soft);
-  color: var(--accent);
-  font-weight: 700;
-}
-
-/* Avatar, title, and Custom tag share one compact header row. */
+/* Provider title and favorite star share one compact header row. */
 .provider-tile-heading {
   display: flex;
   align-items: center;

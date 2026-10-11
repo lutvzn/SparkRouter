@@ -76,7 +76,16 @@ with tempfile.TemporaryDirectory(prefix="sparkrouter-helper-test-") as directory
         generated = run("keygen").splitlines()[0].strip()
         assert len(base64.b64decode(generated, validate=True)) == 32
         run("status", expected=1)
-        run("start", env_flag, str(env_file))
+        run("help", env_flag, str(temp / "missing.env"), expected=1)
+        default_env = temp / ".env"
+        default_env.write_text(good_config, encoding="utf-8")
+        run("start")
+        run("health")
+        # An explicit file must replace, not merge with, the default file.
+        default_env.write_text("PATH=unexpected\n", encoding="utf-8")
+        run("help", expected=1)
+        run("health", env_flag, str(env_file))
+        default_env.write_text(good_config, encoding="utf-8")
         run("status")
         first_id = managed_id()
         run("start", env_flag, str(env_file))
@@ -112,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix="sparkrouter-helper-test-") as directory
         run("restart", env_flag, str(env_file))
         run("health", env_flag, str(env_file))
         before_rebuild = managed_id()
-        run("rebuild", env_flag, str(env_file))
+        run("rebuild")
         assert managed_id() != before_rebuild, "rebuild must replace the running process"
         run("health", env_flag, str(env_file))
 
@@ -149,7 +158,7 @@ with tempfile.TemporaryDirectory(prefix="sparkrouter-helper-test-") as directory
         env_file.write_text("ROUTER_MASTER_KEY=invalid\nROUTER_BIND=127.0.0.1:0\n", encoding="utf-8")
         run("start", env_flag, str(env_file), expected=1)
         assert not (state / "lock").exists(), "failed startup must release its lock"
-        print("Helper smoke passed: lifecycle, rebuild/failure, health, identity, locking, and safe environment parsing.")
+        print("Helper smoke passed: lifecycle, rebuild/failure, health, identity, locking, default .env, explicit override, and safe environment parsing.")
     finally:
         if original_state is not None:
             process_file.write_bytes(original_state)

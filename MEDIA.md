@@ -41,7 +41,12 @@ upstream implements the corresponding paths and response contract**. A Text
 model is not automatically an image/audio/video model. Combos have an enforced
 category; mixed categories and wrong-mode requests are rejected, not silently
 filtered. Protocol compatibility and explicit modality metadata are checked;
-unlisted IDs are manually declared in the combo's category when added. Capability tags are editable display
+unlisted IDs are manually declared in the combo's category when added. Selected
+exact vendor IDs also have built-in categories, and explicit discovered endpoint
+lists constrain classification. These are advisory capability facts, not account
+access checks; no broad model-name heuristics are used. See
+[category-specific combos](README.md#category-specific-combos) for policy and
+provider scoping. Capability tags are editable display
 metadata, not routing permissions or proof of account access.
 
 Custom providers can select OpenAI, MiniMax, xAI, fal.ai, Deepgram, or ElevenLabs

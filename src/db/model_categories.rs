@@ -20,7 +20,59 @@ pub enum Category {
     Tts,
     Stt,
 }
+fn endpoint_fields(fields: &[ModelField]) -> impl Iterator<Item = &ModelField> {
+    fields.iter().filter(|field| {
+        field
+            .label
+            .to_ascii_lowercase()
+            .replace([' ', '_', '-'], "")
+            .ends_with("supportedendpoints")
+    })
+}
+
 impl Category {
+    fn matches_endpoint(self, endpoint: &str) -> bool {
+        let endpoint = endpoint.trim().to_ascii_lowercase();
+        let endpoint = endpoint.trim_start_matches('/');
+        let endpoint = endpoint
+            .strip_prefix("v1/")
+            .unwrap_or(endpoint)
+            .replace(['-', '_'], "/");
+        match self {
+            Self::Text => matches!(
+                endpoint.as_str(),
+                "chat" | "chat/completions" | "chatcompletions" | "messages" | "responses"
+            ),
+            Self::Decision => endpoint == "systemone",
+            Self::Image => matches!(
+                endpoint.as_str(),
+                "image" | "images" | "images/generations" | "images/edits"
+            ),
+            Self::Video => matches!(endpoint.as_str(), "video" | "videos" | "videos/generations"),
+            Self::Music => matches!(endpoint.as_str(), "music" | "music/generations"),
+            Self::Tts => matches!(endpoint.as_str(), "audio/speech" | "speech"),
+            Self::Stt => matches!(
+                endpoint.as_str(),
+                "audio/transcriptions" | "audio/translations" | "transcriptions" | "translations"
+            ),
+        }
+    }
+
+    /// Shared policy for picker suggestions, mutations, import and routing.
+    /// Explicit endpoint declarations take precedence over advisory catalog IDs;
+    /// contradictory modality metadata always fails closed.
+    pub(crate) fn matches_model(
+        self,
+        provider: &Provider,
+        model: &str,
+        fields: &[ModelField],
+    ) -> bool {
+        self.matches_fields(fields)
+            && (endpoint_fields(fields).next().is_some()
+                || crate::providers::model_catalog::category(provider, model)
+                    .is_none_or(|known| known == self))
+    }
+
     pub const ALL: [Self; 7] = [
         Self::Text,
         Self::Decision,
@@ -87,6 +139,9 @@ impl Category {
                     .ends_with(suffix)
             })
         };
+        if endpoint_fields(fields).next().is_some() {
+            return self.matches_fields(fields);
+        }
         self.matches_fields(fields)
             && has("output modalities")
             && match self {
@@ -116,6 +171,16 @@ impl Category {
     /// speech inputs must also match the requested direction. Unknown
     /// metadata is not a guessed model classification.
     pub(crate) fn matches_fields(self, fields: &[ModelField]) -> bool {
+        if endpoint_fields(fields).next().is_some()
+            && !endpoint_fields(fields).any(|field| {
+                field
+                    .value
+                    .split([',', ' ', ';'])
+                    .any(|endpoint| self.matches_endpoint(endpoint))
+            })
+        {
+            return false;
+        }
         if matches!(self, Self::Stt | Self::Tts) {
             let inputs: Vec<_> = fields
                 .iter()
@@ -200,19 +265,20 @@ pub(crate) async fn validate(
     .bind(model)
     .fetch_optional(&mut *connection)
     .await?;
+    let mut fields = Vec::new();
     if let Some(details) = details {
         let value: serde_json::Value = serde_json::from_str(&details)
             .map_err(|_| AppError::Configuration("Invalid stored model metadata".into()))?;
-        let fields: Vec<ModelField> = match value.get("fields") {
+        fields = match value.get("fields") {
             Some(fields) => serde_json::from_value(fields.clone())
                 .map_err(|_| AppError::Configuration("Invalid stored model metadata".into()))?,
             None => Vec::new(),
         };
-        if !category.matches_fields(&fields) {
-            return Err(AppError::InvalidRequest(
-                "Model output modalities do not match the combo category".into(),
-            ));
-        }
+    }
+    if !category.matches_model(&provider, model, &fields) {
+        return Err(AppError::InvalidRequest(
+            "Model capabilities or known category do not match the combo category".into(),
+        ));
     }
     let assigned: Option<String> = sqlx::query_scalar(
         "SELECT category FROM model_categories WHERE provider_id = ? AND model = ?",

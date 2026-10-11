@@ -1,6 +1,8 @@
 FROM rust:1.94-bookworm AS build
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY build_support ./build_support
+COPY data ./data
 COPY src ./src
 COPY migrations ./migrations
 COPY templates ./templates

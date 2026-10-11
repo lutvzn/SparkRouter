@@ -45,6 +45,32 @@ Migrations, Askama templates, and static assets are compiled into the applicatio
 rebuild after changing them. Static assets are embedded in debug builds too.
 The deployed executable does not need the source directories alongside it.
 
+## Build-time models.dev categories
+
+When Cargo runs `build.rs`, it downloads public metadata from
+`https://models.dev/api.json?type=all` and embeds a conservative, exact-ID category
+index. The request has a 20-second timeout, a 16 MiB size limit, and no redirects
+or provider credentials. Failure or invalid data uses the checked-in
+`data/models-dev-categories.json` snapshot; builds do not require models.dev to
+be available. The runtime executable never contacts this service.
+
+Cargo caches build-script output; an unchanged build does not fetch again. Force
+a new import by changing `SPARKROUTER_MODELS_DEV_REFRESH`, for example:
+
+```sh
+SPARKROUTER_MODELS_DEV_REFRESH=2026-10-11 cargo build --release --locked
+```
+
+For reproducible/offline builds, set `SPARKROUTER_MODELS_DEV_OFFLINE=1` (any
+present value disables the download). This selects the bundled snapshot rather
+than a previously downloaded catalog. Cargo dependencies still need a populated
+cache for `--offline`. On PowerShell, set `$env:SPARKROUTER_MODELS_DEV_OFFLINE = '1'`
+before building. These are build-only variables, not server configuration or
+helper `.env` entries. Live-feed builds can classify newly recognized models
+differently; review existing combo declarations after rebuilding. Only category
+evidence is imported, not pricing, limits, providers, connections, or model lists.
+See [category policy](README.md#category-specific-combos) for conservative mapping.
+
 ## Configure and run
 
 | Variable | Default | Purpose |
@@ -149,19 +175,22 @@ repository's `router.db`; use an explicit URL for another installation.
 
 ### Configuration and examples
 
-Supply process environment variables as usual, or explicitly opt into an env file:
+The helpers automatically load `.env` from the caller's working directory if it
+exists, before switching to the repository root. If absent, they use inherited
+process environment variables. Specify `--env-file FILE` / `-EnvFile FILE` to load
+another file instead; an explicitly requested missing file is an error.
 
 ```sh
 # Generate ONCE for a new database; save the result securely.
 bash scripts/sparkrouter.sh keygen
 # Prepare .env using .env.example and the saved key. Do not overwrite an existing .env.
 bash scripts/sparkrouter.sh build
-bash scripts/sparkrouter.sh start --env-file .env
+bash scripts/sparkrouter.sh start
 bash scripts/sparkrouter.sh status
-bash scripts/sparkrouter.sh health --env-file .env
+bash scripts/sparkrouter.sh health
 bash scripts/sparkrouter.sh logs
-bash scripts/sparkrouter.sh restart --env-file .env
-bash scripts/sparkrouter.sh rebuild --env-file .env
+bash scripts/sparkrouter.sh restart
+bash scripts/sparkrouter.sh rebuild
 bash scripts/sparkrouter.sh stop
 ```
 
@@ -169,15 +198,15 @@ bash scripts/sparkrouter.sh stop
 .\scripts\sparkrouter.ps1 keygen
 # Prepare .env using .env.example and the saved key. Do not overwrite an existing .env.
 .\scripts\sparkrouter.ps1 build
-.\scripts\sparkrouter.ps1 start -EnvFile .env
+.\scripts\sparkrouter.ps1 start
 .\scripts\sparkrouter.ps1 status
-.\scripts\sparkrouter.ps1 health -EnvFile .env
+.\scripts\sparkrouter.ps1 health
 .\scripts\sparkrouter.ps1 logs
-.\scripts\sparkrouter.ps1 restart -EnvFile .env
-.\scripts\sparkrouter.ps1 rebuild -EnvFile .env
+.\scripts\sparkrouter.ps1 restart
+.\scripts\sparkrouter.ps1 rebuild
 .\scripts\sparkrouter.ps1 stop
 # For graceful Windows shutdown: run in the foreground and press Ctrl+C.
-.\scripts\sparkrouter.ps1 run -EnvFile .env
+.\scripts\sparkrouter.ps1 run
 ```
 
 Env files are UTF-8 (use no BOM for Bash), with `KEY=value` lines, optional matching

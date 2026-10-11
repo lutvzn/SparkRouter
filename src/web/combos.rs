@@ -409,6 +409,23 @@ async fn editor_data(
         .filter(|provider| Category::ALL.iter().filter(|c| c.accepts(provider)).count() == 1)
         .map(|provider| provider.id.clone())
         .collect();
+    // Classification needs only protocol/URL, never credential ciphertext.
+    let catalog_providers: HashMap<String, Provider> = providers
+        .iter()
+        .map(|p| {
+            (
+                p.id.clone(),
+                Provider {
+                    id: p.id.clone(),
+                    name: String::new(),
+                    base_url: p.base_url.clone(),
+                    protocol: p.protocol,
+                    encrypted_api_key: Vec::new(),
+                    enabled: p.enabled,
+                },
+            )
+        })
+        .collect();
     let providers = providers
         .into_iter()
         .filter(|provider| category.accepts(provider))
@@ -433,11 +450,15 @@ async fn editor_data(
                 .and_then(|list| list.models.iter().find(|m| &m.id == model))
                 .map(|model| model.fields.as_slice())
                 .unwrap_or_default();
-            category.matches_fields(fields)
+            let provider = &catalog_providers[option.id.as_str()];
+            category.matches_model(provider, model, fields)
                 && match classification {
                     Some((_, _, mode)) => mode == category.as_str(),
                     None => {
-                        single_category.contains(&option.id) || category.suggests_fields(fields)
+                        single_category.contains(&option.id)
+                            || category.suggests_fields(fields)
+                            || crate::providers::model_catalog::category(provider, model)
+                                == Some(category)
                     }
                 }
         });

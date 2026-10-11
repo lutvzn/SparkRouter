@@ -54,6 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/providers", get(providers::list).post(providers::create))
         .route("/providers/new", get(providers::new))
         .route("/providers/{kind}/{id}/tags", post(providers::save_tags))
+        .route(
+            "/providers/{kind}/{id}/favorite",
+            post(providers::save_favorite),
+        )
         .route("/providers/custom", post(providers::custom_create))
         .route(
             "/providers/catalog/{slug}",

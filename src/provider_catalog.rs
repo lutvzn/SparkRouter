@@ -373,7 +373,7 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "g4f-pollinations",
-        name: "g4f.space — Pollinations",
+        name: "g4f Pollinations",
         base_url: "https://g4f.space/api/pollinations/v1",
         protocol: Protocol::OpenAi,
     },
@@ -805,7 +805,7 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "wandb",
-        name: "Weights & Biases Inference",
+        name: "W&B Inference",
         base_url: "https://api.inference.wandb.ai/v1",
         protocol: Protocol::OpenAi,
     },
@@ -895,7 +895,7 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "qwen-cloud-token-plan",
-        name: "Qwen Cloud Token Plan",
+        name: "Qwen Token Plan",
         base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
         protocol: Protocol::OpenAi,
     },
@@ -937,13 +937,13 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "volcengine-agent-plan",
-        name: "Volcengine Ark Agent Plan",
+        name: "Volcengine Agent",
         base_url: "https://ark.cn-beijing.volces.com/api/plan/v3",
         protocol: Protocol::OpenAi,
     },
     Preset {
         slug: "volcengine-coding-plan",
-        name: "Volcengine Ark Coding Plan",
+        name: "Volcengine Coding",
         base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
         protocol: Protocol::OpenAi,
     },
@@ -955,7 +955,7 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "xiaomi-mimo-token-plan",
-        name: "Xiaomi MiMo Token Plan",
+        name: "MiMo Token Plan",
         base_url: "https://token-plan-sgp.xiaomimimo.com/v1",
         protocol: Protocol::OpenAi,
     },
@@ -1003,7 +1003,7 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "hcnsec",
-        name: "Huancheng Public API",
+        name: "Huancheng API",
         base_url: "https://api.hcnsec.cn/v1",
         protocol: Protocol::OpenAi,
     },
@@ -1027,13 +1027,13 @@ pub(crate) const PRESETS: &[Preset] = &[
     },
     Preset {
         slug: "internlm",
-        name: "InternLM (Intern-S1)",
+        name: "InternLM",
         base_url: "https://chat.intern-ai.org.cn/api/v1",
         protocol: Protocol::OpenAi,
     },
     Preset {
         slug: "ant-ling",
-        name: "Ant Ling / Ring (inclusionAI)",
+        name: "Ant Ling",
         base_url: "https://api.ant-ling.com/v1",
         protocol: Protocol::OpenAi,
     },
@@ -1202,6 +1202,30 @@ mod tests {
         assert_eq!(
             find("agentrouter").expect("agentrouter").protocol,
             Protocol::Anthropic
+        );
+    }
+
+    #[test]
+    fn long_provider_labels_are_compact_and_used_for_display() {
+        for (slug, name) in [
+            ("ant-ling", "Ant Ling"),
+            ("internlm", "InternLM"),
+            ("hcnsec", "Huancheng API"),
+            ("xiaomi-mimo-token-plan", "MiMo Token Plan"),
+            ("volcengine-coding-plan", "Volcengine Coding"),
+            ("volcengine-agent-plan", "Volcengine Agent"),
+            ("qwen-cloud-token-plan", "Qwen Token Plan"),
+            ("wandb", "W&B Inference"),
+            ("g4f-pollinations", "g4f Pollinations"),
+        ] {
+            let preset = find(slug).expect("preset exists under its original slug");
+            assert_eq!(preset.name, name);
+            assert_eq!(display_name(preset.base_url, &preset.protocol), name);
+        }
+        assert_eq!(find("ant-ling").unwrap().routing_slug(), "ling");
+        assert_ne!(
+            find("qwen-cloud").unwrap().name,
+            find("qwen-cloud-token-plan").unwrap().name
         );
     }
 

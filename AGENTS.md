@@ -69,8 +69,9 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   one enforced category (Text, Decision, Image, Video, Music, TTS, STT);
   wrong-mode requests are rejected rather than filtering a mixed chain. Model
   IDs are never guessed into categories: adding an unclassified connection/model
-  explicitly declares its category, constrained by known modalities and protocol
-  support.
+  explicitly declares its category, constrained by known modalities, endpoint
+  metadata, protocol support, and the exact provider-scoped documented model
+  catalog. Do not replace that catalog with name-prefix/substring guesses.
 - **Never fall back after a streaming response has been returned to Axum.**
   Before commitment, adapters may report a retryable failure. After commitment,
   interruptions terminate the body; do not synthesize a successful ending.

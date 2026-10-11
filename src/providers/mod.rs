@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub(crate) mod media;
+pub(crate) mod model_catalog;
 pub mod openai;
 pub mod systemone;
 // Framing decoder private to the provider adapters.

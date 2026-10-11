@@ -1,5 +1,32 @@
 # Testing SparkRouter
 
+## Provider favorites
+
+`cargo test --locked --test provider_favorites` checks the three default favorites,
+explicit unfavorites surviving restart, idempotent preset/custom updates, escaped
+button labels, CSRF/origin and identity/boolean validation, and custom-group
+cascade cleanup. `node scripts/tests/provider-tags.cjs` checks filtering across
+Favorites and All providers, including empty favorites and no matching favorites.
+Manual browser acceptance: star/unstar both a preset and custom provider using
+mouse and keyboard, verify the top section after reload, and check name/tag
+filters and narrow-screen layout. Favorites must not affect provider credentials,
+connections, gateway-key scopes, or routing priority.
+
+## models.dev build import
+
+`cargo test --locked --test models_dev_build` exercises the shared build-time
+projection with synthetic metadata: exact IDs, vision vs image generation,
+STT, embedding exclusion, ambiguous audio, missing fields, invalid/empty feeds,
+and sorted/unique bundled entries. `cargo test --locked --lib
+providers::model_catalog` checks exact endpoint/protocol scoping, Sora exclusion,
+and upstream metadata precedence. These tests never call real providers.
+
+Set `SPARKROUTER_MODELS_DEV_OFFLINE=1` for deterministic catalog/test builds.
+Unset it and change `SPARKROUTER_MODELS_DEV_REFRESH` to exercise the public
+models.dev download. Cargo caches build-script output; repeated builds do not
+necessarily refetch. A network failure falls back to the bundled snapshot with
+a Cargo warning, not a build failure. See [BUILD.md](BUILD.md#build-time-modelsdev-categories).
+
 ## Required checks
 
 From the repository root, using the toolchain described in [BUILD.md](BUILD.md):
@@ -61,7 +88,7 @@ cargo test --locked -- --list
 | `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
 | `tests/combo_affinity.rs`, `src/routing/affinity.rs` tests | Per-combo Off/Basic/Smart/Sticky, header/body session IDs, exact prompt continuity/separation, caller isolation, clock-controlled expiry/capacity, fallback/rebinding, disabled/edited targets, successful/interrupted/dropped streams, dropdown validation/CSRF, duplication and backward-compatible transfer |
-| `tests/combo_categories.rs`, `scripts/tests/test-chat.cjs` | All seven categories, forms/list/Test filtering and empty states, wrong-mode rejection before quotas/rotation, protocol/modality checks, vision input vs image output, declarations, transactional edits, concurrent conflicts, duplication and credential-free transfer |
+| `tests/combo_categories.rs`, `scripts/tests/test-chat.cjs` | All seven categories, forms/list/Test filtering and empty states, wrong-mode rejection before quotas/rotation, protocol/modality checks, positive-evidence picker filtering, exact provider-scoped catalog IDs (including custom collisions and excluded Sora/name prefixes), endpoint aliases/unsupported endpoints, changed metadata, import rollback, vision input vs image output, declarations, transactional edits, concurrent conflicts, duplication and credential-free transfer |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
 | `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
 | `src/db/provider_slugs.rs` tests | Readable unique slugs, reserved names, transactional conflicts/concurrency, stable legacy initialization |
@@ -91,7 +118,9 @@ master key; it never loads a user's `.env` or contacts providers. It covers key
 generation, start/status/idempotency, readiness, logs, restart/stop,
 rebuild from running/stopped states, failed-build shutdown and lock cleanup, process
 identity mismatch, lock conflicts, failed startup, empty-key rejection, and
-literal env-file parsing. A native release binary is required for the host OS.
+literal env-file parsing, automatic `.env` loading from the caller's directory,
+and explicit env-file precedence/missing-file errors. A native release binary is
+required for the host OS.
 On Windows it captures helper output to files, because detached children can
 inherit unused pipe handles and delay captured-pipe EOF.
 
@@ -241,7 +270,7 @@ existing installation's database.
    named custom providers may share URLs without merging their connections.
    Check the Custom badge and Delete provider action. Deletion removes the
    provider and all its connections, but a connection used by a combo must block
-   the entire deletion without losing any keys. Presets have no provider-delete action. The providers search box filters tile titles as you type, without Enter, and does not match the protocol badge alone. Refresh models on a connection, open the model dropdown, and confirm the search box filters cards as you type. Those IDs should also appear as combo-step suggestions; a typed ID must still be accepted.
+   the entire deletion without losing any keys. Presets have no provider-delete action. The providers search box filters tile titles as you type, without Enter, and cards show capability tags rather than protocol badges. Refresh models on a connection, open the model dropdown, and confirm the search box filters cards as you type. Those IDs should also appear as combo-step suggestions; a typed ID must still be accepted.
    Check preset tiles and Custom provider. Add two named connections to one
    preset and verify both appear on its page without exposing keys. Connections
    in separate custom providers must remain separate. Confirm the combo

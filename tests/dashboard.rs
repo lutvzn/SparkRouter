@@ -226,7 +226,7 @@ async fn dashboard_crud_and_htmx_ordering_work_together() {
         "index shows grouped tiles, not flat connection names"
     );
     assert!(index.contains("example.invalid"));
-    assert!(index.contains("<span class=\"badge\">OpenAI</span>"));
+    assert!(!index.contains("<span class=\"badge\">OpenAI</span>"));
     assert!(
         !index.contains("https://example.invalid/v1"),
         "index tiles show protocol badges, not endpoint URLs"
@@ -699,7 +699,11 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
         "providers index must include a live title filter"
     );
     assert!(
-        !index.contains("<form"),
+        !index
+            .split("id=\"provider-search-empty\"")
+            .next()
+            .unwrap()
+            .contains("<form"),
         "the providers index filter must not be a submitting form"
     );
     let script = get_page(&router, "/static/app.js").await;
@@ -711,8 +715,8 @@ async fn providers_index_links_catalog_presets_and_blank_form_targets_them() {
     );
     assert!(index.contains("class=\"provider-tile-heading\""));
     assert!(index.contains("class=\"provider-tile-status\""));
-    assert!(index.contains("<span class=\"badge\">OpenAI</span>"));
-    assert!(index.contains("<span class=\"badge\">Anthropic</span>"));
+    assert!(!index.contains("<span class=\"badge\">OpenAI</span>"));
+    assert!(!index.contains("<span class=\"badge\">Anthropic</span>"));
     assert!(
         !index.contains("https://api.openai.com/v1"),
         "preset tiles show protocol badges, not the fixed endpoint"
@@ -1060,7 +1064,7 @@ async fn custom_tiles_group_by_exact_endpoint_and_reject_unknown_or_bad_csrf() {
         assert!(!index.contains(name), "index shows counts, not flat names");
     }
     assert!(index.contains("llm.internal.example"));
-    assert!(index.contains("<span class=\"badge\">Anthropic</span>"));
+    assert!(!index.contains("<span class=\"badge\">Anthropic</span>"));
     assert!(
         !index.contains("https://llm.internal.example/v1"),
         "index tiles show protocol badges, not endpoint URLs"
@@ -1274,7 +1278,7 @@ async fn custom_provider_post_creates_empty_named_group_card() {
     assert!(index.contains(&format!("href=\"/providers/groups/{group_id}\"")));
     assert!(index.contains("Acme &#60;LLM&#62; &#38; Co"));
     assert!(index.contains("not connected"));
-    assert!(index.contains("<span class=\"badge\">OpenAI</span>"));
+    assert!(!index.contains("<span class=\"badge\">OpenAI</span>"));
     assert!(index.contains("<span class=\"badge\">Custom</span>"));
     assert!(
         !index.contains("https://acme.invalid/v1"),
@@ -1493,7 +1497,7 @@ async fn custom_group_keys_counts_metadata_and_validation_rejections() {
     assert!(index.contains("Beta &#60;LLM&#62;"));
     assert!(index.contains("2 connection"));
     assert!(index.contains("1 enabled"));
-    assert!(index.contains("<span class=\"badge\">Anthropic</span>"));
+    assert!(!index.contains("<span class=\"badge\">Anthropic</span>"));
     assert!(index.contains("<span class=\"badge\">Custom</span>"));
     assert!(
         !index.contains("https://beta.invalid/v1"),
