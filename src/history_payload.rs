@@ -68,7 +68,6 @@ pub(crate) fn wrap(
         bytes: Vec::new(),
         truncated: false,
         finished: false,
-        complete: None,
     };
     let (parts, body) = response.into_parts();
     let stream = async_stream::stream! {
@@ -81,11 +80,11 @@ pub(crate) fn wrap(
                 guard.bytes.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
             }
             let failed = chunk.is_err();
-            if failed { guard.finish(false).await; }
+            if failed { guard.finish(false); }
             yield chunk;
             if failed { return; }
         }
-        guard.finish(true).await;
+        guard.finish(true);
     };
     Response::from_parts(parts, Body::from_stream(stream))
 }
@@ -97,24 +96,27 @@ struct PayloadGuard {
     bytes: Vec<u8>,
     truncated: bool,
     finished: bool,
-    complete: Option<bool>,
 }
 
 impl PayloadGuard {
-    async fn finish(&mut self, complete: bool) {
-        if self.finished {
+    /// Persist the capture once, in the background, so the end of the body
+    /// never waits on SQLite.
+    fn finish(&mut self, complete: bool) {
+        if std::mem::replace(&mut self.finished, true) {
             return;
         }
-        self.complete = Some(complete);
-        self.finished = write(
-            &self.pool,
-            &self.id,
-            &self.gate,
-            &self.bytes,
-            self.truncated,
-            complete,
-        )
-        .await;
+        let pool = self.pool.clone();
+        let id = self.id.clone();
+        let gate = self.gate.clone();
+        let bytes = std::mem::take(&mut self.bytes);
+        let truncated = self.truncated;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if !write(&pool, &id, &gate, &bytes, truncated, complete).await {
+                    tracing::warn!("request payload write unavailable");
+                }
+            });
+        }
     }
 }
 
@@ -149,21 +151,6 @@ async fn write(
 
 impl Drop for PayloadGuard {
     fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        let pool = self.pool.clone();
-        let id = self.id.clone();
-        let gate = self.gate.clone();
-        let bytes = std::mem::take(&mut self.bytes);
-        let truncated = self.truncated;
-        let complete = self.complete.unwrap_or(false);
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if !write(&pool, &id, &gate, &bytes, truncated, complete).await {
-                    tracing::warn!("request payload write unavailable");
-                }
-            });
-        }
+        self.finish(false);
     }
 }

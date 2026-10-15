@@ -109,7 +109,7 @@ cargo test --locked -- --list
 | --- | --- |
 | `src/crypto.rs` tests | Encryption round-trip, unique nonces, wrong key/provider context, tampering, invalid master-key lengths |
 | `src/db/` tests | Fresh database initialization, foreign keys, WAL persistence, CRUD, validation, ordering, transactional swaps/removals, delete constraints, timestamps |
-| `src/routing/` tests | Retry classification, per-combo/concurrent round-robin turns, unbiased random index selection, and pre-commit cancellation retaining attempt traces |
+| `src/routing/` tests | Retry classification, per-combo/concurrent round-robin turns, unbiased random index selection, chain-scaled pre-commit deadlines, and pre-commit cancellation retaining attempt traces |
 | `src/providers/` tests | URL normalization, unknown-field preservation, model replacement, response translation, fragmented UTF-8/CRLF SSE, tools, usage, truncation, limits, stream commitment |
 | `src/web/` tests | Exact blank-key preservation, credential replacement/no-key creation, form validation, escaping, CSRF fields/comparison, fragments and disabled labels |
 | `tests/provider_tags.rs`, `scripts/tests/provider-tags.cjs` | Text/Decision defaults, preset/custom multi-tag edits, empty overrides, validation/CSRF/origin, restart persistence, cascading deletion, combined name/any-tag filtering and empty state |

@@ -134,7 +134,8 @@ upstream error bodies are retained.
 3. Construct one pooled Reqwest client; disable redirects.
 4. Open SQLite with foreign keys, WAL, a five-second busy timeout, and embedded
    migrations. File-backed databases use at most five connections; in-memory
-   test databases use one.
+   test databases use one that is never retired for idleness or age, since
+   closing it would discard the database.
 5. Generate a process-wide random CSRF token and compose API/dashboard routers.
 6. Bind the listener and serve until shutdown. Close the database pool afterward.
 
@@ -254,7 +255,8 @@ The public router is mounted at `/v1` separately from the dashboard:
 - `POST /v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`
 
 If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
-exists, API middleware requires `Authorization: Bearer <key>`. The environment
+exists, API middleware requires `Authorization: Bearer <key>` (scheme matched
+case-insensitively, token exactly). The environment
 key is compared with `subtle`. Generated keys are matched by a master-key HMAC
 fingerprint and checked against expiry, then their authorization policy is loaded
 in one read transaction. A request-local `KeyAccess` extension carries either
@@ -369,7 +371,10 @@ authenticated successful refresh.
 Anthropic translation deliberately rejects unsupported semantics rather than
 pretending to provide full OpenAI parity. Its default token budget is 8192.
 Unknown extension fields can pass through, while known bookkeeping fields are
-omitted. Thinking blocks are not exposed as answer text. See the README for the
+omitted. Thinking, server-tool, and other auxiliary blocks (and citation
+deltas) are skipped rather than exposed as answer text or treated as failures;
+blocks without a type remain invalid. Temperatures above 1 are clamped to
+Anthropic's ceiling so a mixed combo is not stopped by a permanent 400. See the README for the
 current supported subset.
 
 SystemOne model listing reads the native `models` array with `name` IDs.
@@ -448,7 +453,7 @@ dropped on completion, cancellation, or error. Streams remain backpressured.
 | Connect timeout | 10 seconds |
 | Upstream idle read timeout | 120 seconds |
 | Each attempt's response-preparation deadline | 120 seconds chat/SystemOne; 600 seconds media |
-| Whole pre-commit fallback deadline | 180 seconds chat/SystemOne; 610 seconds media |
+| Whole pre-commit fallback deadline | Per-attempt deadline × eligible targets + 60 s chat/SystemOne (+10 s media); capped at 10 minutes chat/SystemOne, 30 minutes media |
 | Native video/fal queue polling | Every 2 seconds, up to 570 seconds after submission |
 | Provider connection test and model refresh | 15 seconds |
 | HTTP pool idle lifetime / idle connections per host | 90 seconds / 4 |
@@ -587,7 +592,10 @@ SQLite. Domain-separated master-key HMAC fingerprints are compared in constant
 time. Random 256-bit session cookies are HttpOnly, SameSite=Strict, optionally
 Secure; a bounded process-local session map enforces eight-hour expiry and logout
 revocation. Restart invalidates all sessions. Bounded per-socket-peer accounting
-permits ten failed logins per minute; forwarding headers are deliberately ignored.
+permits ten failed logins per minute; a successful login clears that peer's
+count. When 1,024 peers are tracked, the oldest unthrottled peer is evicted;
+only if every tracked peer is throttled do new peers share one overflow bucket.
+Forwarding headers are deliberately ignored.
 Reverse proxies should apply their own per-client limits. Without
 the variable, the dashboard remains open. Gateway API authentication does not
 cover the dashboard, and dashboard sessions never authorize `/v1/*` or test chat.
@@ -653,7 +661,8 @@ upstream errors, not secrets supplied in message/tool/extension body content.
 Bodies are intentionally unencrypted development data in SQLite/WAL/backups;
 Extended requires explicit confirmation in a CSRF/origin-protected Settings form.
 The payload insert waits for metadata and conditional SQL cannot resurrect a
-cleared/pruned parent. Body finalization/drop waits for the shared insert gate,
+cleared/pruned parent. Body finalization/drop is spawned so the body end never
+waits on SQLite; that task waits for the shared insert gate,
 with bounded best-effort writes and incomplete/truncated flags. Capture reads are
 on a dashboard-auth-protected, autoescaped, no-store HTML inspection page, not an
 API response. Existing and in-flight captures survive mode changes. Pruning and
@@ -665,10 +674,11 @@ carry best-effort usage metadata in internal response extensions. The streaming
 observer frames bounded SSE events and reads usage without re-encoding events;
 malformed observer data never alters forwarding. Terminal body errors record
 interruption; dropped bodies record cancellation (or success if `[DONE]` was
-already observed). The insert is spawned and does not delay the response. Streaming finalization
-waits for that insert before writing the terminal outcome, including before a
-terminal body error is forwarded. Drop finalization is a bounded asynchronous
-database write, not a recurring worker. Recording failures are logged only as
+already observed). The insert is spawned and does not delay the response.
+Streaming finalization (completion, body error, or drop) is a spawned, bounded
+asynchronous database write that waits for that insert before writing the
+terminal outcome, so the body end never waits on SQLite. It is not a recurring
+worker. Recording failures are logged only as
 fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.
 The `request_history` and `request_attempts` tables contain metadata snapshots
 only, with no foreign keys to live configuration that could block deletion.

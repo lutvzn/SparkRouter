@@ -22,6 +22,7 @@ pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Respon
         model,
         body,
         &super::affinity::RequestContext::default(),
+        tokio::time::Instant::now(),
         None,
     )
     .await
@@ -32,9 +33,10 @@ pub(crate) async fn route_with_trace(
     model: &str,
     body: &Value,
     context: &super::affinity::RequestContext,
+    started: tokio::time::Instant,
     attempts: &mut Vec<super::combo::AttemptTrace>,
 ) -> Result<Response, AppError> {
-    route_inner(state, model, body, context, Some(attempts)).await
+    route_inner(state, model, body, context, started, Some(attempts)).await
 }
 
 async fn route_inner(
@@ -42,6 +44,7 @@ async fn route_inner(
     model: &str,
     body: &Value,
     context: &super::affinity::RequestContext,
+    started: tokio::time::Instant,
     mut attempts: Option<&mut Vec<super::combo::AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let public_model = validate_model(model)?;
@@ -67,7 +70,13 @@ async fn route_inner(
             "no connection lists public model '{public_model}'"
         )));
     }
+    // Listed connections bound the chain; ineligible ones only add headroom.
+    let remaining = provider_ids.len();
+    let deadline = super::Budget::for_context(context).deadline(started, remaining);
     for (index, provider_id) in provider_ids.into_iter().enumerate() {
+        if super::deadline_exhausted(deadline, remaining - index) {
+            break;
+        }
         let (provider, namespace, group_name) =
             match provider_slugs::connection_with_name(&state.db, &provider_id).await? {
                 Some(provider) => provider,
@@ -101,6 +110,7 @@ async fn route_inner(
             &model,
             body,
             context,
+            deadline,
             trace,
             &mut attempts,
         )

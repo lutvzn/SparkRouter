@@ -157,16 +157,11 @@ pub async fn login(
         sessions
             .failures
             .retain(|_, window| now.duration_since(window.started) < Duration::from_secs(60));
-        // Bound accounting without evicting a throttled peer on every request.
-        let bucket = if sessions.failures.contains_key(&peer) || sessions.failures.len() < 1024 {
-            peer
-        } else {
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-        };
+        let bucket = failure_bucket(&mut sessions.failures, peer);
         if sessions
             .failures
             .get(&bucket)
-            .is_some_and(|window| window.count >= 10)
+            .is_some_and(|window| window.count >= MAX_FAILURES)
         {
             return Ok((
                 StatusCode::TOO_MANY_REQUESTS,
@@ -203,6 +198,10 @@ pub async fn login(
             )
                 .into_response());
         }
+        // A successful login clears that peer's own failures, never the shared overflow bucket.
+        if bucket == peer {
+            sessions.failures.remove(&peer);
+        }
         sessions.tokens.retain(|_, expires| *expires > now);
         // Do not grow without bound or silently evict an active session.
         if sessions.tokens.len() >= 128 {
@@ -224,6 +223,31 @@ pub async fn login(
         auth.cookie_header(&token, LIFETIME.as_secs()),
     );
     Ok(response)
+}
+
+const MAX_TRACKED_PEERS: usize = 1024;
+const MAX_FAILURES: usize = 10;
+
+/// Bound accounting without evicting a throttled peer. When the table is full,
+/// make room by dropping the oldest peer that is not throttled, so a burst of
+/// sources cannot push new legitimate peers into one shared lockout. Only when
+/// every tracked peer is throttled do new peers share the overflow bucket.
+fn failure_bucket(failures: &mut HashMap<IpAddr, FailureWindow>, peer: IpAddr) -> IpAddr {
+    if failures.contains_key(&peer) || failures.len() < MAX_TRACKED_PEERS {
+        return peer;
+    }
+    let evictable = failures
+        .iter()
+        .filter(|(_, window)| window.count < MAX_FAILURES)
+        .min_by_key(|(_, window)| window.started)
+        .map(|(address, _)| *address);
+    match evictable {
+        Some(address) => {
+            failures.remove(&address);
+            peer
+        }
+        None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
 }
 
 #[derive(Template)]
@@ -291,6 +315,46 @@ mod tests {
             .tokens
             .insert(token, Instant::now() + LIFETIME);
         assert!(auth.valid(&headers));
+    }
+
+    #[test]
+    fn full_failure_table_evicts_unthrottled_peers_before_sharing_a_bucket() {
+        let base = Instant::now();
+        let address =
+            |index: usize| IpAddr::from([10, 0, (index / 256) as u8, (index % 256) as u8]);
+        let mut failures = HashMap::new();
+        for index in 0..MAX_TRACKED_PEERS {
+            failures.insert(
+                address(index),
+                FailureWindow {
+                    started: base + Duration::from_millis(index as u64),
+                    count: if index == 0 { MAX_FAILURES } else { 1 },
+                },
+            );
+        }
+        let newcomer = IpAddr::from([192, 168, 0, 1]);
+        // The oldest unthrottled peer makes room; the throttled one is kept.
+        assert_eq!(failure_bucket(&mut failures, newcomer), newcomer);
+        assert!(failures.contains_key(&address(0)));
+        assert!(!failures.contains_key(&address(1)));
+        // Tracked peers always keep their own bucket.
+        assert_eq!(failure_bucket(&mut failures, address(0)), address(0));
+        // Only when every tracked peer is throttled do newcomers share one.
+        for window in failures.values_mut() {
+            window.count = MAX_FAILURES;
+        }
+        failures.insert(
+            newcomer,
+            FailureWindow {
+                started: base,
+                count: MAX_FAILURES,
+            },
+        );
+        assert_eq!(failures.len(), MAX_TRACKED_PEERS);
+        assert_eq!(
+            failure_bucket(&mut failures, IpAddr::from([192, 168, 0, 2])),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
     }
 
     #[test]

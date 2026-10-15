@@ -10,9 +10,9 @@
 //! Basic metadata rows/schema/pages exclude prompts, completions, credentials,
 //! endpoint URLs and upstream errors. Explicit Extended tests additionally check
 //! sensitive body capture, limits, and lifecycle without changing response bytes. The insert is asynchronous, so readers yield until the expected
-//! row exists. Stream finalization is observed deterministically — awaiting the
-//! body for success/interrupted, and a bounded yield-and-query loop for the task
-//! spawned when an unpolled body is dropped — with no sleeps anywhere.
+//! row exists. Stream and payload finalization are spawned too, so the end of a
+//! body never waits on SQLite; tests observe them with bounded yield-and-query
+//! loops, with no sleeps anywhere.
 
 mod common;
 use common::{body_bytes, json_body, spawn_upstream};
@@ -228,10 +228,9 @@ async fn logging_modes_preserve_bytes_and_capture_only_when_extended() -> TestRe
         reply["completion"],
         serde_json::from_str::<Value>(expected)?
     );
-    let records = history(&state).await;
+    let records = wait_for_count(&state, 2).await;
     let record = records.iter().find(|r| r.source == "test").unwrap();
-    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
-    assert!(payload.response_complete);
+    let payload = finished_payload(&state, &record.id).await;
     assert!(!payload.response_truncated);
     assert_eq!(payload.response_body, expected);
     let captured: Value = serde_json::from_str(&payload.request_body)?;
@@ -265,10 +264,7 @@ async fn logging_modes_preserve_bytes_and_capture_only_when_extended() -> TestRe
 
 #[tokio::test]
 async fn extended_stream_capture_is_snapshot_based_and_byte_exact() -> TestResult {
-    use sparkrouter::db::{
-        request_payloads,
-        settings::{self, LoggingMode},
-    };
+    use sparkrouter::db::settings::{self, LoggingMode};
     let state = test_state().await;
     let chunks = vec![
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n",
@@ -296,10 +292,8 @@ async fn extended_stream_capture_is_snapshot_based_and_byte_exact() -> TestResul
     .await;
     settings::set_logging_mode(&state.db, LoggingMode::Off).await?;
     assert_eq!(body_bytes(response).await, expected);
-    let record = single_record(&state).await;
-    assert_eq!(record.outcome, "success");
-    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
-    assert!(payload.response_complete);
+    let record = wait_until(&state, |r| r.outcome == "success").await;
+    let payload = finished_payload(&state, &record.id).await;
     assert_eq!(payload.response_body, expected);
     Ok(())
 }
@@ -332,8 +326,8 @@ async fn extended_capture_is_bounded_without_truncating_client_response() -> Tes
         expected
     );
     let record = single_record(&state).await;
-    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
-    assert!(payload.request_truncated && payload.response_truncated && payload.response_complete);
+    let payload = finished_payload(&state, &record.id).await;
+    assert!(payload.request_truncated && payload.response_truncated);
     assert!(payload.request_body.len() <= request_payloads::BODY_LIMIT);
     assert_eq!(payload.response_body.len(), request_payloads::BODY_LIMIT);
     Ok(())
@@ -416,7 +410,7 @@ async fn extended_excludes_raw_upstream_errors_and_payload_failure_does_not_brea
     assert!(!response.status().is_success());
     let expected = String::from_utf8(body_bytes(response).await.to_vec())?;
     let record = single_record(&state).await;
-    let payload = request_payloads::get(&state.db, &record.id).await?.unwrap();
+    let payload = finished_payload(&state, &record.id).await;
     assert_eq!(payload.response_body, expected);
     assert!(!payload.response_body.contains("mock status 400"));
     assert!(!payload.response_body.contains("mock_error"));
@@ -442,8 +436,7 @@ async fn extended_excludes_raw_upstream_errors_and_payload_failure_does_not_brea
     )
     .await;
     assert_eq!(body_bytes(response).await, expected);
-    let record = single_record(&state).await;
-    assert_eq!(record.outcome, "success");
+    let record = wait_until(&state, |r| r.outcome == "success").await;
     assert!(
         request_payloads::get(&state.db, &record.id)
             .await?
@@ -686,6 +679,25 @@ async fn wait_until(state: &AppState, satisfied: impl Fn(&Record) -> bool) -> Re
         "history record never reached the expected outcome, still {:?}",
         single_record(state).await.outcome
     );
+}
+
+/// Payload captures are finalized in the background after the body ends, so
+/// yield until the completed capture lands instead of racing that write.
+async fn finished_payload(
+    state: &AppState,
+    id: &str,
+) -> sparkrouter::db::request_payloads::Payload {
+    for _ in 0..2_000 {
+        if let Some(payload) = sparkrouter::db::request_payloads::get(&state.db, id)
+            .await
+            .expect("read payload")
+            && payload.response_complete
+        {
+            return payload;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("payload capture for {id} never completed");
 }
 
 /// Every value of every row of both history tables, stringified, so negative
@@ -1181,7 +1193,7 @@ async fn streaming_records_streaming_then_success_with_fragmented_usage() -> Tes
 
     // Completing the body finalizes the record as a success with usage
     // merged across the fragmented events, and a latency measured to the end.
-    let done = single_record(&state).await;
+    let done = wait_until(&state, |r| r.outcome != "streaming").await;
     assert_eq!(done.id, open.id);
     assert!(done.streaming);
     assert_eq!(done.outcome, "success");
@@ -1265,9 +1277,8 @@ async fn midstream_truncation_records_interrupted_without_failover() -> TestResu
         .expect("first frame is data");
     assert_eq!(frame, Bytes::from_static(FIRST_FRAME.as_bytes()));
 
-    // The truncation surfaces as a body error; the finalization write is
-    // awaited before that error frame is forwarded, so the row is already
-    // "interrupted" by the time the client observes the failure.
+    // The truncation surfaces as a body error; the row is then finalized as
+    // "interrupted" in the background.
     let next = tokio::time::timeout(std::time::Duration::from_secs(10), frames.next())
         .await
         .expect("second frame within timeout");
@@ -1276,7 +1287,7 @@ async fn midstream_truncation_records_interrupted_without_failover() -> TestResu
         "a truncated stream must end in a body error, got {next:?}"
     );
 
-    let row = single_record(&state).await;
+    let row = wait_until(&state, |r| r.outcome != "streaming").await;
     assert!(row.streaming);
     assert_eq!(row.outcome, "interrupted");
     assert_eq!(row.status, 200);

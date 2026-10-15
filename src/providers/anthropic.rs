@@ -409,6 +409,16 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
             choice["disable_parallel_tool_use"] = json!(true);
         }
     }
+    // OpenAI accepts temperatures up to 2; Anthropic's ceiling is 1 and a
+    // higher value is a permanent 400 that would stop a mixed combo. Clamp
+    // rather than reject so the same request stays valid across steps.
+    if output
+        .get("temperature")
+        .and_then(Value::as_f64)
+        .is_some_and(|temperature| temperature > 1.0)
+    {
+        output.insert("temperature".into(), json!(1.0));
+    }
     // Anthropic expects optional parameters to be omitted rather than sent as
     // explicit nulls. Strip the known optional fields when null; unknown
     // extension fields (null or not) pass through untouched.
@@ -508,9 +518,10 @@ fn translate_response(message: &Value) -> Result<Value, AttemptError> {
                     .ok_or(AttemptError::Retryable)?;
                 calls.push(json!({"id":id, "type":"function", "function":{"name":name, "arguments":input.to_string()}}));
             }
-            // Thinking/signatures are auxiliary Anthropic data, not answer text.
-            Some("thinking" | "redacted_thinking") => {}
-            _ => return Err(AttemptError::Retryable),
+            // Thinking, server-tool and other newer block types are auxiliary
+            // Anthropic data, not answer text. A block without a type is corrupt.
+            Some(_) => {}
+            None => return Err(AttemptError::Retryable),
         }
     }
     let mut assistant = json!({"role":"assistant", "content":if text.is_empty() && !calls.is_empty() { Value::Null } else { json!(text) }});
@@ -551,8 +562,12 @@ fn upstream_error(event: &Value) -> AttemptError {
 #[derive(Clone, Copy)]
 enum Block {
     Text,
-    Tool { index: usize, has_arguments: bool },
-    Thinking,
+    Tool {
+        index: usize,
+        has_arguments: bool,
+    },
+    /// Thinking or newer block types: consumed, never exposed as answer text.
+    Auxiliary,
 }
 
 struct StreamState {
@@ -688,8 +703,8 @@ impl StreamState {
                             has_arguments: !arguments.is_empty(),
                         }
                     }
-                    Some("thinking" | "redacted_thinking") => Block::Thinking,
-                    _ => return Err(AttemptError::Retryable),
+                    Some(_) => Block::Auxiliary,
+                    None => return Err(AttemptError::Retryable),
                 };
                 self.blocks.insert(index, block);
             }
@@ -731,7 +746,8 @@ impl StreamState {
                         );
                         output.push(self.chunk(json!({"tool_calls":[{"index":tool_index, "function":{"arguments":arguments}}]}), None));
                     }
-                    (Block::Thinking, Some("thinking_delta" | "signature_delta")) => {}
+                    // Citation metadata accompanies text; it is not answer text.
+                    (Block::Text, Some("citations_delta")) | (Block::Auxiliary, Some(_)) => {}
                     _ => return Err(AttemptError::Retryable),
                 }
             }
@@ -897,6 +913,22 @@ mod tests {
         .unwrap();
         assert_eq!(kept["temperature"], 0.5);
         assert_eq!(kept["top_k"], 40);
+    }
+
+    #[test]
+    fn clamps_openai_temperatures_above_anthropics_ceiling() {
+        let translate = |temperature: Value| {
+            translate_request(
+                &json!({"messages":[{"role":"user", "content":"hi"}], "temperature":temperature}),
+                "claude",
+            )
+            .unwrap()["temperature"]
+                .clone()
+        };
+        assert_eq!(translate(json!(1.7)), 1.0);
+        assert_eq!(translate(json!(2)), 1.0);
+        assert_eq!(translate(json!(1)), 1);
+        assert_eq!(translate(json!(0.2)), 0.2);
     }
 
     #[test]
@@ -1159,6 +1191,47 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&events[0].data).unwrap(),
             json!({"type":"ping"})
+        );
+    }
+
+    #[test]
+    fn auxiliary_and_citation_blocks_are_skipped_not_failed() {
+        let value = translate_response(&json!({"id":"m", "model":"c", "content":[
+            {"type":"server_tool_use", "id":"s", "name":"web_search", "input":{}},
+            {"type":"web_search_tool_result", "tool_use_id":"s", "content":[]},
+            {"type":"text", "text":"Answer", "citations":[{"type":"web_search_result_location"}]}
+        ]}))
+        .unwrap();
+        assert_eq!(value["choices"][0]["message"]["content"], "Answer");
+        assert!(matches!(
+            translate_response(&json!({"id":"m", "model":"c", "content":[{"text":"no type"}]})),
+            Err(AttemptError::Retryable)
+        ));
+
+        let mut state = StreamState::new(false);
+        let mut apply = |value: Value| {
+            state.event(SseEvent {
+                name: String::new(),
+                data: value.to_string(),
+            })
+        };
+        apply(json!({"type":"message_start", "message":{"id":"msg", "model":"claude"}})).unwrap();
+        apply(json!({"type":"content_block_start", "index":0, "content_block":{"type":"server_tool_use", "id":"s", "name":"web_search", "input":{}}})).unwrap();
+        let hidden = apply(json!({"type":"content_block_delta", "index":0, "delta":{"type":"input_json_delta", "partial_json":"{\"q\":1}"}})).unwrap();
+        assert!(hidden.is_empty());
+        apply(json!({"type":"content_block_stop", "index":0})).unwrap();
+        apply(json!({"type":"content_block_start", "index":1, "content_block":{"type":"text", "text":""}})).unwrap();
+        let citation = apply(json!({"type":"content_block_delta", "index":1, "delta":{"type":"citations_delta", "citation":{"type":"web_search_result_location"}}})).unwrap();
+        assert!(citation.is_empty());
+        let text = apply(json!({"type":"content_block_delta", "index":1, "delta":{"type":"text_delta", "text":"Answer"}})).unwrap();
+        assert!(std::str::from_utf8(&text[0]).unwrap().contains("Answer"));
+        // Unexpected delta kinds on answer blocks are still treated as corruption.
+        assert!(apply(json!({"type":"content_block_delta", "index":1, "delta":{"type":"input_json_delta", "partial_json":"{}"}})).is_err());
+        assert!(
+            apply(
+                json!({"type":"content_block_start", "index":2, "content_block":{"text":"no type"}})
+            )
+            .is_err()
         );
     }
 

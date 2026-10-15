@@ -51,10 +51,17 @@ pub async fn connect(url: &str) -> Result<SqlitePool, AppError> {
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(BUSY_TIMEOUT);
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(if in_memory { 1 } else { MAX_FILE_CONNECTIONS })
-        .connect_with(options)
-        .await?;
+    let mut pool_options =
+        SqlitePoolOptions::new().max_connections(if in_memory { 1 } else { MAX_FILE_CONNECTIONS });
+    if in_memory {
+        // Closing the only connection would silently replace the database
+        // with an empty one, so never retire it for idleness or age.
+        pool_options = pool_options
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None);
+    }
+    let pool = pool_options.connect_with(options).await?;
 
     sqlx::migrate!().run(&pool).await?;
     provider_slugs::initialize(&pool).await?;
@@ -92,6 +99,14 @@ mod tests {
         .await
         .expect("schema tables");
         assert_eq!(tables, 8);
+    }
+
+    #[tokio::test]
+    async fn in_memory_pool_never_retires_its_only_connection() {
+        let pool = connect("sqlite::memory:").await.expect("connect");
+        assert_eq!(pool.options().get_idle_timeout(), None);
+        assert_eq!(pool.options().get_max_lifetime(), None);
+        assert_eq!(pool.options().get_min_connections(), 1);
     }
 
     #[tokio::test]

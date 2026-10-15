@@ -1911,6 +1911,25 @@ async fn optional_api_key_protects_models_and_chat() -> TestResult {
     assert_eq!(response.status(), StatusCode::OK);
     let payload = json_body(response).await;
     assert!(payload["data"].to_string().contains("combo/coding"));
+
+    // The scheme is case-insensitive; the token and the scheme itself are exact.
+    for (authorization, expected) in [
+        ("bearer gateway-secret", StatusCode::OK),
+        ("BEARER gateway-secret", StatusCode::OK),
+        ("bearer Gateway-Secret", StatusCode::UNAUTHORIZED),
+        ("Basic gateway-secret", StatusCode::UNAUTHORIZED),
+        ("Bearergateway-secret", StatusCode::UNAUTHORIZED),
+    ] {
+        let request = Request::builder()
+            .uri("/v1/models")
+            .header(header::AUTHORIZATION, authorization)
+            .body(Body::empty())?;
+        assert_eq!(
+            send(&state, request).await.status(),
+            expected,
+            "{authorization}"
+        );
+    }
     Ok(())
 }
 

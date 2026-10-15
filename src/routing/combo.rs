@@ -58,6 +58,7 @@ pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Respons
         name,
         body,
         &super::affinity::RequestContext::default(),
+        tokio::time::Instant::now(),
         None,
     )
     .await
@@ -122,9 +123,10 @@ pub(crate) async fn route_with_trace(
     name: &str,
     body: &Value,
     context: &super::affinity::RequestContext,
+    started: tokio::time::Instant,
     attempts: &mut Vec<AttemptTrace>,
 ) -> Result<Response, AppError> {
-    route_inner(state, name, body, context, Some(attempts)).await
+    route_inner(state, name, body, context, started, Some(attempts)).await
 }
 
 async fn route_inner(
@@ -132,6 +134,7 @@ async fn route_inner(
     name: &str,
     body: &Value,
     context: &super::affinity::RequestContext,
+    started: tokio::time::Instant,
     mut attempts: Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let (combo, snapshot) = combos::routing_snapshot(&state.db, name, context.category()).await?;
@@ -157,6 +160,7 @@ async fn route_inner(
         // cyclically from the selected start without advancing the cursor again.
         steps.rotate_left(start);
     }
+    let deadline = super::Budget::for_context(context).deadline(started, steps.len());
     let strategy_position = steps.first().map_or(0, |step| step.position + 1);
     let mut affinity = if binding.is_some() {
         "Miss or expired"
@@ -182,7 +186,11 @@ async fn route_inner(
         strategy_position,
         starting_position: steps.first().map_or(0, |step| step.position + 1),
     };
-    for step in steps {
+    let remaining = steps.len();
+    for (index, step) in steps.into_iter().enumerate() {
+        if super::deadline_exhausted(deadline, remaining - index) {
+            break;
+        }
         let (provider, slug, group_name) =
             match crate::db::provider_slugs::connection_with_name(&state.db, &step.provider_id)
                 .await?
@@ -218,6 +226,7 @@ async fn route_inner(
             &step.model,
             body,
             context,
+            deadline,
             trace,
             &mut attempts,
         )

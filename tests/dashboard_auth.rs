@@ -750,6 +750,30 @@ async fn ten_failed_logins_trigger_a_429_with_retry_after() {
     );
 }
 
+#[tokio::test]
+async fn successful_login_resets_that_peers_failure_count() {
+    let state = auth_state(Some(PASSWORD), false, None).await;
+    let router = app::router(state.clone());
+    let peer: SocketAddr = "192.0.2.30:40003".parse().unwrap();
+    for _ in 0..9 {
+        let response = login_from_peer(&router, &state, "wrong-password", Some(peer), &[]).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let success = login_from_peer(&router, &state, PASSWORD, Some(peer), &[]).await;
+    assert_eq!(success.status(), StatusCode::SEE_OTHER);
+    // Without the reset, the next failure would be the tenth and the one after throttled.
+    for attempt in 1..=10 {
+        let response = login_from_peer(&router, &state, "wrong-password", Some(peer), &[]).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {attempt} after a success must start a fresh window"
+        );
+    }
+    let throttled = login_from_peer(&router, &state, "wrong-password", Some(peer), &[]).await;
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 // ---------------------------------------------------------------------------
 // Per-peer rate limiting
 // ---------------------------------------------------------------------------

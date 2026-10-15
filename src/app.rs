@@ -138,8 +138,10 @@ pub(crate) async fn authorize(
     let supplied = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or("");
+        // The auth scheme is case-insensitive (RFC 9110); the token is exact.
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map_or("", |(_, token)| token);
     let env_match = state.api_key.as_ref().is_some_and(|expected| {
         bool::from(
             supplied

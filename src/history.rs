@@ -2,7 +2,8 @@
 //! Basic is metadata-only; opt-in Extended bodies use `history_payload`.
 //!
 //! The insert is spawned so it does not delay the response. Streaming
-//! finalization waits for that insert, then writes the terminal outcome, so a
+//! finalization is spawned too, so the end of the body never waits on SQLite;
+//! that task waits for the insert before writing the terminal outcome, so a
 //! fast client cannot leave a completed stream recorded as still streaming.
 use std::{
     sync::Arc,
@@ -232,7 +233,6 @@ pub(crate) async fn record_response(
         gate,
         done: false,
         finalized: false,
-        final_outcome: None,
     };
     let (parts, body) = response.into_parts();
     // Construct the guard outside the generator: even an entirely unpolled
@@ -259,13 +259,13 @@ pub(crate) async fn record_response(
                         if invalid { decoder = None; }
                     }
                 }
-                Err(_) => { guard.finish("interrupted").await; }
+                Err(_) => guard.finish("interrupted"),
             }
             let failed = chunk.is_err();
             yield chunk;
             if failed { return; }
         }
-        guard.finish(if guard.done || is_binary { "success" } else { "interrupted" }).await;
+        guard.finish(if guard.done || is_binary { "success" } else { "interrupted" });
     };
     Response::from_parts(parts, Body::from_stream(stream))
 }
@@ -278,43 +278,30 @@ struct StreamRecord {
     gate: InsertGate,
     done: bool,
     finalized: bool,
-    final_outcome: Option<&'static str>,
 }
 
 impl StreamRecord {
-    async fn finish(&mut self, outcome: &'static str) {
-        if self.finalized {
+    /// Record the terminal outcome once, in the background. A failed insert
+    /// has nothing to update; the task waits for a pending one first.
+    fn finish(&mut self, outcome: &'static str) {
+        if std::mem::replace(&mut self.finalized, true) {
             return;
         }
-        self.final_outcome = Some(outcome);
-        if !self.wait_for_insert().await {
-            return;
+        let pool = self.pool.clone();
+        let id = self.id.clone();
+        let latency = millis(self.started);
+        let usage = self.usage;
+        let gate = self.gate.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let inserted = tokio::time::timeout(Duration::from_secs(2), gate.wait())
+                    .await
+                    .unwrap_or_default();
+                if inserted && !write_terminal(&pool, &id, outcome, latency, usage).await {
+                    tracing::warn!("request history finalization unavailable");
+                }
+            });
         }
-        if write_terminal(
-            &self.pool,
-            &self.id,
-            outcome,
-            millis(self.started),
-            self.usage,
-        )
-        .await
-        {
-            self.finalized = true;
-        } else {
-            tracing::warn!("request history finalization unavailable");
-        }
-    }
-
-    /// Wait until the spawned insert finishes. A failed insert has nothing to
-    /// update. A timed-out wait leaves `finalized` false so Drop can retry.
-    async fn wait_for_insert(&mut self) -> bool {
-        let inserted = tokio::time::timeout(Duration::from_secs(2), self.gate.wait())
-            .await
-            .unwrap_or_default();
-        if !inserted && self.gate.outcome() == Some(false) {
-            self.finalized = true;
-        }
-        inserted
     }
 }
 
@@ -364,10 +351,6 @@ impl InsertGate {
         let _ = self.tx.send(Some(ok));
     }
 
-    fn outcome(&self) -> Option<bool> {
-        *self.rx.borrow()
-    }
-
     pub(crate) async fn wait(&self) -> bool {
         let mut rx = self.rx.clone();
         loop {
@@ -383,27 +366,7 @@ impl InsertGate {
 
 impl Drop for StreamRecord {
     fn drop(&mut self) {
-        if self.finalized {
-            return;
-        }
-        let pool = self.pool.clone();
-        let id = self.id.clone();
-        let outcome = self
-            .final_outcome
-            .unwrap_or(if self.done { "success" } else { "cancelled" });
-        let latency = millis(self.started);
-        let usage = self.usage;
-        let gate = self.gate.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let inserted = tokio::time::timeout(Duration::from_secs(2), gate.wait())
-                    .await
-                    .unwrap_or_default();
-                if !inserted || !write_terminal(&pool, &id, outcome, latency, usage).await {
-                    tracing::warn!("request history cancellation write unavailable");
-                }
-            });
-        }
+        self.finish(if self.done { "success" } else { "cancelled" });
     }
 }
 
@@ -475,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_finalization_retries_without_losing_terminal_outcome() {
+    async fn finalization_does_not_block_and_drop_keeps_the_terminal_outcome() {
         let pool = crate::db::connect("sqlite::memory:").await.unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         request_history::save(
@@ -495,32 +458,22 @@ mod tests {
         )
         .await
         .unwrap();
-        // Hold the only connection so finishing cannot complete before abort.
+        // Hold the only connection: finishing must still return immediately,
+        // and the later drop must not overwrite the outcome with cancellation.
         let connection = pool.acquire().await.unwrap();
-        let (ready, received) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
-            let pool = pool.clone();
-            let id = id.clone();
-            async move {
-                let gate = InsertGate::pending();
-                gate.complete(true);
-                let mut guard = StreamRecord {
-                    pool,
-                    id,
-                    started: Instant::now(),
-                    usage: Usage::default(),
-                    gate,
-                    done: false,
-                    finalized: false,
-                    final_outcome: None,
-                };
-                ready.send(()).unwrap();
-                guard.finish("interrupted").await;
-            }
-        });
-        received.await.unwrap();
-        task.abort();
-        let _ = task.await;
+        let gate = InsertGate::pending();
+        gate.complete(true);
+        let mut guard = StreamRecord {
+            pool: pool.clone(),
+            id: id.clone(),
+            started: Instant::now(),
+            usage: Usage::default(),
+            gate,
+            done: false,
+            finalized: false,
+        };
+        guard.finish("interrupted");
+        drop(guard);
         drop(connection);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -599,12 +552,9 @@ mod tests {
             gate: gate.clone(),
             done: false,
             finalized: false,
-            final_outcome: None,
         };
-        let finished = tokio::spawn(async move {
-            guard.finish("interrupted").await;
-            guard.finalized
-        });
+        guard.finish("interrupted");
+        assert!(guard.finalized);
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
@@ -627,13 +577,21 @@ mod tests {
         .await
         .unwrap();
         gate.complete(true);
-        assert!(finished.await.unwrap());
-        let outcome: String =
-            sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = ?")
-                .bind(&id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(outcome, "interrupted");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let outcome: String =
+                    sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = ?")
+                        .bind(&id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if outcome == "interrupted" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finalization should land once the insert completes");
     }
 }

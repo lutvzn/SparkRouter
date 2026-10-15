@@ -755,10 +755,19 @@ async fn media_is_metadata_only_even_in_extended_logging_and_binary_finishes_on_
     )
     .await;
     assert_eq!(body_bytes(response).await, "private-audio");
-    let outcome: String = sqlx::query_scalar("SELECT outcome FROM request_history LIMIT 1")
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
+    // Finalization runs in the background so the body end never waits on SQLite.
+    let mut outcome = String::new();
+    for _ in 0..2_000 {
+        outcome = sqlx::query_scalar("SELECT outcome FROM request_history LIMIT 1")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap()
+            .unwrap_or_default();
+        if outcome == "success" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert_eq!(outcome, "success");
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_payloads")
         .fetch_one(&state.db)
