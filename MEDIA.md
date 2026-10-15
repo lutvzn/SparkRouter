@@ -96,24 +96,24 @@ categories **Image**, **Video**, **Music**, **TTS**, and **STT**, respectively, 
 steps pointing to the appropriate models. Commands below make billable requests.
 
 ```sh
-curl http://127.0.0.1:8080/v1/images/generations \
+curl http://127.0.0.1:14673/v1/images/generations \
   -H "Authorization: Bearer $ROUTER_API_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"combo/images","prompt":"A watercolor mountain landscape"}'
 
-curl http://127.0.0.1:8080/v1/videos/generations \
+curl http://127.0.0.1:14673/v1/videos/generations \
   -H "Authorization: Bearer $ROUTER_API_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"combo/videos","prompt":"Clouds moving over mountains","duration":6}'
 
-curl http://127.0.0.1:8080/v1/music/generations \
+curl http://127.0.0.1:14673/v1/music/generations \
   -H "Authorization: Bearer $ROUTER_API_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"combo/music","prompt":"Gentle instrumental ambient music"}'
 
-curl http://127.0.0.1:8080/v1/audio/speech \
+curl http://127.0.0.1:14673/v1/audio/speech \
   -H "Authorization: Bearer $ROUTER_API_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"combo/speech","input":"Hello world","voice":"alloy"}' \
   --output speech.mp3
 
-curl http://127.0.0.1:8080/v1/audio/transcriptions \
+curl http://127.0.0.1:14673/v1/audio/transcriptions \
   -H "Authorization: Bearer $ROUTER_API_KEY" \
   -F model=combo/transcribe -F file=@speech.mp3
 ```

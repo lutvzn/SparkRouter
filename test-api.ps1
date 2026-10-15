@@ -15,7 +15,7 @@ No Authorization header is sent when it is empty, which only works while
 neither ROUTER_API_KEY nor dashboard-generated API keys are configured.
 
 .PARAMETER BaseUrl
-Gateway base URL including the /v1 prefix. Default: http://127.0.0.1:8080/v1
+Gateway base URL including the /v1 prefix. Default: http://127.0.0.1:14673/v1
 
 .PARAMETER Model
 Model ID to call: 'combo/<name>' or an upstream model ID listed by a
@@ -39,7 +39,7 @@ $env:ROUTER_API_KEY as the bearer key.
 
 .EXAMPLE
 $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
-.\test-api.ps1 -BaseUrl 'http://127.0.0.1:8080/v1' -Model 'combo/coding'
+.\test-api.ps1 -BaseUrl 'http://127.0.0.1:14673/v1' -Model 'combo/coding'
 
 Sets the key through the process environment and the address through
 -BaseUrl. .env files are never loaded automatically.
@@ -57,7 +57,7 @@ status line only; keys and raw upstream error bodies are never echoed.
 #>
 [CmdletBinding()]
 param(
-    [string]$BaseUrl = 'http://127.0.0.1:8080/v1',
+    [string]$BaseUrl = 'http://127.0.0.1:14673/v1',
     [string]$Model = 'combo/ZDR-Agent',
     [string]$ApiKey = 'sk-N0cqBfn2DU0acThxII7EDed4CIgMli7VpcUfXK8uLeg',
     [string]$Prompt = 'Reply with a short hello.',

@@ -135,7 +135,7 @@ case "$ACTION" in
   health)
     command -v curl >/dev/null || fail 'health requires curl'
     if [[ -z "$URL" ]]; then
-      bind=${ROUTER_BIND:-127.0.0.1:8080}
+      bind=${ROUTER_BIND:-127.0.0.1:14673}
       case "$bind" in 0.0.0.0:*) bind="127.0.0.1:${bind#0.0.0.0:}";; '[::]:'*) bind="[::1]:${bind#\[::\]:}";; esac
       URL="http://$bind"
     fi

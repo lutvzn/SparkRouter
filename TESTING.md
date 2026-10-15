@@ -349,15 +349,15 @@ existing installation's database.
    List virtual models and make normal and streaming calls:
 
    ```sh
-   curl http://127.0.0.1:8080/v1/models \
+   curl http://127.0.0.1:14673/v1/models \
      -H "Authorization: Bearer $ROUTER_API_KEY"
 
-   curl http://127.0.0.1:8080/v1/chat/completions \
+   curl http://127.0.0.1:14673/v1/chat/completions \
      -H "Authorization: Bearer $ROUTER_API_KEY" \
      -H 'Content-Type: application/json' \
      -d '{"model":"combo/coding","messages":[{"role":"user","content":"Hello"}]}'
 
-   curl -N http://127.0.0.1:8080/v1/chat/completions \
+   curl -N http://127.0.0.1:14673/v1/chat/completions \
      -H "Authorization: Bearer $ROUTER_API_KEY" \
      -H 'Content-Type: application/json' \
      -d '{"model":"combo/coding","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
@@ -474,7 +474,7 @@ For the new dashboard pages, also verify:
 - Run the release binary from a different working directory with an explicit
   database URL; dashboard assets and migrations should still be available without
   copying source folders.
-- If Docker is available, build/run the documented image, exercise the API, and
+- If Docker or Podman is available, build/run the documented image, exercise the API, and
   restart using the same volume and master key to confirm persistence. Check that
   a bind-mounted directory is writable by UID 10001.
 - Browser smoke checks are separate from Rust tests: automated handler tests do

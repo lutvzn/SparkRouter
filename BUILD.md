@@ -81,7 +81,7 @@ See [category policy](README.md#category-specific-combos) for conservative mappi
 | `ROUTER_MASTER_KEY` | Required | Base64 encoding of exactly 32 random bytes |
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite storage location |
 | `ROUTER_API_KEY` | Unset | Optional bearer key for `/v1/*`; empty is invalid. Generated dashboard keys also authorize `/v1/*` |
-| `ROUTER_BIND` | `127.0.0.1:8080` | IP address and port, not a hostname |
+| `ROUTER_BIND` | `127.0.0.1:14673` | IP address and port, not a hostname |
 | `ROUTER_DASHBOARD_PASSWORD` | Unset | Optional single-admin login; nonblank 16–1024 bytes, preferably randomly generated |
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` when serving through HTTPS; only `true`/`false` accepted |
 | `RUST_LOG` | `info` | `tracing-subscriber` logging filter |
@@ -112,7 +112,7 @@ $env:ROUTER_API_KEY = 'replace-with-a-long-random-gateway-key'
 .\target\release\sparkrouter.exe
 ```
 
-Open http://127.0.0.1:8080/providers. For development, `cargo run --locked` uses
+Open http://127.0.0.1:14673/providers. For development, `cargo run --locked` uses
 the same environment configuration. Stop with Ctrl+C; Unix deployments also
 handle SIGTERM for graceful shutdown.
 
@@ -283,8 +283,14 @@ See [ARCHITECURE.md](ARCHITECURE.md) for the trust model.
 
 ## Docker
 
-The Dockerfile builds with `rust:1.94-bookworm`, then copies the release binary
-into `debian:bookworm-slim` with CA certificates. It runs as UID **10001**.
+The Dockerfile builds a fully static musl binary with `docker.io/library/rust:1.94-alpine` (the
+build fails if the result is not statically linked), then copies it into
+`gcr.io/distroless/static-debian13`. The runtime image has no shell, package
+manager, or libc; Reqwest's TLS roots are embedded in the binary. It runs as
+numeric UID/GID **10001**, so volumes from earlier images stay writable.
+Because there is no shell, use `docker logs` and external probes rather than
+`docker exec` for troubleshooting. For reproducible deployments, pin the base
+images by digest in a derived Dockerfile.
 
 After exporting your persistent master key and optional gateway key:
 
@@ -292,18 +298,40 @@ After exporting your persistent master key and optional gateway key:
 docker build -t sparkrouter .
 docker volume create sparkrouter-data
 docker run --rm --name sparkrouter \
-  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:14673:14673 \
   -v sparkrouter-data:/data \
   -e ROUTER_MASTER_KEY -e ROUTER_API_KEY \
   sparkrouter
 ```
 
-Inside the container, defaults are `ROUTER_BIND=0.0.0.0:8080` and
+Inside the container, defaults are `ROUTER_BIND=0.0.0.0:14673` and
 `ROUTER_DATABASE_URL=sqlite:///data/router.db`. The example publishes only to
 host localhost. Named-volume data survives container removal. Bind-mounted
 directories must be writable by UID 10001. Docker supports `--env-file`, but
 replace example placeholders and omit `ROUTER_BIND` if you want the container's
 default network binding rather than `.env.example`'s loopback value.
+
+### Podman
+
+The same Dockerfile builds with Podman; base images are fully qualified, so no
+short-name registry configuration is needed. Replace `docker` with `podman` in
+the commands above. Named volumes need no extra steps. With rootless Podman,
+container UID 10001 maps to a host subordinate UID, so a host bind-mounted
+directory owned by your user is not writable by default. Either let Podman chown
+it with `:U`, or chown it inside your user namespace once:
+
+```sh
+podman run --rm -p 127.0.0.1:14673:14673 \
+  -v ./sparkrouter-data:/data:U,Z \
+  -e ROUTER_MASTER_KEY -e ROUTER_API_KEY \
+  sparkrouter
+# or: podman unshare chown 10001:10001 ./sparkrouter-data
+```
+
+`Z` relabels the directory for SELinux hosts and is ignored elsewhere; do not use
+it on shared system directories. The binary runs as PID 1 and handles SIGTERM,
+so `podman stop` drains gracefully within its default 10-second timeout
+(`podman stop -t 30` allows longer streams to finish).
 
 ## Troubleshooting
 
@@ -330,8 +358,8 @@ Readiness does not prove write access or upstream/model availability.
 From the host or an external probe agent:
 
 ```sh
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
+curl --fail http://127.0.0.1:14673/healthz
+curl --fail http://127.0.0.1:14673/readyz
 ```
 
 Configure your reverse proxy/orchestrator to use `/readyz`. The minimal Docker

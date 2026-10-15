@@ -37,7 +37,7 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 **Save the generated master key securely and reuse it on every restart.** Changing it does not rotate stored credentials; existing credentials become unreadable. Back up the key separately from the database. The executable reads process environment variables; `.env.example` is a reference, not an automatically loaded configuration file.
 
-Open **http://127.0.0.1:8080/** for the Overview dashboard:
+Open **http://127.0.0.1:14673/** for the Overview dashboard:
 
 The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in five cards (requests, input/output/cache tokens, and USD spend) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**. Navigation wraps above the page on smaller screens.
 The top-right theme button switches between **Light** and **Dark**. Initially it
@@ -288,17 +288,17 @@ media, and file selections stay page-local. Reset/mode/combo changes discard
 results and release preview URLs; leaving the page also clears keys and inputs.
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:14673/v1/chat/completions \
   -H "Authorization: Bearer $ROUTER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"combo/coding","messages":[{"role":"user","content":"Hello"}]}'
 
 # Streaming: add "stream":true to the JSON and use curl -N.
-curl http://127.0.0.1:8080/v1/models \
+curl http://127.0.0.1:14673/v1/models \
   -H "Authorization: Bearer $ROUTER_API_KEY"
 ```
 
-Set an OpenAI-compatible client's base URL to `http://127.0.0.1:8080/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. The environment key is unrestricted; generated keys can be unrestricted or scoped to selected model IDs. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
+Set an OpenAI-compatible client's base URL to `http://127.0.0.1:14673/v1` and model to `combo/coding`. Generate a key under **API keys**, or set `ROUTER_API_KEY`. The environment key is unrestricted; generated keys can be unrestricted or scoped to selected model IDs. If neither is configured, omit Authorization (clients requiring a key may send any placeholder).
 
 ### Per-key traffic limits
 
@@ -357,7 +357,7 @@ when `ROUTER_API_KEY` is also unset.
 A refreshed model can also be called directly using **`<provider-slug>/<upstream-model-id>`**, with no combo:
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:14673/v1/chat/completions \
   -H "Authorization: Bearer $ROUTER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"openrouter/openai/gpt-6-luna","messages":[{"role":"user","content":"Hello"}]}'
@@ -406,7 +406,7 @@ process environment variables.
 | `ROUTER_MASTER_KEY` | **required** | Base64-encoded 32 random bytes; AES-256-GCM master key |
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite URL; database and schema created on startup |
 | `ROUTER_API_KEY` | unset | Optional bearer key protecting `/v1/*`; an explicitly empty value is rejected. Dashboard-generated keys also authorize `/v1/*` and, once any exist, require authentication even when this variable is unset |
-| `ROUTER_BIND` | `127.0.0.1:8080` | IP address and port |
+| `ROUTER_BIND` | `127.0.0.1:14673` | IP address and port |
 | `ROUTER_DASHBOARD_PASSWORD` | unset | Optional separate admin login; 16–1024 bytes, not blank. Use a long random password |
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` for HTTPS deployment; marks dashboard session cookies Secure. Must be `true` or `false` |
 | `RUST_LOG` | `info` | `tracing` filter |
@@ -451,7 +451,7 @@ providers can select that protocol too. Add a connection, refresh models for
 direct routing, or create a combo with upstream model IDs such as `jev-latest`.
 
 ```sh
-curl http://127.0.0.1:8080/v1/systemone \
+curl http://127.0.0.1:14673/v1/systemone \
   -H "Authorization: Bearer $ROUTER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"typesafe/jev-latest","state":"Help! My payouts are failing.","questions":{"urgent":{"type":"noul","instructions":"Does this convey urgency?"}}}'
@@ -648,22 +648,142 @@ The dashboard uses `Referrer-Policy: same-origin`: native form submissions retai
   availability, write permissions, or model health.
 
 Use `/healthz` for liveness and `/readyz` for reverse-proxy/orchestrator readiness.
-From the host: `curl --fail http://127.0.0.1:8080/readyz`. The minimal Docker image
+From the host: `curl --fail http://127.0.0.1:14673/readyz`. The minimal Docker image
 does not contain curl; configure probes externally or supply your own probe tool.
 
-### Docker
+### Container deployment (Docker and Podman)
 
-```sh
-docker build -t sparkrouter .
-docker volume create sparkrouter-data
-docker run --rm --name sparkrouter \
-  -p 127.0.0.1:8080:8080 \
-  -v sparkrouter-data:/data \
-  -e ROUTER_MASTER_KEY -e ROUTER_API_KEY \
-  sparkrouter
+A prebuilt image is published to the GitHub Container Registry by GitHub Actions ([`.github/workflows/container.yml`](.github/workflows/container.yml)):
+
+```
+ghcr.io/lutvzn/sparkrouter:latest          # latest master build
+ghcr.io/lutvzn/sparkrouter:sha-<commit>    # a specific master commit
+ghcr.io/lutvzn/sparkrouter:0.1.0           # release, from git tag v0.1.0
+ghcr.io/lutvzn/sparkrouter:0.1             # newest 0.1.x release
 ```
 
-The multi-stage image contains the release binary and a minimal Debian runtime with CA certificates, runs as an unprivileged user, and requires no Node.js. The container binds `0.0.0.0` internally; the example publishes only to host localhost. Bind-mounted directories must be writable by UID 10001.
+Pull requests build the image without publishing it. To publish a release, push a `vX.Y.Z` tag matching the `Cargo.toml` version.
+
+It is a `linux/amd64` image of about 15 MB: a statically linked binary on `distroless/static`, with no shell or package manager, running as UID/GID 10001. Inside the container the server binds `0.0.0.0:14673` and stores its database at `/data/router.db`; mount a volume at `/data` to keep it. Pin a version tag (or digest) for production so upgrades are deliberate.
+
+#### 1. Prepare configuration
+
+Generate the master key **once** and store it safely. Losing it makes stored provider keys unrecoverable, and a different key cannot decrypt an existing database.
+
+```sh
+mkdir -p ~/.config/sparkrouter
+umask 077
+cat > ~/.config/sparkrouter/sparkrouter.env <<EOF
+ROUTER_MASTER_KEY=$(openssl rand -base64 32)
+ROUTER_API_KEY=replace-with-a-long-random-gateway-key
+EOF
+```
+
+Optionally add `ROUTER_DASHBOARD_PASSWORD` (and `ROUTER_DASHBOARD_SECURE_COOKIE=true` behind HTTPS). Do **not** copy `ROUTER_BIND` or `ROUTER_DATABASE_URL` from `.env.example`: its loopback bind would make the container unreachable from the host. Env files are plain `KEY=value` lines without quotes.
+
+#### 2a. Docker
+
+```sh
+docker pull ghcr.io/lutvzn/sparkrouter:0.1.0
+docker volume create sparkrouter-data
+docker run -d --name sparkrouter --restart unless-stopped \
+  -p 127.0.0.1:14673:14673 \
+  -v sparkrouter-data:/data \
+  --env-file ~/.config/sparkrouter/sparkrouter.env \
+  --stop-timeout 30 \
+  ghcr.io/lutvzn/sparkrouter:0.1.0
+```
+
+Or with Docker Compose (`compose.yaml`):
+
+```yaml
+services:
+  sparkrouter:
+    image: ghcr.io/lutvzn/sparkrouter:0.1.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:14673:14673"
+    volumes:
+      - sparkrouter-data:/data
+    env_file: ./sparkrouter.env
+    stop_grace_period: 30s
+volumes:
+  sparkrouter-data:
+```
+
+Place `sparkrouter.env` (from step 1) next to `compose.yaml`, then run `docker compose up -d`.
+
+#### 2b. Podman
+
+Rootless Podman works without changes:
+
+```sh
+podman pull ghcr.io/lutvzn/sparkrouter:0.1.0
+podman volume create sparkrouter-data
+podman run -d --name sparkrouter \
+  -p 127.0.0.1:14673:14673 \
+  -v sparkrouter-data:/data \
+  --env-file ~/.config/sparkrouter/sparkrouter.env \
+  --stop-timeout 30 \
+  ghcr.io/lutvzn/sparkrouter:0.1.0
+```
+
+To run it as a service that starts at boot, use a Quadlet unit at `~/.config/containers/systemd/sparkrouter.container`:
+
+```ini
+[Unit]
+Description=SparkRouter LLM gateway
+
+[Container]
+Image=ghcr.io/lutvzn/sparkrouter:0.1.0
+ContainerName=sparkrouter
+PublishPort=127.0.0.1:14673:14673
+Volume=sparkrouter-data:/data
+EnvironmentFile=%h/.config/sparkrouter/sparkrouter.env
+StopTimeout=30
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user start sparkrouter
+loginctl enable-linger "$USER"   # keep user services running after logout/boot
+```
+
+**Bind mounts instead of named volumes:** the directory must be writable by container UID 10001. With Docker, `sudo chown 10001:10001 ./data`. With rootless Podman, append `:U` (`-v ./data:/data:U,Z`) or run `podman unshare chown 10001:10001 ./data`. `Z` relabels for SELinux hosts.
+
+#### 3. Verify, operate, and upgrade
+
+```sh
+curl --fail http://127.0.0.1:14673/readyz   # {"status":"ready"}
+docker logs -f sparkrouter                  # or: podman logs -f sparkrouter
+```
+
+Open http://127.0.0.1:14673/ for the dashboard. The image has no shell, so `exec` is not available; use logs and the health endpoints. For remote access, put an HTTPS reverse proxy in front and set a dashboard password, see [Security and deployment](#security-and-deployment).
+
+To upgrade, pull the new tag, then remove and recreate the container with the **same volume and env file** (for Quadlet: edit `Image=`, then `systemctl --user daemon-reload && systemctl --user restart sparkrouter`). Migrations run automatically at startup. Back up the volume first; stop the container for a consistent file copy:
+
+```sh
+docker stop sparkrouter
+docker run --rm -v sparkrouter-data:/data:ro -v "$PWD":/backup docker.io/library/alpine:3 \
+  tar czf /backup/sparkrouter-data.tgz -C /data .
+docker start sparkrouter
+```
+
+(Substitute `podman` for `docker` as needed.)
+
+#### Building the image yourself
+
+```sh
+docker build -t sparkrouter .     # or: podman build -t sparkrouter .
+```
+
+The build uses fully qualified base images, so Podman needs no short-name configuration. See [BUILD.md](BUILD.md#docker) for build details.
 
 ## Architecture
 

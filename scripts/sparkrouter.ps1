@@ -185,7 +185,7 @@ try {
         }
         'health' {
             if (-not $Url) {
-                $BindAddress = if ($env:ROUTER_BIND) { $env:ROUTER_BIND } else { '127.0.0.1:8080' }
+                $BindAddress = if ($env:ROUTER_BIND) { $env:ROUTER_BIND } else { '127.0.0.1:14673' }
                 $BindAddress = $BindAddress -replace '^0\.0\.0\.0:', '127.0.0.1:' -replace '^\[::\]:', '[::1]:'
                 $Url = "http://$BindAddress"
             }

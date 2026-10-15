@@ -34,7 +34,7 @@ impl Config {
             }
         };
         let bind = env::var("ROUTER_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:8080".into())
+            .unwrap_or_else(|_| "127.0.0.1:14673".into())
             .parse()
             .map_err(|_| {
                 AppError::Configuration("ROUTER_BIND must be an IP address and port".into())
