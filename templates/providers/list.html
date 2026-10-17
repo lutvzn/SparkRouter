@@ -17,7 +17,7 @@
       <input id="provider-search" type="search" placeholder="Filter by name" autocomplete="off" enterkeyhint="search" aria-controls="provider-grid provider-favorites-grid">
     </span>
   </label>
-  <fieldset class="provider-tag-filters" aria-controls="provider-grid provider-favorites-grid">
+  <fieldset class="provider-tag-filters chip-filters" aria-controls="provider-grid provider-favorites-grid">
     <legend>Tags (match any)</legend>
     {% for tag in self.tag_options() %}
     <label><input type="checkbox" value="{{ tag.value }}" data-provider-tag-filter> {{ tag.label }}</label>

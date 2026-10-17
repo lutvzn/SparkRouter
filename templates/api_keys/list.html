@@ -9,8 +9,63 @@
 </div>
 {% endblock %}
 {% block content %}
-<h2>Generate a key</h2>
-<form method="post" action="/api-keys" class="card">
+<div class="page-head page-actions">
+  <button type="button" class="btn primary" popovertarget="generate-key"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>
+</div>
+{% if keys.is_empty() %}
+<p class="empty">No API keys yet. Use Generate key to create one. Until one is generated, <code>/v1</code> stays open unless <code>ROUTER_API_KEY</code> is set.</p>
+{% else %}
+<div class="combo-list">
+  {% for key in keys %}
+  <article class="card combo-list-row">
+    <div class="combo-list-info">
+      <div class="combo-list-title">
+        <span class="provider-tile-title">{{ key.name }}</span>
+      </div>
+      <span class="hint"><code>{{ key.prefix }}&hellip;</code> &middot; Created <time datetime="{{ key.created_at }}" title="{{ key.created_at }}" data-local-time>{{ key.created_at }}</time></span>
+      <p class="hint">{% if key.restricted %}Selected models{% else %}All combos and models{% endif %} &middot; Expires: {{ key.expiry }} {% if key.expired %}<span class="badge fail">Expired</span>{% endif %}</p>
+      <p class="hint">Requests/min: {% if key.rpm.is_empty() %}Unlimited{% else %}{{ key.rpm }}{% endif %} &middot; Concurrent limit: {% if key.concurrency.is_empty() %}Unlimited{% else %}{{ key.concurrency }}{% endif %} &middot; Active: {{ key.active }} &middot; Rejections in current 60-second window: {{ key.rejected }}</p>
+      <details class="key-policy"><summary>Edit access / expiry / limits</summary>
+        <form method="post" action="/api-keys/{{ key.id }}/policy">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <label for="access-{{ key.id }}">Access</label>
+          <select id="access-{{ key.id }}" name="access"><option value="all"{% if !key.restricted %} selected{% endif %}>All combos and models</option><option value="selected"{% if key.restricted %} selected{% endif %}>Only selected model IDs</option></select>
+          <label for="models-{{ key.id }}">Allowed model IDs (one per line)</label>
+          <textarea id="models-{{ key.id }}" name="models" rows="4">{{ key.models }}</textarea>
+          <p class="hint">Empty selected access denies all models. Clear this list before switching to all access.</p>
+          <label for="expiry-{{ key.id }}">Expiry</label>
+          <select id="expiry-{{ key.id }}" name="expiry"><option value="keep">Keep current expiry</option><option value="never">Never (remove expiry)</option><option value="days">Set days from now</option></select>
+          <label for="days-{{ key.id }}">Days from now (when resetting expiry)</label>
+          <input id="days-{{ key.id }}" name="expires_days" type="number" min="1" max="3650">
+          <label for="rpm-{{ key.id }}">Requests per minute (blank: unlimited)</label>
+          <input id="rpm-{{ key.id }}" name="requests_per_minute" type="number" min="1" max="1000000" value="{{ key.rpm }}">
+          <label for="concurrency-{{ key.id }}">Maximum concurrent requests (blank: unlimited)</label>
+          <input id="concurrency-{{ key.id }}" name="max_concurrent" type="number" min="1" max="10000" value="{{ key.concurrency }}">
+          <button class="btn small" type="submit">Save policy</button>
+        </form>
+      </details>
+    </div>
+    <div class="combo-list-actions">
+      <form class="inline" data-confirm="Regenerate the key “{{ key.name }}”? Its current secret stops working immediately; access, limits, and expiry stay the same." method="post" action="/api-keys/{{ key.id }}/regenerate">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#key"></use></svg>Regenerate</button>
+      </form>
+      <form class="inline" data-confirm="Revoke the key “{{ key.name }}”? Apps using it lose access immediately." method="post" action="/api-keys/{{ key.id }}/delete">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Revoke</button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+<p class="hint">The environment key <code>ROUTER_API_KEY</code> remains unrestricted. Expired keys still keep gateway authentication enabled until revoked. Policy changes affect new requests; an already-started response is not interrupted.</p>
+<div id="generate-key" class="connection-popup key-popup" popover role="dialog" aria-labelledby="generate-key-title">
+  <header class="connection-popup-head">
+    <h2 id="generate-key-title">Generate a key</h2>
+    <button type="button" class="btn" popovertarget="generate-key" popovertargetaction="hide" aria-label="Close generate key"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#x"></use></svg>Close</button>
+  </header>
+<form method="post" action="/api-keys" class="card connection-popup-form">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <div class="grid2">
     <div>
@@ -43,52 +98,9 @@
   </div>
   <p class="hint">Blank means unlimited. Chat and test chat share limits; model listing is exempt. Fixed 60-second windows and active counts reset on restart. Streams count until finished or dropped.</p>
   <div class="form-actions">
+    <button class="btn" type="button" popovertarget="generate-key" popovertargetaction="hide"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#x"></use></svg>Cancel</button>
     <button class="btn primary" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>
   </div>
 </form>
-<h2>Your keys</h2>
-{% if keys.is_empty() %}
-<p class="empty">No API keys yet. Until one is generated, <code>/v1</code> stays open unless <code>ROUTER_API_KEY</code> is set.</p>
-{% else %}
-<div class="combo-list">
-  {% for key in keys %}
-  <article class="card combo-list-row">
-    <div class="combo-list-info">
-      <div class="combo-list-title">
-        <span class="provider-tile-title">{{ key.name }}</span>
-      </div>
-      <span class="hint"><code>{{ key.prefix }}&hellip;</code> &middot; {{ key.created_at }}</span>
-      <p class="hint">{% if key.restricted %}Selected models{% else %}All combos and models{% endif %} &middot; Expires: {{ key.expiry }} {% if key.expired %}<span class="badge fail">Expired</span>{% endif %}</p>
-      <p class="hint">Requests/min: {% if key.rpm.is_empty() %}Unlimited{% else %}{{ key.rpm }}{% endif %} &middot; Concurrent limit: {% if key.concurrency.is_empty() %}Unlimited{% else %}{{ key.concurrency }}{% endif %} &middot; Active: {{ key.active }} &middot; Rejections in current 60-second window: {{ key.rejected }}</p>
-      <details class="key-policy"><summary>Edit access / expiry / limits</summary>
-        <form method="post" action="/api-keys/{{ key.id }}/policy">
-          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-          <label for="access-{{ key.id }}">Access</label>
-          <select id="access-{{ key.id }}" name="access"><option value="all"{% if !key.restricted %} selected{% endif %}>All combos and models</option><option value="selected"{% if key.restricted %} selected{% endif %}>Only selected model IDs</option></select>
-          <label for="models-{{ key.id }}">Allowed model IDs (one per line)</label>
-          <textarea id="models-{{ key.id }}" name="models" rows="4">{{ key.models }}</textarea>
-          <p class="hint">Empty selected access denies all models. Clear this list before switching to all access.</p>
-          <label for="expiry-{{ key.id }}">Expiry</label>
-          <select id="expiry-{{ key.id }}" name="expiry"><option value="keep">Keep current expiry</option><option value="never">Never (remove expiry)</option><option value="days">Set days from now</option></select>
-          <label for="days-{{ key.id }}">Days from now (when resetting expiry)</label>
-          <input id="days-{{ key.id }}" name="expires_days" type="number" min="1" max="3650">
-          <label for="rpm-{{ key.id }}">Requests per minute (blank: unlimited)</label>
-          <input id="rpm-{{ key.id }}" name="requests_per_minute" type="number" min="1" max="1000000" value="{{ key.rpm }}">
-          <label for="concurrency-{{ key.id }}">Maximum concurrent requests (blank: unlimited)</label>
-          <input id="concurrency-{{ key.id }}" name="max_concurrent" type="number" min="1" max="10000" value="{{ key.concurrency }}">
-          <button class="btn small" type="submit">Save policy</button>
-        </form>
-      </details>
-    </div>
-    <div class="combo-list-actions">
-      <form class="inline" method="post" action="/api-keys/{{ key.id }}/delete">
-        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Revoke</button>
-      </form>
-    </div>
-  </article>
-  {% endfor %}
 </div>
-{% endif %}
-<p class="hint">The environment key <code>ROUTER_API_KEY</code> remains unrestricted. Expired keys still keep gateway authentication enabled until revoked. Policy changes affect new requests; an already-started response is not interrupted.</p>
 {% endblock %}

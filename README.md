@@ -39,7 +39,7 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 Open **http://127.0.0.1:14673/** for the Overview dashboard:
 
-The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in five cards (requests, input/output/cache tokens, and USD spend) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**. Navigation wraps above the page on smaller screens.
+The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in five cards (requests, input/output/cache tokens, and USD spend) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**; **Log out** sits at its foot. On smaller screens navigation becomes one horizontally scrollable row above the page. With JavaScript enabled, deleting a provider, connection, or combo, revoking a key, and clearing history ask for browser confirmation first, and history/key creation times are shown in the browser's local time (hover for the stored UTC value).
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
 Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
@@ -345,6 +345,12 @@ Optionally set expiry to **1–3650 days from now**. Expiration is stored as an
 absolute timestamp and displayed in UTC. **Edit access / expiry** changes a key's
 policy without rotating or revealing its secret; expiry is preserved unless you
 explicitly remove or reset it. Existing keys remain unrestricted and non-expiring.
+
+**Regenerate** replaces a key's secret and shows the new one once. The key keeps
+its name, allowed models, expiry, limits, and routing affinity namespace; the
+previous secret gets `401` from the moment the new one is issued. Requests that
+already started with the old secret are not interrupted. Regenerating does not
+extend an expired key; edit its expiry separately.
 
 `/v1/models` lists only models allowed by the supplied key. A valid key calling a
 disallowed model gets `403`; an expired, revoked, or invalid key gets `401` while

@@ -1,15 +1,16 @@
 {% extends "base.html" %}
-{% block title %}API key created{% endblock %}
+{% block title %}API key {% if regenerated %}regenerated{% else %}created{% endif %}{% endblock %}
 {% block nav_api_keys %} aria-current="page"{% endblock %}
 {% block main_class %}combo-page{% endblock %}
 {% block topbar_heading %}
 <div class="topbar-heading">
-  <h1>API key created</h1>
+  <h1>API key {% if regenerated %}regenerated{% else %}created{% endif %}</h1>
   <p class="topbar-subtitle">Copy this key now. SparkRouter will not show it again.</p>
 </div>
 {% endblock %}
 {% block content %}
 <div class="card">
+  {% if regenerated %}<p class="callout ok">The previous secret for <strong>{{ name }}</strong> no longer works. Update every app that used it.</p>{% endif %}
   <p>Send <strong>{{ name }}</strong> as <code>Authorization: Bearer</code>. Its access and expiry are shown on the API keys page.</p>
   {% if revealed %}
   <code class="key-secret">{{ secret }}</code>

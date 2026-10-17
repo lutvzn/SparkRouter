@@ -85,6 +85,7 @@ pub fn router() -> Router<AppState> {
         .route("/api-keys", get(api_keys::list).post(api_keys::create))
         .route("/api-keys/{id}", get(api_keys::created))
         .route("/api-keys/{id}/delete", post(api_keys::delete))
+        .route("/api-keys/{id}/regenerate", post(api_keys::regenerate))
         .route("/api-keys/{id}/policy", post(api_keys::update_policy))
         .route("/combos", get(combos::list).post(combos::create))
         .route("/test", get(test::page))

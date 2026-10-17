@@ -127,7 +127,7 @@ cargo test --locked -- --list
 | `tests/settings.rs`, `scripts/tests/theme.cjs` | Settings navigation/sections, sanitized status, login/CSRF/origin, retention bounds and persistence, immediate/cascading pruning, confirmed clear, browser-local theme/system selection |
 | `tests/config_transfer.rs` | Credential-free transfer, preview, validation, atomic rollback, fresh disabled connections |
 | `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
-| `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, test-chat enforcement, restart persistence |
+| `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, secret regeneration, test-chat enforcement, restart persistence |
 | `tests/combo_affinity.rs`, `src/routing/affinity.rs` tests | Per-combo Off/Basic/Smart/Sticky, header/body session IDs, exact prompt continuity/separation, caller isolation, clock-controlled expiry/capacity, fallback/rebinding, disabled/edited targets, successful/interrupted/dropped streams, dropdown validation/CSRF, duplication and backward-compatible transfer |
 | `tests/combo_categories.rs`, `scripts/tests/test-chat.cjs` | All seven categories, forms/list/Test filtering and empty states, wrong-mode rejection before quotas/rotation, protocol/modality checks, positive-evidence picker filtering, exact provider-scoped catalog IDs (including custom collisions and excluded Sora/name prefixes), endpoint aliases/unsupported endpoints, changed metadata, import rollback, vision input vs image output, declarations, transactional edits, concurrent conflicts, duplication and credential-free transfer |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
@@ -226,6 +226,39 @@ cargo test --locked --test gateway -- --nocapture
 Use `-- --test-threads=1` only to investigate suspected interactions; tests should
 remain independent and pass under the default parallel runner. Rust test-name
 arguments are substring filters, not file paths.
+
+## Load and capacity testing
+
+`examples/stress.rs` measures how many simultaneous users one gateway serves,
+using real processes and real HTTP; nothing runs in-process. It starts a mock
+OpenAI-compatible upstream (separate process) and the release binary with a
+disposable database under `target/stress/<time>/`, configures two custom
+providers, `combo/stress` (primary → backup), and a generated API key through
+the dashboard forms, then ramps closed-loop virtual users:
+
+```sh
+cargo build --release --locked
+cargo run --release --locked --example stress -- --levels 10,50,100,200,400
+cargo run --release --locked --example stress -- --help
+```
+
+Traffic mixes streaming and JSON chat completions with multi-turn messages of
+varied size, combo and direct `<slug>/<model>` IDs, and `/v1/models`. Each level
+reports throughput, success rate with an error breakdown, p50/p90/p95/p99/p99.9/max
+latency, streaming time to first byte, received MiB/s, and the gateway's RSS,
+CPU cores, threads, and open files from `/proc` (Linux), plus per-request-type
+latency in `report.json`. The ramp stops at the first level that misses the
+target (`--slo-p99-ms`, default 2000; `--slo-success`, default 99.5%) and reports
+the last passing level as the capacity. `--upstream-error-rate` makes the primary
+return 503s to exercise combo fallback; `--logging off|basic|extended` compares
+history modes. Gateway logs, the database, and the report stay in the run
+directory for inspection.
+
+The load generator, mock, and gateway share one machine; the summary prints the
+load generator's CPU so a saturated test host is not mistaken for a gateway
+limit. Results depend on hardware, disk fsync latency, and the simulated
+upstream timings. `--url/--api-key/--model [--pid]` targets an existing gateway
+instead; that sends real traffic to whatever upstreams it is configured with.
 
 ## Media acceptance checks
 

@@ -13,8 +13,8 @@
   <tbody>
     {% for s in steps %}
     <tr>
-      <td>{{ loop.index }}</td>
-      <td>{{ s.provider_name }}{% if s.provider_disabled %} (disabled){% endif %}</td>
+      <td><span class="step-index">{{ loop.index }}</span></td>
+      <td>{{ s.provider_name }}{% if s.provider_disabled %} <span class="badge off">disabled</span>{% endif %}</td>
       <td><code>{{ s.model }}</code></td>
       <td class="actions">
         <form class="inline" method="post" action="/combos/{{ combo_id }}/steps/{{ s.id }}/up" hx-post="/combos/{{ combo_id }}/steps/{{ s.id }}/up" hx-target="#combo-steps" hx-swap="innerHTML">

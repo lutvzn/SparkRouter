@@ -18,6 +18,25 @@ document.body.addEventListener("htmx:sendError", () => {
   showActionError("Unable to reach the gateway. Check the connection and try again.");
 });
 
+// Destructive forms carry data-confirm. Without JavaScript they still submit
+// directly, so the server-side checks remain the only real safeguard.
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest("form[data-confirm]");
+  if (form && !window.confirm(form.dataset.confirm)) event.preventDefault();
+});
+
+// History timestamps are rendered as UTC ISO strings; show them in the
+// viewer's locale while the title keeps the exact stored value.
+function localizeTimes() {
+  const format = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
+  document.querySelectorAll("time[data-local-time]").forEach((time) => {
+    const date = new Date(time.getAttribute("datetime"));
+    if (!Number.isNaN(date.getTime())) time.textContent = format.format(date);
+  });
+}
+
+localizeTimes();
+
 // CSS provides hover/focus help even without JavaScript. Explicitly focus on
 // tap (including browsers that do not focus clicked buttons) and allow Escape
 // to dismiss a tooltip without moving keyboard focus or the mouse pointer.

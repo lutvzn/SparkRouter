@@ -303,6 +303,36 @@ async fn write_models(
     Ok(())
 }
 
+/// Replace a key's secret while keeping its ID, name, scopes, expiry and
+/// limits. The old secret stops authenticating when this commits; the new one
+/// gets a fresh one-time reveal envelope.
+pub async fn regenerate(
+    pool: &SqlitePool,
+    crypto: &Crypto,
+    id: &str,
+) -> Result<IssuedKey, AppError> {
+    let secret = generate_secret();
+    let prefix: String = secret.expose_secret().chars().take(PREFIX_CHARS).collect();
+    let key_hash = crypto.gateway_key_fingerprint(secret.expose_secret())?;
+    let reveal_envelope = crypto.encrypt_api_key(id, &secret)?;
+    let result = sqlx::query(
+        "UPDATE api_keys SET key_prefix = ?, key_hash = ?, reveal_envelope = ? WHERE id = ?",
+    )
+    .bind(prefix)
+    .bind(key_hash)
+    .bind(reveal_envelope)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("API key '{id}' was not found")));
+    }
+    Ok(IssuedKey {
+        id: id.to_owned(),
+        secret,
+    })
+}
+
 /// Returns the secret exactly once, clearing the encrypted copy in the same
 /// transaction. `Ok(None)` means the key exists but was already revealed.
 pub async fn take_reveal(
@@ -633,6 +663,79 @@ mod tests {
                 .is_none()
         );
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn regenerate_replaces_the_secret_and_keeps_the_policy() {
+        let pool = pool().await;
+        let crypto = crypto();
+        let issued = create_with_limits(
+            &pool,
+            &crypto,
+            "client",
+            KeyAccess::Selected(vec!["combo/a".into()]),
+            Expiry::AfterDays(30),
+            KeyLimits {
+                requests_per_minute: Some(5),
+                max_concurrent: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        take_reveal(&pool, &crypto, &issued.id).await.unwrap();
+        let before = list(&pool).await.unwrap().remove(0);
+
+        let regenerated = regenerate(&pool, &crypto, &issued.id).await.unwrap();
+        assert_eq!(regenerated.id, issued.id);
+        assert_ne!(
+            regenerated.secret.expose_secret(),
+            issued.secret.expose_secret()
+        );
+        assert!(
+            !matches(&pool, &crypto, issued.secret.expose_secret())
+                .await
+                .unwrap()
+        );
+        let key = authenticate_key(&pool, &crypto, regenerated.secret.expose_secret())
+            .await
+            .unwrap()
+            .expect("new secret authenticates");
+        assert_eq!(key.id, issued.id);
+        assert!(key.access.allows("combo/a") && !key.access.allows("combo/b"));
+        assert_eq!(key.limits.requests_per_minute, Some(5));
+        assert_eq!(key.limits.max_concurrent, Some(1));
+
+        let after = list(&pool).await.unwrap().remove(0);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_ne!(after.prefix, before.prefix);
+        assert_eq!(
+            after.prefix,
+            regenerated
+                .secret
+                .expose_secret()
+                .chars()
+                .take(11)
+                .collect::<String>()
+        );
+
+        // The new secret is revealable exactly once, like a fresh key.
+        let revealed = take_reveal(&pool, &crypto, &issued.id)
+            .await
+            .unwrap()
+            .expect("regenerated secret is revealable");
+        assert_eq!(revealed.expose_secret(), regenerated.secret.expose_secret());
+        assert!(
+            take_reveal(&pool, &crypto, &issued.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            regenerate(&pool, &crypto, "missing").await,
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

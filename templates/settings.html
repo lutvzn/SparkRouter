@@ -3,7 +3,7 @@
 {% block nav_settings %} aria-current="page"{% endblock %}
 {% block topbar_heading %}<div class="topbar-heading"><h1>Settings</h1><p class="topbar-subtitle">Appearance, history, configuration transfer, and system information.</p></div>{% endblock %}
 {% block content %}
-{% if !notice.is_empty() %}<p class="test ok" role="status">{{ notice }}</p>{% endif %}
+{% if !notice.is_empty() %}<p class="callout ok" role="status">{{ notice }}</p>{% endif %}
 <div class="settings-grid">
 <section class="settings-card" aria-labelledby="appearance-heading">
   <h2 id="appearance-heading">Appearance</h2>
@@ -26,8 +26,8 @@
       <option value="extended"{% if logging_mode == "extended" %} selected{% endif %}>Extended — metadata and bodies</option>
     </select>
     <p class="hint">Off stops new history and usage totals, not operational server logs. Existing records remain. Mode is sampled before routing; changes do not alter in-flight requests. Inspect Extended bodies from History.</p>
-    <p class="test fail">Extended stores sensitive prompts, completions and tool data as plaintext in SQLite and backups. Body content may include secrets. HTTP headers, configured transport credentials and raw upstream errors are not captured. Each body is capped at 64 KiB. Secure dashboard access and use only with test data.</p>
-    <label><input type="checkbox" name="confirm_extended" value="yes"> I accept sensitive body storage (required to save Extended).</label>
+    <p class="callout fail">Extended stores sensitive prompts, completions and tool data as plaintext in SQLite and backups. Body content may include secrets. HTTP headers, configured transport credentials and raw upstream errors are not captured. Each body is capped at 64 KiB. Secure dashboard access and use only with test data.</p>
+    <label class="check"><input type="checkbox" name="confirm_extended" value="yes"> I accept sensitive body storage (required to save Extended).</label>
     <button class="btn primary" type="submit">Save logging mode</button>
   </form>
   {% endif %}
@@ -44,7 +44,7 @@
     <form method="post" action="/settings/history/clear">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <p class="hint">Permanently deletes retained requests and attempts, resetting dashboard usage totals. Providers, combos and API keys are unchanged. In-flight requests may still record new history.</p>
-      <label><input type="checkbox" name="confirm" value="yes" required> I understand this cannot be undone.</label>
+      <label class="check"><input type="checkbox" name="confirm" value="yes" required> I understand this cannot be undone.</label>
       <button class="btn danger" type="submit">Clear history</button>
     </form>
   </details>

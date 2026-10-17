@@ -12,6 +12,12 @@
 <section class="card provider-details">
   <div class="provider-details-heading">
     <h2>Retained requests</h2>
+    {% if !rows.is_empty() %}
+    <form class="inline" data-confirm="Permanently clear all retained request history? Dashboard totals reset too." method="post" action="/history/clear">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn small danger" type="submit">Clear history</button>
+    </form>
+    {% endif %}
   </div>
   <dl class="provider-details-grid history-stats">
     <div><dt>Finished</dt><dd>{{ stats.finished }}</dd></div>
@@ -25,12 +31,6 @@
 {% if rows.is_empty() %}
 <p class="empty">No requests recorded yet.</p>
 {% else %}
-<div class="page-head page-actions">
-  <form class="inline" method="post" action="/history/clear">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <button class="btn small danger" type="submit">Clear history</button>
-  </form>
-</div>
 <div class="history-table-scroll" tabindex="0" role="region" aria-label="Request history table">
 <table>
   <thead>
@@ -50,13 +50,13 @@
   <tbody>
     {% for row in rows %}
     <tr>
-      <td>{{ row.created_at }}</td>
+      <td class="nowrap"><time datetime="{{ row.created_at }}" title="{{ row.created_at }}" data-local-time>{{ row.created_at }}</time></td>
       <td>{{ row.source }}</td>
       <td><code>{{ row.model }}</code></td>
       <td>{{ row.streaming }}</td>
       <td><span class="{{ row.outcome_class }}">{{ row.outcome }}</span></td>
       <td>{{ row.status }}</td>
-      <td>{{ row.latency_ms }} ms</td>
+      <td class="nowrap num">{{ row.latency_ms }} ms</td>
       <td>{{ row.tokens }}</td>
       <td>
         {% if row.attempts.is_empty() %}

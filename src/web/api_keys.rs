@@ -2,7 +2,7 @@
 
 use askama::Template;
 use axum::{
-    extract::{Form, Path, State},
+    extract::{Form, Path, Query, State},
     response::{Html, Response},
 };
 use secrecy::ExposeSecret;
@@ -44,6 +44,12 @@ struct CreatedPage {
     name: String,
     secret: String,
     revealed: bool,
+    regenerated: bool,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RevealQuery {
+    regenerated: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -217,9 +223,20 @@ pub(crate) async fn update_policy(
     Ok(see_other("/api-keys"))
 }
 
+pub(crate) async fn regenerate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    let issued = crate::db::api_keys::regenerate(&state.db, &state.crypto, &id).await?;
+    Ok(see_other(&format!("/api-keys/{}?regenerated=1", issued.id)))
+}
+
 pub(crate) async fn created(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<RevealQuery>,
 ) -> Result<Html<String>, AppError> {
     let secret = crate::db::api_keys::take_reveal(&state.db, &state.crypto, &id).await?;
     let key = crate::db::api_keys::list(&state.db)
@@ -235,6 +252,7 @@ pub(crate) async fn created(
             .map(|value| value.expose_secret().to_owned())
             .unwrap_or_default(),
         revealed: secret.is_some(),
+        regenerated: query.regenerated.is_some(),
     })
 }
 

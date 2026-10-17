@@ -46,7 +46,7 @@
         <button class="btn small" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg>Duplicate</button>
       </form>
       <a class="btn small" href="/combos/{{ c.id }}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#pencil"></use></svg>Edit</a>
-      <form class="inline" method="post" action="/combos/{{ c.id }}/delete">
+      <form class="inline" data-confirm="Delete combo “{{ c.name }}” and its steps? Requests to combo/{{ c.name }} will fail." method="post" action="/combos/{{ c.id }}/delete">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Delete</button>
       </form>

@@ -13,7 +13,7 @@
   <div class="page-head-actions">
     <a class="btn" href="/providers"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#arrow-left"></use></svg>All providers</a>
     {% if is_custom %}
-    <form class="inline" method="post" action="{{ action }}/delete">
+    <form class="inline" data-confirm="Delete provider “{{ name }}” and all of its connections?" method="post" action="{{ action }}/delete">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button class="btn danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Delete provider</button>
     </form>
@@ -38,7 +38,7 @@
   </dl>
   <form method="post" action="{{ action }}/tags" class="provider-tags-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <fieldset class="provider-tag-filters">
+    <fieldset class="provider-tag-filters chip-filters">
       <legend>Provider tags</legend>
       {% for tag in self.tag_options() %}
       <label><input type="checkbox" name="{{ tag.value }}" value="1"{% if tag.selected %} checked{% endif %}> {{ tag.label }}</label>
@@ -76,7 +76,7 @@
         <button class="btn small" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#flask-conical"></use></svg>Test</button>
       </form>
       <span id="test-{{ provider.id }}" class="test-result"></span>
-      <form class="inline" method="post" action="/providers/{{ provider.id }}/delete">
+      <form class="inline" data-confirm="Delete connection “{{ provider.name }}” and its stored API key?" method="post" action="/providers/{{ provider.id }}/delete">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn small danger" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#trash"></use></svg>Delete</button>
       </form>

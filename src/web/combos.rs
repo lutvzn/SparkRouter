@@ -941,7 +941,7 @@ mod tests {
         assert!(fragment.contains("disabled aria-label=\"Move step down\""));
         assert!(fragment.contains("aria-label=\"Move step up\">"));
         // Step provider labels flag routing-skipped providers; enabled ones stay bare.
-        assert!(fragment.contains("<td>B (disabled)</td>"));
+        assert!(fragment.contains("<td>B <span class=\"badge off\">disabled</span></td>"));
         assert!(fragment.contains("<td>A</td>"));
         // Two steps -> eight forms, all carrying CSRF.
         assert_eq!(fragment.matches("name=\"_csrf\"").count(), 8);

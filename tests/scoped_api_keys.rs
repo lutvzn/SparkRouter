@@ -807,3 +807,94 @@ async fn combo_rename_does_not_expand_name_based_permissions_and_restart_keeps_p
     assert!(keys[0].expires_at.is_some());
     state.db.close().await;
 }
+
+#[tokio::test]
+async fn dashboard_regenerates_a_key_secret_once_and_keeps_its_policy() {
+    let state = state().await;
+    let issued = api_keys::create_with_policy(
+        &state.db,
+        &state.crypto,
+        "<Client>",
+        KeyAccess::Selected(vec!["combo/kept".into()]),
+        Expiry::Never,
+    )
+    .await
+    .unwrap();
+    let old = issued.secret.expose_secret().to_owned();
+    assert_eq!(
+        request(&state, "/v1/models", &old, None).await.0,
+        StatusCode::OK
+    );
+
+    let path = format!("/api-keys/{}/regenerate", issued.id);
+    assert_eq!(
+        form(&state, &path, &[], "wrong", false).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        form(&state, &path, &[], &state.csrf_token, true)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(&state, "/v1/models", &old, None).await.0,
+        StatusCode::OK,
+        "rejected regenerations leave the secret unchanged"
+    );
+    assert_eq!(
+        form(
+            &state,
+            "/api-keys/missing/regenerate",
+            &[],
+            &state.csrf_token,
+            false
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let response = form(&state, &path, &[], &state.csrf_token, false).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()["location"].to_str().unwrap().to_owned();
+    assert_eq!(location, format!("/api-keys/{}?regenerated=1", issued.id));
+
+    let page = |state: AppState, uri: String| async move {
+        let response = app::router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    };
+    let html = page(state.clone(), location.clone()).await;
+    assert!(html.contains("<h1>API key regenerated</h1>"));
+    assert!(html.contains("&#60;Client&#62;"));
+    let start = html.find("class=\"key-secret\">").expect("secret shown") + 19;
+    let new = html[start..start + html[start..].find('<').unwrap()].to_owned();
+    assert!(new.starts_with("sk-") && new != old);
+    assert!(
+        !page(state.clone(), location)
+            .await
+            .contains("class=\"key-secret\"")
+    );
+
+    assert_eq!(
+        request(&state, "/v1/models", &old, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(&state, "/v1/models", &new, None).await.0,
+        StatusCode::OK
+    );
+    let keys = api_keys::list(&state.db).await.unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].id, issued.id);
+    assert!(keys[0].access.allows("combo/kept"));
+    assert!(
+        page(state.clone(), "/api-keys".into())
+            .await
+            .contains(&path)
+    );
+}
