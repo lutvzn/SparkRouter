@@ -19,6 +19,10 @@ use tower_http::{
 pub struct AppState {
     pub(crate) started_at: std::time::Instant,
     pub db: SqlitePool,
+    /// Queue for the group-commit request-history writer, which owns the
+    /// connection from [`db::connect_history_writer`]. Reads and all other
+    /// writes use `db`.
+    pub(crate) history: db::history_writer::HistoryWriter,
     pub client: reqwest::Client,
     pub crypto: Arc<Crypto>,
     pub api_key: Option<Arc<SecretString>>,
@@ -52,8 +56,12 @@ impl AppState {
         )
         .execute(&db)
         .await?;
+        let history = db::history_writer::HistoryWriter::start(
+            db::connect_history_writer(&config.database_url, &db).await?,
+        );
         Ok(Self {
             started_at: std::time::Instant::now(),
+            history,
             db,
             client,
             crypto: Arc::new(config.crypto),
@@ -69,6 +77,11 @@ impl AppState {
             round_robin: Arc::default(),
             affinity: Arc::default(),
         })
+    }
+
+    /// Wait until request history queued so far is committed or dropped.
+    pub async fn flush_history(&self) {
+        self.history.flush().await;
     }
 }
 

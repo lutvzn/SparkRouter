@@ -8,14 +8,16 @@
 //! keeps its history. No prompts, completions, credentials, endpoint URLs,
 //! or upstream error bodies are ever persisted.
 //!
-//! Retention is bounded inline by [`save`]: one transaction inserts the
-//! record with its attempts and then deletes everything older than the
-//! newest configured number of requests (at most [`MAX_RETAINED`], attempts cascade). There is no
-//! background worker, and [`finish`] on a pruned record is a no-op.
+//! Retention is bounded inline by every insert transaction: after inserting
+//! records with their attempts it deletes everything older than the newest
+//! configured number of requests (at most [`MAX_RETAINED`], attempts cascade).
+//! The gateway's inserts and terminal outcomes arrive in batches from
+//! [`super::history_writer`]; [`save`] and [`finish`] write one directly.
+//! Finishing a pruned record is a no-op.
 
 use std::collections::HashMap;
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::error::AppError;
 
@@ -39,7 +41,12 @@ const MAX_OUTCOME_CHARS: usize = 64;
 const MAX_PROVIDER_ID_CHARS: usize = 64;
 const MAX_PROVIDER_NAME_CHARS: usize = 128;
 
+/// Rows per multi-row statement, keeping bound parameters (at most 11 per row)
+/// far below SQLite's limit.
+const ROWS_PER_STATEMENT: usize = 256;
+
 /// One recorded gateway request with its ordered attempt snapshots.
+#[derive(Clone)]
 pub struct Record {
     pub id: String,
     pub source: String,
@@ -54,6 +61,7 @@ pub struct Record {
 }
 
 /// One provider/model try within a request, as it looked when attempted.
+#[derive(Clone)]
 pub struct Attempt {
     pub provider_id: String,
     pub provider_name: String,
@@ -142,122 +150,245 @@ pub(crate) async fn save_with_diagnostics(
     snapshots: &[Option<ProviderSnapshot>],
     diagnostics: Option<&RoutingDiagnostics>,
 ) -> Result<(), AppError> {
-    validate_usage(usage)?;
-    if !snapshots.is_empty() && snapshots.len() != record.attempts.len() {
-        return Err(AppError::InvalidRequest(
-            "provider snapshots must match attempts".into(),
-        ));
-    }
-    for snapshot in snapshots.iter().flatten() {
-        if snapshot.slug.is_empty()
-            || snapshot.slug.len() > 64
-            || !snapshot
-                .slug
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Err(AppError::InvalidRequest("invalid provider snapshot".into()));
-        }
-        validate(
-            "provider group name",
-            &snapshot.name,
-            MAX_PROVIDER_NAME_CHARS,
-        )?;
-    }
-    validate("source", &record.source, MAX_SOURCE_CHARS)?;
-    validate("model", &record.model, MAX_PUBLIC_MODEL_CHARS)?;
-    validate("outcome", &record.outcome, MAX_OUTCOME_CHARS)?;
-    for attempt in &record.attempts {
-        validate(
-            "attempt provider id",
-            &attempt.provider_id,
-            MAX_PROVIDER_ID_CHARS,
-        )?;
-        validate(
-            "attempt provider name",
-            &attempt.provider_name,
-            MAX_PROVIDER_NAME_CHARS,
-        )?;
-        validate("attempt model", &attempt.model, MAX_MODEL_CHARS)?;
-        validate("attempt outcome", &attempt.outcome, MAX_OUTCOME_CHARS)?;
-    }
-
+    let request = NewRequest::new(record.clone(), usage, snapshots.to_vec(), diagnostics)?;
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    sqlx::query(
-        "INSERT INTO request_history
-             (id, source, model, streaming, outcome, status, latency_ms,
-              input_tokens, output_tokens, cached_tokens, cost_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&record.id)
-    .bind(&record.source)
-    .bind(&record.model)
-    .bind(record.streaming)
-    .bind(&record.outcome)
-    .bind(record.status)
-    .bind(record.latency_ms)
-    .bind(record.input_tokens)
-    .bind(record.output_tokens)
-    .bind(usage.cached_tokens)
-    .bind(usage.cost_usd)
-    .execute(&mut *transaction)
-    .await?;
-    for (ordinal, attempt) in record.attempts.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO request_attempts
-                 (request_id, ordinal, position, provider_id, provider_name,
-                  model, outcome, latency_ms, provider_slug, provider_group_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&record.id)
-        .bind(ordinal as i64)
-        .bind(attempt.position)
-        .bind(&attempt.provider_id)
-        .bind(&attempt.provider_name)
-        .bind(&attempt.model)
-        .bind(&attempt.outcome)
-        .bind(attempt.latency_ms)
-        .bind(
-            snapshots
-                .get(ordinal)
-                .and_then(Option::as_ref)
-                .map(|s| &s.slug),
-        )
-        .bind(
-            snapshots
-                .get(ordinal)
-                .and_then(Option::as_ref)
-                .map(|s| &s.name),
-        )
-        .execute(&mut *transaction)
-        .await?;
+    insert_all(&mut transaction, &[&request]).await?;
+    prune(&mut transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// A validated record ready to insert, with its usage, per-attempt provider
+/// snapshots (empty or one per attempt), and serialized routing diagnostics.
+pub(crate) struct NewRequest {
+    pub record: Record,
+    usage: UsageMetrics,
+    snapshots: Vec<Option<ProviderSnapshot>>,
+    diagnostics: Option<String>,
+}
+
+impl NewRequest {
+    /// Reject values the schema CHECK constraints would refuse, so a batch
+    /// only fails for reasons outside the record itself.
+    pub(crate) fn new(
+        record: Record,
+        usage: UsageMetrics,
+        snapshots: Vec<Option<ProviderSnapshot>>,
+        diagnostics: Option<&RoutingDiagnostics>,
+    ) -> Result<Self, AppError> {
+        validate_usage(usage)?;
+        if !snapshots.is_empty() && snapshots.len() != record.attempts.len() {
+            return Err(AppError::InvalidRequest(
+                "provider snapshots must match attempts".into(),
+            ));
+        }
+        for snapshot in snapshots.iter().flatten() {
+            if snapshot.slug.is_empty()
+                || snapshot.slug.len() > 64
+                || !snapshot
+                    .slug
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
+                return Err(AppError::InvalidRequest("invalid provider snapshot".into()));
+            }
+            validate(
+                "provider group name",
+                &snapshot.name,
+                MAX_PROVIDER_NAME_CHARS,
+            )?;
+        }
+        validate("source", &record.source, MAX_SOURCE_CHARS)?;
+        validate("model", &record.model, MAX_PUBLIC_MODEL_CHARS)?;
+        validate("outcome", &record.outcome, MAX_OUTCOME_CHARS)?;
+        for attempt in &record.attempts {
+            validate(
+                "attempt provider id",
+                &attempt.provider_id,
+                MAX_PROVIDER_ID_CHARS,
+            )?;
+            validate(
+                "attempt provider name",
+                &attempt.provider_name,
+                MAX_PROVIDER_NAME_CHARS,
+            )?;
+            validate("attempt model", &attempt.model, MAX_MODEL_CHARS)?;
+            validate("attempt outcome", &attempt.outcome, MAX_OUTCOME_CHARS)?;
+        }
+        let diagnostics = diagnostics
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| AppError::Routing)?;
+        Ok(Self {
+            record,
+            usage,
+            snapshots,
+            diagnostics,
+        })
     }
-    if let Some(diagnostics) = diagnostics {
-        sqlx::query("INSERT INTO request_routing(request_id, details) VALUES (?, ?)")
-            .bind(&record.id)
-            .bind(serde_json::to_string(diagnostics).map_err(|_| AppError::Routing)?)
-            .execute(&mut *transaction)
+}
+
+/// Insert records with their attempts and diagnostics using multi-row
+/// statements. Run inside a write transaction, followed by [`prune`].
+///
+/// `created_at` is assigned by the database; rows of one statement share it
+/// and keep their order through `rowid`. Attempts keep their input order:
+/// each row gets its `ordinal` from the enumeration of `record.attempts`,
+/// while its `position` stays the configured step-position snapshot, so a
+/// round-robin or random start records and displays the order actually tried.
+pub(crate) async fn insert_all(
+    connection: &mut SqliteConnection,
+    requests: &[&NewRequest],
+) -> Result<(), sqlx::Error> {
+    // Statement text varies with the row count, so these are not cached.
+    for chunk in requests.chunks(ROWS_PER_STATEMENT) {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO request_history
+                 (id, source, model, streaming, outcome, status, latency_ms,
+                  input_tokens, output_tokens, cached_tokens, cost_usd) ",
+        );
+        query.push_values(chunk, |mut row, request| {
+            let record = &request.record;
+            row.push_bind(&record.id)
+                .push_bind(&record.source)
+                .push_bind(&record.model)
+                .push_bind(record.streaming)
+                .push_bind(&record.outcome)
+                .push_bind(record.status)
+                .push_bind(record.latency_ms)
+                .push_bind(record.input_tokens)
+                .push_bind(record.output_tokens)
+                .push_bind(request.usage.cached_tokens)
+                .push_bind(request.usage.cost_usd);
+        });
+        query
+            .build()
+            .persistent(false)
+            .execute(&mut *connection)
             .await?;
     }
-    // Read the cap under the same write lock as the insert and pruning.
+    let attempts: Vec<_> = requests
+        .iter()
+        .flat_map(|request| {
+            request
+                .record
+                .attempts
+                .iter()
+                .enumerate()
+                .map(move |(ordinal, attempt)| {
+                    let snapshot = request.snapshots.get(ordinal).and_then(Option::as_ref);
+                    (&request.record.id, ordinal as i64, attempt, snapshot)
+                })
+        })
+        .collect();
+    for chunk in attempts.chunks(ROWS_PER_STATEMENT) {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO request_attempts
+                 (request_id, ordinal, position, provider_id, provider_name,
+                  model, outcome, latency_ms, provider_slug, provider_group_name) ",
+        );
+        query.push_values(chunk, |mut row, (id, ordinal, attempt, snapshot)| {
+            row.push_bind(*id)
+                .push_bind(*ordinal)
+                .push_bind(attempt.position)
+                .push_bind(&attempt.provider_id)
+                .push_bind(&attempt.provider_name)
+                .push_bind(&attempt.model)
+                .push_bind(&attempt.outcome)
+                .push_bind(attempt.latency_ms)
+                .push_bind(snapshot.map(|s| &s.slug))
+                .push_bind(snapshot.map(|s| &s.name));
+        });
+        query
+            .build()
+            .persistent(false)
+            .execute(&mut *connection)
+            .await?;
+    }
+    let routing: Vec<_> = requests
+        .iter()
+        .filter_map(|request| Some((&request.record.id, request.diagnostics.as_ref()?)))
+        .collect();
+    for chunk in routing.chunks(ROWS_PER_STATEMENT) {
+        let mut query =
+            QueryBuilder::<Sqlite>::new("INSERT INTO request_routing (request_id, details) ");
+        query.push_values(chunk, |mut row, (id, details)| {
+            row.push_bind(*id).push_bind(*details);
+        });
+        query
+            .build()
+            .persistent(false)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete every request beyond the configured retention, oldest first.
+pub(crate) async fn prune(connection: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    // Keep the newest `history_retention` rows by (created_at, rowid), read
+    // under the same write lock. Deleting the oldest `count - cap` rows is the
+    // same set as skipping the newest `cap`, but walks only the excess instead
+    // of every retained row on each insert; COUNT(*) reads index page counts.
     sqlx::query(
         "DELETE FROM request_history
          WHERE id IN (
              SELECT id FROM request_history
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT -1 OFFSET ?
+             ORDER BY created_at ASC, rowid ASC
+             LIMIT max(0, (SELECT COUNT(*) FROM request_history)
+                 - (SELECT history_retention FROM dashboard_settings WHERE id = 1))
          )",
     )
-    .bind(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT history_retention FROM dashboard_settings WHERE id = 1",
-        )
-        .fetch_one(&mut *transaction)
-        .await?,
-    )
-    .execute(&mut *transaction)
+    .execute(connection)
     .await?;
-    transaction.commit().await?;
+    Ok(())
+}
+
+/// The final outcome of a committed streaming request.
+pub(crate) struct Terminal {
+    pub id: String,
+    pub outcome: &'static str,
+    pub latency_ms: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub usage: UsageMetrics,
+}
+
+/// Write terminal outcomes, one statement per chunk; pruned or missing
+/// records are skipped. Callers pass validated outcome labels and usage.
+pub(crate) async fn finish_all(
+    connection: &mut SqliteConnection,
+    terminals: &[&Terminal],
+) -> Result<(), sqlx::Error> {
+    for chunk in terminals.chunks(ROWS_PER_STATEMENT) {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "WITH terminal (id, outcome, latency_ms, input_tokens, output_tokens,
+                            cached_tokens, cost_usd) AS (",
+        );
+        query.push_values(chunk, |mut row, terminal| {
+            row.push_bind(&terminal.id)
+                .push_bind(terminal.outcome)
+                .push_bind(terminal.latency_ms)
+                .push_bind(terminal.input_tokens)
+                .push_bind(terminal.output_tokens)
+                .push_bind(terminal.usage.cached_tokens)
+                .push_bind(terminal.usage.cost_usd);
+        });
+        query.push(
+            ")
+             UPDATE request_history
+             SET outcome = terminal.outcome, latency_ms = terminal.latency_ms,
+                 input_tokens = terminal.input_tokens, output_tokens = terminal.output_tokens,
+                 cached_tokens = terminal.cached_tokens, cost_usd = terminal.cost_usd
+             FROM terminal
+             WHERE request_history.id = terminal.id",
+        );
+        query
+            .build()
+            .persistent(false)
+            .execute(&mut *connection)
+            .await?;
+    }
     Ok(())
 }
 
@@ -313,7 +444,7 @@ pub async fn finish_with_usage(
     Ok(())
 }
 
-fn validate_usage(usage: UsageMetrics) -> Result<(), AppError> {
+pub(crate) fn validate_usage(usage: UsageMetrics) -> Result<(), AppError> {
     if usage
         .cached_tokens
         .is_some_and(|v| !(0..=1_000_000_000).contains(&v))
@@ -493,6 +624,55 @@ mod tests {
                 latency_ms: 0,
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn insert_keeps_exactly_the_newest_rows_by_time_then_rowid() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("UPDATE dashboard_settings SET history_retention = 3 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            let row = record("m".into(), "m".into());
+            ids.push(row.id.clone());
+            save(&pool, &row).await.unwrap();
+            // Identical timestamps fall back to insertion (rowid) order.
+            sqlx::query("UPDATE request_history SET created_at = '2026-01-01T00:00:00.000Z'")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let kept: Vec<String> = sqlx::query_scalar("SELECT id FROM request_history ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, ids[2..]);
+        let attempts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts, 3, "pruned rows cascade to their attempts");
+
+        // A raised cap stops pruning; a lowered one is enforced on the next insert.
+        sqlx::query("UPDATE dashboard_settings SET history_retention = 10 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        save(&pool, &record("m".into(), "m".into())).await.unwrap();
+        assert_eq!(count(&pool).await.unwrap(), 4);
+        sqlx::query("UPDATE dashboard_settings SET history_retention = 1 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let newest = record("m".into(), "m".into());
+        save(&pool, &newest).await.unwrap();
+        let kept: Vec<String> = sqlx::query_scalar("SELECT id FROM request_history")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, [newest.id]);
     }
 
     #[tokio::test]

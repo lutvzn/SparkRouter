@@ -2,7 +2,8 @@
 use crate::{
     app::AppState,
     db::{
-        request_payloads::{self, BODY_LIMIT},
+        history_writer::HistoryWriter,
+        request_payloads::BODY_LIMIT,
         settings::{self, LoggingMode},
     },
 };
@@ -22,18 +23,17 @@ pub(crate) struct Capture {
 impl Capture {
     pub async fn start(state: &AppState, body: &Value) -> Self {
         // Failure disables recording rather than accidentally persisting bodies.
-        let mode = match tokio::time::timeout(
-            Duration::from_millis(200),
-            settings::logging_mode(&state.db),
-        )
-        .await
+        // Only the wait for a connection is bounded: cancelling the query after
+        // it started would make the pool discard and reopen that connection.
+        let mode = match tokio::time::timeout(Duration::from_millis(200), state.db.acquire()).await
         {
-            Ok(Ok(mode)) => mode,
-            _ => {
-                tracing::warn!("request logging preference unavailable");
-                LoggingMode::Off
-            }
+            Ok(Ok(mut connection)) => settings::logging_mode(&mut *connection).await.ok(),
+            _ => None,
         };
+        let mode = mode.unwrap_or_else(|| {
+            tracing::warn!("request logging preference unavailable");
+            LoggingMode::Off
+        });
         let mut request = if mode == LoggingMode::Extended {
             body.to_string()
         } else {
@@ -55,16 +55,10 @@ impl Capture {
     }
 }
 
-pub(crate) fn wrap(
-    response: Response,
-    pool: sqlx::SqlitePool,
-    id: String,
-    gate: crate::history::InsertGate,
-) -> Response {
+pub(crate) fn wrap(response: Response, history: HistoryWriter, id: String) -> Response {
     let guard = PayloadGuard {
-        pool,
+        history,
         id,
-        gate,
         bytes: Vec::new(),
         truncated: false,
         finished: false,
@@ -90,63 +84,32 @@ pub(crate) fn wrap(
 }
 
 struct PayloadGuard {
-    pool: sqlx::SqlitePool,
+    history: HistoryWriter,
     id: String,
-    gate: crate::history::InsertGate,
     bytes: Vec<u8>,
     truncated: bool,
     finished: bool,
 }
 
 impl PayloadGuard {
-    /// Persist the capture once, in the background, so the end of the body
-    /// never waits on SQLite.
+    /// Queue the capture once; it is written after the record's insert, so
+    /// the end of the body never waits on SQLite.
     fn finish(&mut self, complete: bool) {
         if std::mem::replace(&mut self.finished, true) {
             return;
         }
-        let pool = self.pool.clone();
-        let id = self.id.clone();
-        let gate = self.gate.clone();
-        let bytes = std::mem::take(&mut self.bytes);
-        let truncated = self.truncated;
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if !write(&pool, &id, &gate, &bytes, truncated, complete).await {
-                    tracing::warn!("request payload write unavailable");
-                }
-            });
-        }
-    }
-}
-
-async fn write(
-    pool: &sqlx::SqlitePool,
-    id: &str,
-    gate: &crate::history::InsertGate,
-    bytes: &[u8],
-    truncated: bool,
-    complete: bool,
-) -> bool {
-    matches!(
-        tokio::time::timeout(Duration::from_secs(2), async {
-            if gate.wait().await {
-                let mut text = String::from_utf8_lossy(bytes).into_owned();
-                let truncated = truncated || text.len() > BODY_LIMIT;
-                if text.len() > BODY_LIMIT {
-                    let mut end = BODY_LIMIT;
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text.truncate(end);
-                }
-                request_payloads::finish(pool, id, &text, truncated, complete).await?;
+        let mut text = String::from_utf8_lossy(&std::mem::take(&mut self.bytes)).into_owned();
+        let truncated = self.truncated || text.len() > BODY_LIMIT;
+        if text.len() > BODY_LIMIT {
+            let mut end = BODY_LIMIT;
+            while !text.is_char_boundary(end) {
+                end -= 1;
             }
-            Ok::<_, crate::error::AppError>(())
-        })
-        .await,
-        Ok(Ok(()))
-    )
+            text.truncate(end);
+        }
+        self.history
+            .finish_payload(self.id.clone(), text, truncated, complete);
+    }
 }
 
 impl Drop for PayloadGuard {

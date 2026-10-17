@@ -1019,7 +1019,7 @@ fn num(value: &Value) -> f64 {
 
 fn print_header() {
     println!(
-        "\n{:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>9} {:>6} {:>6}  errors",
+        "\n{:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9} {:>9} {:>6} {:>6} {:>9}  errors",
         "users",
         "req/s",
         "success",
@@ -1030,7 +1030,8 @@ fn print_header() {
         "ttfb p99",
         "RSS MiB",
         "CPU",
-        "fds"
+        "fds",
+        "hist drop"
     );
 }
 
@@ -1048,7 +1049,7 @@ fn print_level(level: &Level) {
         })
         .unwrap_or_default();
     println!(
-        "{:>6} {:>8.1} {:>7.2}% {:>8.0} {:>8.0} {:>8.0} {:>8.0} {:>9.0} {:>9.1} {:>6.2} {:>6}  {}{}",
+        "{:>6} {:>8.1} {:>7.2}% {:>8.0} {:>8.0} {:>8.0} {:>8.0} {:>9.0} {:>9.1} {:>6.2} {:>6} {:>9}  {}{}",
         level.users,
         num(&r["throughput_rps"]),
         num(&r["success_rate_pct"]),
@@ -1060,6 +1061,7 @@ fn print_level(level: &Level) {
         num(&gateway["rss_peak_mib"]),
         num(&gateway["cpu_cores"]),
         gateway["open_fds_peak"].as_u64().unwrap_or(0),
+        r["history_writes_dropped"].as_u64().unwrap_or(0),
         if errors.is_empty() { "-" } else { &errors },
         if level.passed {
             ""
@@ -1069,10 +1071,34 @@ fn print_level(level: &Level) {
     );
 }
 
+/// Gateway warnings logged so far: all `WARN` lines, and those reporting a
+/// request-history write or finalization that was abandoned.
+fn log_warnings(log: Option<&Path>) -> (usize, usize) {
+    let Some(text) = log.and_then(|path| std::fs::read_to_string(path).ok()) else {
+        return (0, 0);
+    };
+    let warn = text.lines().filter(|line| line.contains(" WARN ")).count();
+    let history = text
+        .lines()
+        .filter(|line| {
+            line.contains("request history write unavailable")
+                || line.contains("request history finalization unavailable")
+        })
+        .count();
+    (warn, history)
+}
+
 // ---------------------------------------------------------------- orchestration
 
-async fn run_level(load: &Arc<Load>, users: usize, gateway_pid: Option<u32>, ticks: f64) -> Level {
+async fn run_level(
+    load: &Arc<Load>,
+    users: usize,
+    gateway_pid: Option<u32>,
+    log: Option<&Path>,
+    ticks: f64,
+) -> Level {
     let options = &load.options;
+    let warnings_before = log_warnings(log);
     let measure_from = Instant::now() + options.warmup;
     let stop_at = measure_from + options.duration;
     let tasks: Vec<_> = (0..users)
@@ -1093,14 +1119,20 @@ async fn run_level(load: &Arc<Load>, users: usize, gateway_pid: Option<u32>, tic
     for task in tasks {
         samples.extend(task.await.unwrap_or_default());
     }
-    summarize(
+    // Let the history writer drain its queue (or log drops) before counting.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let warnings_after = log_warnings(log);
+    let mut level = summarize(
         users,
         &samples,
         options.duration,
         gateway.as_ref(),
         loadgen.as_ref(),
         options,
-    )
+    );
+    level.report["gateway_warnings"] = json!(warnings_after.0 - warnings_before.0);
+    level.report["history_writes_dropped"] = json!(warnings_after.1 - warnings_before.1);
+    level
 }
 
 fn run_dir(options: &Options) -> Result<PathBuf, String> {
@@ -1126,7 +1158,7 @@ async fn run(options: Options) -> Result<(), String> {
 
     // Guards live until the end of this function, then stop both children.
     let mut _children = Vec::new();
-    let (target, gateway_pid) = match &options.external {
+    let (target, gateway_pid, gateway_log) = match &options.external {
         Some(external) => {
             println!(
                 "Target: external gateway {} (model {})",
@@ -1139,7 +1171,7 @@ async fn run(options: Options) -> Result<(), String> {
                 combo_model: external.model.clone(),
                 direct_model: external.model.clone(),
             };
-            (target, external.pid)
+            (target, external.pid, None)
         }
         None => {
             let (mock, mock_port) = spawn_mock(&options.mock, &dir)?;
@@ -1162,7 +1194,7 @@ async fn run(options: Options) -> Result<(), String> {
             println!(
                 "Configured through the dashboard: 2 providers, combo/stress (primary -> backup), 1 API key"
             );
-            (target, Some(pid))
+            (target, Some(pid), Some(dir.join("gateway.log")))
         }
     };
     let load = Arc::new(Load {
@@ -1219,15 +1251,13 @@ async fn run(options: Options) -> Result<(), String> {
     print_header();
     let mut levels = Vec::new();
     for &users in &options.levels {
-        let level = run_level(&load, users, gateway_pid, ticks).await;
+        let level = run_level(&load, users, gateway_pid, gateway_log.as_deref(), ticks).await;
         print_level(&level);
         let stop = !level.passed && !options.keep_going;
         levels.push(level);
         if stop {
             break;
         }
-        // Let in-flight work and connection churn settle between levels.
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1262,6 +1292,25 @@ async fn run(options: Options) -> Result<(), String> {
         }
         None => {
             let _ = writeln!(summary, "  No level met the target.");
+        }
+    }
+    if gateway_log.is_some() {
+        let dropped = |l: &&Level| l.report["history_writes_dropped"].as_u64().unwrap_or(0) > 0;
+        match levels.iter().find(dropped) {
+            None => {
+                let _ = writeln!(
+                    summary,
+                    "  Request history kept every write at every level."
+                );
+            }
+            Some(first) => {
+                let _ = writeln!(
+                    summary,
+                    "  Request history dropped writes from {} users on (see gateway.log); \
+                     responses were unaffected but history/usage totals are incomplete.",
+                    first.users
+                );
+            }
         }
     }
     if let Some(level) = peak {

@@ -528,6 +528,9 @@ async fn binary_speech_retains_stream_permits_and_records_metadata_only_completi
     assert_eq!(stream.next().await.unwrap().unwrap(), "last-audio");
     assert!(stream.next().await.is_none());
     history_count(&state, 1).await;
+    // The row appears with its insert; the terminal outcome queued at the end
+    // of the body may commit in a later batch.
+    state.flush_history().await;
     let (source, outcome, streaming): (String, String, bool) =
         sqlx::query_as("SELECT source, outcome, streaming FROM request_history")
             .fetch_one(&state.db)

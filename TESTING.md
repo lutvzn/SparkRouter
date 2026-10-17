@@ -249,7 +249,11 @@ latency, streaming time to first byte, received MiB/s, and the gateway's RSS,
 CPU cores, threads, and open files from `/proc` (Linux), plus per-request-type
 latency in `report.json`. The ramp stops at the first level that misses the
 target (`--slo-p99-ms`, default 2000; `--slo-success`, default 99.5%) and reports
-the last passing level as the capacity. `--upstream-error-rate` makes the primary
+the last passing level as the capacity. The `hist drop` column counts request-history
+writes the gateway logged as dropped during each level (from `gateway.log`), for
+example because the history writer's bounded queue was full;
+responses are unaffected, but history and usage totals are then incomplete, and
+the summary names the first level where that happened. `--upstream-error-rate` makes the primary
 return 503s to exercise combo fallback; `--logging off|basic|extended` compares
 history modes. Gateway logs, the database, and the report stay in the run
 directory for inspection.

@@ -210,8 +210,10 @@ mod tests {
         let db = runtime
             .block_on(sqlx::SqlitePool::connect("sqlite::memory:"))
             .unwrap();
+        let _runtime = runtime.enter();
         let state = AppState {
             started_at: std::time::Instant::now(),
+            history: crate::db::history_writer::HistoryWriter::start(db.clone()),
             db,
             client: reqwest::Client::new(),
             crypto: Arc::new(

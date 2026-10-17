@@ -29,10 +29,12 @@ impl LoggingMode {
     }
 }
 
-pub async fn logging_mode(pool: &SqlitePool) -> Result<LoggingMode, AppError> {
+pub async fn logging_mode<'e>(
+    executor: impl sqlx::SqliteExecutor<'e>,
+) -> Result<LoggingMode, AppError> {
     let value: String =
         sqlx::query_scalar("SELECT logging_mode FROM dashboard_settings WHERE id = 1")
-            .fetch_one(pool)
+            .fetch_one(executor)
             .await?;
     LoggingMode::parse(&value)
 }

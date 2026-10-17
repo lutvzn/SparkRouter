@@ -15,6 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = config.bind;
     let state = AppState::from_config(config).await?;
     let pool = state.db.clone();
+    let shutdown_state = state.clone();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(address = %listener.local_addr()?, app = sparkrouter::APP_NAME, "server listening");
     axum::serve(
@@ -23,6 +24,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_graceful_shutdown(shutdown())
     .await?;
+    // Commit history from the final requests before closing the database.
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        shutdown_state.flush_history(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("request history flush unavailable");
+    }
     pool.close().await;
     Ok(())
 }

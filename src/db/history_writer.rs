@@ -1,0 +1,489 @@
+//! Group-commit writer for request history.
+//!
+//! History is written once or twice per gateway request. Committing each write
+//! on its own cost about 0.75 ms on the single history connection, mostly
+//! per-statement round trips, which capped history far below response
+//! throughput. Request handlers instead queue writes without waiting, and one
+//! task owns the history connection: it commits everything queued since its
+//! previous commit in a single transaction with multi-row statements and one
+//! retention prune. There is no timer. An idle writer commits a lone write at
+//! once; batches grow only while a commit is already in progress.
+//!
+//! The queue is FIFO, so a stream's terminal outcome and an Extended response
+//! capture are always written after their insert, in the same or a later
+//! transaction. Queuing never blocks a response: a full queue, or a full
+//! budget for Extended bodies, drops the write with a warning. A started
+//! transaction is never cancelled; it waits for the write lock within the
+//! busy timeout like any other writer.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use sqlx::{Connection, SqliteConnection, SqlitePool};
+use tokio::sync::{mpsc, oneshot};
+
+use super::{
+    is_constraint_violation,
+    request_history::{self, NewRequest, Terminal},
+    request_payloads,
+};
+
+/// Writes waiting for the writer, bounding memory and how stale history can
+/// get behind a stalled disk. Writes beyond it are dropped.
+const QUEUE_CAPACITY: usize = 8192;
+
+/// Most writes committed by one transaction.
+const MAX_BATCH: usize = 1024;
+
+/// Bytes of Extended request/response bodies allowed in the queue at once;
+/// captures beyond it are dropped while their metadata is still recorded.
+const PAYLOAD_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Handle for queuing history writes; clones share one writer task.
+#[derive(Clone)]
+pub(crate) struct HistoryWriter {
+    queue: mpsc::Sender<Op>,
+    payload_bytes: Arc<AtomicUsize>,
+    batches: Arc<AtomicUsize>,
+}
+
+// No Debug: captures can hold private conversation data.
+enum Op {
+    Insert(Box<NewRequest>, Option<Capture>),
+    Finish(Terminal),
+    FinishPayload(String, Capture),
+    Flush(oneshot::Sender<()>),
+}
+
+/// A bounded body capture whose bytes count against [`PAYLOAD_BUDGET`] until
+/// it is written or dropped.
+struct Capture {
+    body: String,
+    truncated: bool,
+    complete: bool,
+    used: Arc<AtomicUsize>,
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.body.len(), Ordering::Relaxed);
+    }
+}
+
+impl HistoryWriter {
+    /// Spawn the writer task for `pool`. It ends once every handle is dropped
+    /// and the queue is empty.
+    pub(crate) fn start(pool: SqlitePool) -> Self {
+        let (queue, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let writer = Self {
+            queue,
+            payload_bytes: Arc::default(),
+            batches: Arc::default(),
+        };
+        drop(tokio::spawn(run(pool, receiver, writer.batches.clone())));
+        writer
+    }
+
+    /// Batches taken from the queue so far, including flush-only ones.
+    #[cfg(test)]
+    fn batches(&self) -> usize {
+        self.batches.load(Ordering::Relaxed)
+    }
+
+    /// Queue a new record with its optional Extended request capture. False
+    /// when the record was dropped; the capture alone may be dropped too.
+    pub(crate) fn insert(&self, request: NewRequest, request_body: Option<(String, bool)>) -> bool {
+        let capture = request_body.and_then(|(body, truncated)| {
+            let capture = self.capture(body, truncated, false);
+            if capture.is_none() {
+                tracing::warn!("request payload write unavailable");
+            }
+            capture
+        });
+        let queued = self
+            .queue
+            .try_send(Op::Insert(Box::new(request), capture))
+            .is_ok();
+        if !queued {
+            tracing::warn!("request history write unavailable");
+        }
+        queued
+    }
+
+    /// Queue the terminal outcome of a record queued earlier.
+    pub(crate) fn finish(&self, terminal: Terminal) {
+        if request_history::validate_usage(terminal.usage).is_err()
+            || self.queue.try_send(Op::Finish(terminal)).is_err()
+        {
+            tracing::warn!("request history finalization unavailable");
+        }
+    }
+
+    /// Queue the Extended response capture of a record queued earlier.
+    pub(crate) fn finish_payload(&self, id: String, body: String, truncated: bool, complete: bool) {
+        let queued = self
+            .capture(body, truncated, complete)
+            .is_some_and(|capture| self.queue.try_send(Op::FinishPayload(id, capture)).is_ok());
+        if !queued {
+            tracing::warn!("request payload write unavailable");
+        }
+    }
+
+    /// Wait until every write queued before this call is committed or
+    /// dropped. Unlike queuing, this waits for queue capacity.
+    pub(crate) async fn flush(&self) {
+        let (done, wait) = oneshot::channel();
+        if self.queue.send(Op::Flush(done)).await.is_ok() {
+            let _ = wait.await;
+        }
+    }
+
+    fn capture(&self, body: String, truncated: bool, complete: bool) -> Option<Capture> {
+        let bytes = body.len();
+        // Reserve optimistically; a concurrent reservation may briefly see
+        // the excess and drop its capture too, which only errs toward less.
+        if self.payload_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes > PAYLOAD_BUDGET {
+            self.payload_bytes.fetch_sub(bytes, Ordering::Relaxed);
+            return None;
+        }
+        Some(Capture {
+            body,
+            truncated,
+            complete,
+            used: self.payload_bytes.clone(),
+        })
+    }
+}
+
+async fn run(pool: SqlitePool, mut receiver: mpsc::Receiver<Op>, batches: Arc<AtomicUsize>) {
+    let mut batch = Vec::with_capacity(MAX_BATCH);
+    while receiver.recv_many(&mut batch, MAX_BATCH).await > 0 {
+        let writes: Vec<_> = batch
+            .iter()
+            .filter(|op| !matches!(op, Op::Flush(_)))
+            .collect();
+        match commit(&pool, &writes).await {
+            Ok(()) => {}
+            // A row the database rejects must not discard the rest of the
+            // batch. Other failures (I/O, lock timeout) would only repeat.
+            Err(error) if is_constraint_violation(&error) && writes.len() > 1 => {
+                for op in &writes {
+                    if commit(&pool, &[op]).await.is_err() {
+                        warn_dropped(op);
+                    }
+                }
+            }
+            Err(_) => writes.iter().for_each(|op| warn_dropped(op)),
+        }
+        batches.fetch_add(1, Ordering::Relaxed);
+        for op in batch.drain(..) {
+            if let Op::Flush(done) = op {
+                let _ = done.send(());
+            }
+        }
+    }
+}
+
+/// Write `ops` in one transaction. Every terminal outcome or response capture
+/// belongs to an insert queued before it, so writing all inserts first keeps
+/// that order.
+async fn commit(pool: &SqlitePool, ops: &[&Op]) -> Result<(), sqlx::Error> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let inserts: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Insert(request, _) => Some(&**request),
+            _ => None,
+        })
+        .collect();
+    let terminals: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Finish(terminal) => Some(terminal),
+            _ => None,
+        })
+        .collect();
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
+    request_history::insert_all(&mut transaction, &inserts).await?;
+    request_history::finish_all(&mut transaction, &terminals).await?;
+    let captures = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Insert(_, Some(_)) | Op::FinishPayload(..)))
+        .count();
+    if captures > 0 {
+        // Bodies are best-effort: a failed capture rolls back to this
+        // savepoint and never discards the metadata around it.
+        let mut savepoint = transaction.begin().await?;
+        if write_captures(&mut savepoint, ops).await.is_ok() {
+            savepoint.commit().await?;
+        } else {
+            savepoint.rollback().await?;
+            for _ in 0..captures {
+                tracing::warn!("request payload write unavailable");
+            }
+        }
+    }
+    if !inserts.is_empty() {
+        request_history::prune(&mut transaction).await?;
+    }
+    transaction.commit().await
+}
+
+async fn write_captures(connection: &mut SqliteConnection, ops: &[&Op]) -> Result<(), sqlx::Error> {
+    for op in ops {
+        if let Op::Insert(request, Some(capture)) = op {
+            request_payloads::insert(
+                &mut *connection,
+                &request.record.id,
+                &capture.body,
+                capture.truncated,
+            )
+            .await?;
+        }
+    }
+    for op in ops {
+        if let Op::FinishPayload(id, capture) = op {
+            request_payloads::finish(
+                &mut *connection,
+                id,
+                &capture.body,
+                capture.truncated,
+                capture.complete,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn warn_dropped(op: &Op) {
+    match op {
+        Op::Insert(..) => tracing::warn!("request history write unavailable"),
+        Op::Finish(_) => tracing::warn!("request history finalization unavailable"),
+        Op::FinishPayload(..) => tracing::warn!("request payload write unavailable"),
+        Op::Flush(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::request_history::{Attempt, Record, UsageMetrics};
+
+    fn request(id: &str, streaming: bool) -> NewRequest {
+        let attempt = |position| Attempt {
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            model: "m".into(),
+            position,
+            outcome: "failed".into(),
+            latency_ms: 1,
+        };
+        let record = Record {
+            id: id.into(),
+            source: "api".into(),
+            model: "combo/coding".into(),
+            streaming,
+            outcome: if streaming { "streaming" } else { "success" }.into(),
+            status: 200,
+            latency_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+            attempts: vec![attempt(1), attempt(0)],
+        };
+        NewRequest::new(record, UsageMetrics::default(), vec![], None).unwrap()
+    }
+
+    fn terminal(id: &str) -> Terminal {
+        Terminal {
+            id: id.into(),
+            outcome: "success",
+            latency_ms: 7,
+            input_tokens: Some(3),
+            output_tokens: Some(4),
+            usage: UsageMetrics {
+                cached_tokens: Some(1),
+                cost_usd: Some(0.5),
+            },
+        }
+    }
+
+    async fn count(pool: &SqlitePool, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn queued_writes_commit_together_and_keep_their_order() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        // More rows than one multi-row statement holds, with outcomes for
+        // streams inserted in the same batch and for a pruned/unknown record.
+        let ids: Vec<String> = (0..300).map(|n| format!("req-{n:03}")).collect();
+        for (n, id) in ids.iter().enumerate() {
+            assert!(history.insert(request(id, n % 2 == 0), None));
+        }
+        for id in ids.iter().step_by(2) {
+            history.finish(terminal(id));
+        }
+        history.finish(terminal("missing"));
+        history.flush().await;
+        assert_eq!(history.batches(), 1, "one transaction for the whole queue");
+
+        let stored: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM request_history ORDER BY rowid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, ids);
+        let ordinals: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT ordinal, position FROM request_attempts WHERE request_id = 'req-299' ORDER BY ordinal",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ordinals, [(0, 1), (1, 0)]);
+        assert_eq!(count(&pool, "request_attempts").await, 600);
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM request_history WHERE outcome = 'streaming'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0, "every stream outcome landed after its insert");
+        let finished: (String, i64, Option<i64>, Option<i64>, Option<f64>) = sqlx::query_as(
+            "SELECT outcome, latency_ms, output_tokens, cached_tokens, cost_usd
+             FROM request_history WHERE id = 'req-000'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(finished, ("success".into(), 7, Some(4), Some(1), Some(0.5)));
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_once_per_batch_to_the_newest_rows() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("UPDATE dashboard_settings SET history_retention = 5 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        for n in 0..12 {
+            assert!(history.insert(request(&format!("req-{n:02}"), false), None));
+        }
+        history.flush().await;
+        let kept: Vec<String> = sqlx::query_scalar("SELECT id FROM request_history ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, ["req-07", "req-08", "req-09", "req-10", "req-11"]);
+        assert_eq!(count(&pool, "request_attempts").await, 10);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_row_does_not_discard_the_rest_of_its_batch() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        assert!(history.insert(request("duplicate", false), None));
+        history.flush().await;
+        assert!(history.insert(request("before", false), None));
+        assert!(history.insert(request("duplicate", false), None));
+        assert!(history.insert(request("after", true), None));
+        history.finish(terminal("after"));
+        history.flush().await;
+        let mut stored: Vec<String> = sqlx::query_scalar("SELECT id FROM request_history")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        stored.sort();
+        assert_eq!(stored, ["after", "before", "duplicate"]);
+        let outcome: String =
+            sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = 'after'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(outcome, "success");
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_drops_writes_instead_of_waiting() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        // The writer cannot start while the only connection is held.
+        let connection = pool.acquire().await.unwrap();
+        let mut queued = 0;
+        while history.insert(request(&format!("req-{queued}"), false), None) {
+            queued += 1;
+            assert!(queued <= QUEUE_CAPACITY + MAX_BATCH, "queue is unbounded");
+        }
+        assert!(queued >= QUEUE_CAPACITY);
+        drop(connection);
+        history.flush().await;
+        assert_eq!(count(&pool, "request_history").await, queued as i64);
+        assert!(
+            history.insert(request("later", false), None),
+            "capacity returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn extended_bodies_beyond_the_budget_keep_their_metadata() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        let body = "x".repeat(crate::db::request_payloads::BODY_LIMIT);
+        let fit = PAYLOAD_BUDGET / body.len();
+        let connection = pool.acquire().await.unwrap();
+        for n in 0..fit + 3 {
+            let id = format!("req-{n}");
+            assert!(history.insert(request(&id, false), Some((body.clone(), false))));
+        }
+        history.finish_payload("req-0".into(), "late".into(), false, true);
+        drop(connection);
+        history.flush().await;
+        assert_eq!(count(&pool, "request_history").await, (fit + 3) as i64);
+        assert_eq!(count(&pool, "request_payloads").await, fit as i64);
+        assert_eq!(history.payload_bytes.load(Ordering::Relaxed), 0);
+        // Once written, the budget is free for the response capture again.
+        history.finish_payload("req-0".into(), "done".into(), false, true);
+        history.flush().await;
+        let response: (String, bool) = sqlx::query_as(
+            "SELECT response_body, response_complete FROM request_payloads WHERE request_id = 'req-0'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(response, ("done".into(), true));
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_keeps_the_metadata_of_its_batch() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_payload BEFORE INSERT ON request_payloads
+             BEGIN SELECT RAISE(ABORT, 'payload unavailable'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        assert!(history.insert(request("plain", true), None));
+        assert!(history.insert(request("captured", false), Some(("{}".into(), false))));
+        history.finish(terminal("plain"));
+        history.flush().await;
+        assert_eq!(history.batches(), 1);
+        assert_eq!(count(&pool, "request_history").await, 2);
+        assert_eq!(count(&pool, "request_payloads").await, 0);
+        let outcome: String =
+            sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = 'plain'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(outcome, "success");
+    }
+}

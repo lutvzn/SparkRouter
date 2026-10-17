@@ -1,23 +1,22 @@
 //! Best-effort request history; never changes response bytes or retry policy.
 //! Basic is metadata-only; opt-in Extended bodies use `history_payload`.
 //!
-//! The insert is spawned so it does not delay the response. Streaming
-//! finalization is spawned too, so the end of the body never waits on SQLite;
-//! that task waits for the insert before writing the terminal outcome, so a
-//! fast client cannot leave a completed stream recorded as still streaming.
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+//! Inserts and streaming finalization are queued for the batch
+//! [`HistoryWriter`], so neither the first response byte nor the end of the
+//! body waits on SQLite. The queue is ordered, so a fast client cannot leave a
+//! completed stream recorded as still streaming.
+use std::time::Instant;
 
 use axum::{body::Body, response::Response};
 use futures_util::StreamExt;
 use serde_json::Value;
-use sqlx::SqlitePool;
 
 use crate::{
     app::AppState,
-    db::request_history::{self, Attempt, Record, UsageMetrics},
+    db::{
+        history_writer::HistoryWriter,
+        request_history::{self, Attempt, NewRequest, Record, Terminal, UsageMetrics},
+    },
     providers::sse::SseDecoder,
     routing::combo::AttemptTrace,
 };
@@ -170,55 +169,30 @@ pub(crate) async fn record_response(
         selection: attempts.first().and_then(|trace| trace.routing.clone()),
         reasons: attempts.iter().map(|trace| trace.reason.clone()).collect(),
     };
-    // Database contention or recording failures must never fail a generation,
-    // and the insert must not delay the first response byte.
-    let gate = InsertGate::pending();
-    let insert = gate.clone();
-    let pool = state.db.clone();
+    // Recording failures must never fail a generation, and queuing never
+    // delays the first response byte.
     let id = record.id.clone();
-    let metrics = usage.metrics();
-    drop(tokio::spawn(async move {
-        let ok = matches!(
-            tokio::time::timeout(
-                Duration::from_secs(2),
-                request_history::save_with_diagnostics(
-                    &pool,
-                    &record,
-                    metrics,
-                    &provider_snapshots,
-                    Some(&diagnostics)
-                )
-            )
-            .await,
-            Ok(Ok(()))
-        );
-        if !ok {
+    let request_body = capture
+        .filter(|_| extended)
+        .map(|capture| (capture.request, capture.truncated));
+    let queued = match NewRequest::new(
+        record,
+        usage.metrics(),
+        provider_snapshots,
+        Some(&diagnostics),
+    ) {
+        Ok(request) => state.history.insert(request, request_body),
+        Err(_) => {
             tracing::warn!("request history write unavailable");
-        } else if let Some(capture) =
-            capture.filter(|c| c.mode == crate::db::settings::LoggingMode::Extended)
-        {
-            let captured = matches!(
-                tokio::time::timeout(
-                    Duration::from_millis(200),
-                    crate::db::request_payloads::insert(
-                        &pool,
-                        &record.id,
-                        &capture.request,
-                        capture.truncated
-                    )
-                )
-                .await,
-                Ok(Ok(()))
-            );
-            if !captured {
-                tracing::warn!("request payload write unavailable");
-            }
+            false
         }
-        // Payload failure must not leave otherwise valid streaming metadata pending.
-        insert.complete(ok);
-    }));
+    };
+    // Without a queued insert there is nothing to finalize.
+    if !queued {
+        return response;
+    }
     let response = if extended {
-        crate::history_payload::wrap(response, state.db.clone(), id.clone(), gate.clone())
+        crate::history_payload::wrap(response, state.history.clone(), id.clone())
     } else {
         response
     };
@@ -226,11 +200,10 @@ pub(crate) async fn record_response(
         return response;
     }
     let guard = StreamRecord {
-        pool: state.db.clone(),
+        history: state.history.clone(),
         id,
         started,
         usage,
-        gate,
         done: false,
         finalized: false,
     };
@@ -271,96 +244,28 @@ pub(crate) async fn record_response(
 }
 
 struct StreamRecord {
-    pool: SqlitePool,
+    history: HistoryWriter,
     id: String,
     started: Instant,
     usage: Usage,
-    gate: InsertGate,
     done: bool,
     finalized: bool,
 }
 
 impl StreamRecord {
-    /// Record the terminal outcome once, in the background. A failed insert
-    /// has nothing to update; the task waits for a pending one first.
+    /// Queue the terminal outcome once; it is written after the insert.
     fn finish(&mut self, outcome: &'static str) {
         if std::mem::replace(&mut self.finalized, true) {
             return;
         }
-        let pool = self.pool.clone();
-        let id = self.id.clone();
-        let latency = millis(self.started);
-        let usage = self.usage;
-        let gate = self.gate.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let inserted = tokio::time::timeout(Duration::from_secs(2), gate.wait())
-                    .await
-                    .unwrap_or_default();
-                if inserted && !write_terminal(&pool, &id, outcome, latency, usage).await {
-                    tracing::warn!("request history finalization unavailable");
-                }
-            });
-        }
-    }
-}
-
-async fn write_terminal(
-    pool: &SqlitePool,
-    id: &str,
-    outcome: &str,
-    latency_ms: i64,
-    usage: Usage,
-) -> bool {
-    matches!(
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            request_history::finish_with_usage(
-                pool,
-                id,
-                outcome,
-                latency_ms,
-                usage.input,
-                usage.output,
-                usage.metrics()
-            )
-        )
-        .await,
-        Ok(Ok(()))
-    )
-}
-
-/// Signals whether the background insert succeeded without losing a wakeup
-/// when finalization starts before the insert task runs.
-#[derive(Clone)]
-pub(crate) struct InsertGate {
-    tx: Arc<tokio::sync::watch::Sender<Option<bool>>>,
-    rx: tokio::sync::watch::Receiver<Option<bool>>,
-}
-
-impl InsertGate {
-    fn pending() -> Self {
-        let (tx, rx) = tokio::sync::watch::channel(None);
-        Self {
-            tx: Arc::new(tx),
-            rx,
-        }
-    }
-
-    fn complete(&self, ok: bool) {
-        let _ = self.tx.send(Some(ok));
-    }
-
-    pub(crate) async fn wait(&self) -> bool {
-        let mut rx = self.rx.clone();
-        loop {
-            if let Some(ok) = *rx.borrow_and_update() {
-                return ok;
-            }
-            if rx.changed().await.is_err() {
-                return false;
-            }
-        }
+        self.history.finish(Terminal {
+            id: self.id.clone(),
+            outcome,
+            latency_ms: millis(self.started),
+            input_tokens: self.usage.input,
+            output_tokens: self.usage.output,
+            usage: self.usage.metrics(),
+        });
     }
 }
 
@@ -437,66 +342,43 @@ mod tests {
         assert_eq!(total.cost_usd, Some(0.02));
     }
 
-    #[tokio::test]
-    async fn finalization_does_not_block_and_drop_keeps_the_terminal_outcome() {
-        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
-        let id = uuid::Uuid::new_v4().to_string();
-        request_history::save(
-            &pool,
-            &Record {
-                id: id.clone(),
-                source: "api".into(),
-                model: "test".into(),
-                streaming: true,
-                outcome: "streaming".into(),
-                status: 200,
-                latency_ms: 1,
-                input_tokens: None,
-                output_tokens: None,
-                attempts: vec![],
-            },
-        )
-        .await
-        .unwrap();
-        // Hold the only connection: finishing must still return immediately,
-        // and the later drop must not overwrite the outcome with cancellation.
-        let connection = pool.acquire().await.unwrap();
-        let gate = InsertGate::pending();
-        gate.complete(true);
-        let mut guard = StreamRecord {
-            pool: pool.clone(),
-            id: id.clone(),
-            started: Instant::now(),
-            usage: Usage::default(),
-            gate,
-            done: false,
-            finalized: false,
-        };
-        guard.finish("interrupted");
-        drop(guard);
-        drop(connection);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let outcome: String =
-                    sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = ?")
-                        .bind(&id)
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap();
-                if outcome == "interrupted" {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+    fn streaming_record(id: &str) -> Record {
+        Record {
+            id: id.into(),
+            source: "api".into(),
+            model: "test".into(),
+            streaming: true,
+            outcome: "streaming".into(),
+            status: 200,
+            latency_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+            attempts: vec![],
+        }
     }
 
-    #[tokio::test]
-    async fn history_insert_does_not_block_the_response() {
-        let state = crate::app::AppState::from_config(crate::config::Config {
-            database_url: "sqlite::memory:".into(),
+    fn guard(history: &HistoryWriter, id: &str) -> StreamRecord {
+        StreamRecord {
+            history: history.clone(),
+            id: id.into(),
+            started: Instant::now(),
+            usage: Usage::default(),
+            done: false,
+            finalized: false,
+        }
+    }
+
+    async fn outcome(pool: &sqlx::SqlitePool, id: &str) -> String {
+        sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn test_state(database_url: String) -> crate::config::Config {
+        crate::config::Config {
+            database_url,
             bind: "127.0.0.1:0".parse().unwrap(),
             crypto: crate::crypto::Crypto::from_base64(&secrecy::SecretString::from(
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9u8; 32]),
@@ -505,9 +387,68 @@ mod tests {
             api_key: None,
             dashboard_password: None,
             dashboard_secure_cookie: false,
-        })
+        }
+    }
+
+    #[tokio::test]
+    async fn finalization_does_not_block_and_drop_keeps_the_terminal_outcome() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        request_history::save(&pool, &streaming_record(&id))
+            .await
+            .unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        // Hold the only connection: finishing must still return immediately,
+        // and the later drop must not overwrite the outcome with cancellation.
+        let connection = pool.acquire().await.unwrap();
+        let mut guard = guard(&history, &id);
+        guard.finish("interrupted");
+        drop(guard);
+        drop(connection);
+        history.flush().await;
+        assert_eq!(outcome(&pool, &id).await, "interrupted");
+    }
+
+    #[tokio::test]
+    async fn a_started_history_write_waits_for_the_lock_instead_of_being_cancelled() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = crate::app::AppState::from_config(test_state(format!(
+            "sqlite://{}",
+            directory.path().join("lock.db").display()
+        )))
         .await
         .unwrap();
+        // Another connection holds the write lock past the 2 s acquire bound.
+        // The writer already has its connection, so it must wait (within the
+        // busy timeout) and commit rather than be abandoned mid-transaction.
+        let lock = state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let response = record_response(
+            &state,
+            "api",
+            "combo/coding",
+            false,
+            Instant::now(),
+            &[],
+            axum::response::Response::new(axum::body::Body::from("ok")),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        assert_eq!(request_history::count(&state.db).await.unwrap(), 0);
+        lock.commit().await.unwrap();
+        state.flush_history().await;
+        assert_eq!(
+            request_history::count(&state.db).await.unwrap(),
+            1,
+            "the delayed write lands after the lock is released"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_insert_does_not_block_the_response() {
+        let state = crate::app::AppState::from_config(test_state("sqlite::memory:".into()))
+            .await
+            .unwrap();
         let held = state.db.acquire().await.unwrap();
         let started = Instant::now();
         let response = record_response(
@@ -521,77 +462,30 @@ mod tests {
         )
         .await;
         assert!(
-            started.elapsed() < Duration::from_millis(500),
+            started.elapsed() < std::time::Duration::from_millis(500),
             "history insert delayed the response by {:?}",
             started.elapsed()
         );
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         drop(held);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if request_history::count(&state.db).await.unwrap() == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("background insert should land after the connection is released");
+        state.flush_history().await;
+        assert_eq!(request_history::count(&state.db).await.unwrap(), 1);
     }
 
     #[tokio::test]
-    async fn stream_finalization_waits_for_the_insert() {
+    async fn stream_finalization_is_written_after_its_insert() {
         let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
         let id = uuid::Uuid::new_v4().to_string();
-        let gate = InsertGate::pending();
-        let mut guard = StreamRecord {
-            pool: pool.clone(),
-            id: id.clone(),
-            started: Instant::now(),
-            usage: Usage::default(),
-            gate: gate.clone(),
-            done: false,
-            finalized: false,
-        };
-        guard.finish("interrupted");
-        assert!(guard.finalized);
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(request_history::count(&pool).await.unwrap(), 0);
-        request_history::save(
-            &pool,
-            &Record {
-                id: id.clone(),
-                source: "api".into(),
-                model: "test".into(),
-                streaming: true,
-                outcome: "streaming".into(),
-                status: 200,
-                latency_ms: 1,
-                input_tokens: None,
-                output_tokens: None,
-                attempts: vec![],
-            },
-        )
-        .await
-        .unwrap();
-        gate.complete(true);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let outcome: String =
-                    sqlx::query_scalar("SELECT outcome FROM request_history WHERE id = ?")
-                        .bind(&id)
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap();
-                if outcome == "interrupted" {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("finalization should land once the insert completes");
+        // Hold the connection so the insert and its terminal outcome share
+        // one batch, where they must still apply in order.
+        let connection = pool.acquire().await.unwrap();
+        let request =
+            NewRequest::new(streaming_record(&id), UsageMetrics::default(), vec![], None).unwrap();
+        assert!(history.insert(request, None));
+        guard(&history, &id).finish("interrupted");
+        drop(connection);
+        history.flush().await;
+        assert_eq!(outcome(&pool, &id).await, "interrupted");
     }
 }

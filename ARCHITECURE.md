@@ -135,9 +135,13 @@ upstream error bodies are retained.
 4. Open SQLite with foreign keys, WAL, a five-second busy timeout, and embedded
    migrations. File-backed databases use at most five connections; in-memory
    test databases use one that is never retired for idleness or age, since
-   closing it would discard the database.
+   closing it would discard the database. A second, single-connection pool
+   is owned by the request-history batch writer (`db/history_writer.rs`); it
+   commits with `synchronous = NORMAL`. In-memory databases reuse the main pool
+   because each connection is a separate database.
 5. Generate a process-wide random CSRF token and compose API/dashboard routers.
-6. Bind the listener and serve until shutdown. Close the database pool afterward.
+6. Bind the listener and serve until shutdown. Afterward, wait up to 10 s for
+   queued request history to commit, then close the database pool.
 
 `AppState` clones share the SQLx pool and Reqwest client. Crypto state, optional
 gateway secret, optional dashboard authentication state, and CSRF token are shared through `Arc`. There is no global
@@ -652,8 +656,10 @@ Explicitly opted-in Extended history stores bounded gateway bodies in SQLite onl
 ### Local request history and configuration transfer
 
 Logging mode is sampled after authorization/admission, before routing, by
-`history_payload.rs` with a 200 ms deadline; read failures disable recording for
-that request. Off returns the unwrapped response without inserting history. Basic
+`history_payload.rs`, waiting at most 200 ms for a connection; read failures
+disable recording for that request. Request-path SQL is never cancelled after it
+starts: SQLx discards a connection whose query future is dropped, and under load
+that churn and wasted work collapsed throughput. Deadlines bound only the wait. Off returns the unwrapped response without inserting history. Basic
 is the upgrade/default behavior. Extended snapshots gateway JSON and observes
 final response data incrementally, copying at most 64 KiB per direction without
 changing forwarded bytes/errors or fallback. It excludes headers and intermediate
@@ -674,15 +680,25 @@ carry best-effort usage metadata in internal response extensions. The streaming
 observer frames bounded SSE events and reads usage without re-encoding events;
 malformed observer data never alters forwarding. Terminal body errors record
 interruption; dropped bodies record cancellation (or success if `[DONE]` was
-already observed). The insert is spawned and does not delay the response.
-Streaming finalization (completion, body error, or drop) is a spawned, bounded
-asynchronous database write that waits for that insert before writing the
-terminal outcome, so the body end never waits on SQLite. It is not a recurring
-worker. Recording failures are logged only as
+already observed). History inserts, streaming finalization (completion, body
+error, or drop), and Extended captures are queued without waiting for the
+group-commit writer in `db/history_writer.rs`, explicitly requested to lift the
+per-write commit ceiling. It is the one background task: it owns the single
+history connection, so writes never contend for SQLite's write lock while
+holding connections that authentication and routing reads need, and it commits
+everything queued since its previous commit in one transaction (multi-row
+statements, one retention prune; at most 1024 writes). There is no timer; a
+lone write commits at once. The queue is FIFO and each transaction writes
+inserts before terminal outcomes and captures, so a stream is never left
+recorded as streaming after its outcome was queued. The queue is bounded
+(8192 writes, 32 MiB of bodies) and full queues drop writes rather than block
+the response. A constraint violation retries that batch one write per
+transaction; captures run in a savepoint so their failure keeps the metadata.
+Started transactions are never cancelled. Recording failures are logged only as
 fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.
 The `request_history` and `request_attempts` tables contain metadata snapshots
 only, with no foreign keys to live configuration that could block deletion.
-Inserts prune to the configured newest requests (default/maximum 10,000); attempts cascade with history
+Inserts prune to the configured newest requests (default/maximum 10,000) by deleting only the oldest excess rows, so the cost does not grow with retention; attempts cascade with history
 deletion. A new additive migration stores cache-token and cost fields on request
 history and provider-slug/group-name snapshots on attempts, captured from the
 same SQL configuration snapshot used for each attempt. These identities survive
