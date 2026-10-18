@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use axum::response::Response;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
@@ -83,12 +85,13 @@ where
         let mut done = false;
         while !done {
             let bytes = match source.next().await { Some(result) => result?, None => break };
-            for byte in &bytes {
-                if decoder.push(*byte)?.is_some_and(|event| event.data.trim() == "[DONE]") {
-                    done = true;
-                    break;
+            decoder.push_chunk(&bytes, |event| {
+                if event.data.trim() != "[DONE]" {
+                    return ControlFlow::Continue(());
                 }
-            }
+                done = true;
+                ControlFlow::Break(())
+            })?;
             if !bytes.is_empty() { yield bytes; }
         }
         // A clean EOF without the terminal event means the generation was cut

@@ -24,7 +24,7 @@ pub(crate) struct SseEvent {
     pub(crate) data: String,
 }
 
-/// Byte-at-a-time SSE framing decoder.
+/// Incremental SSE framing decoder, fed one HTTP chunk at a time.
 ///
 /// Lines are decoded only after their terminator, so neither UTF-8 nor CRLF
 /// boundaries need to coincide with HTTP chunks. The size bound covers the
@@ -40,6 +40,8 @@ pub(crate) struct SseDecoder {
 }
 
 impl SseDecoder {
+    /// The byte-at-a-time reference that [`Self::push_chunk`] is tested against.
+    #[cfg(test)]
     pub(crate) fn push(&mut self, byte: u8) -> Result<Option<SseEvent>, AttemptError> {
         self.size += 1;
         if self.size > MAX_EVENT_BYTES {
@@ -52,9 +54,9 @@ impl SseDecoder {
         self.end_line()
     }
 
-    /// Decode a whole chunk exactly like pushing its bytes one at a time,
-    /// copying each line at once. `on_event` returning `Break` skips the rest
-    /// of the chunk, as breaking out of a byte loop would.
+    /// Decode a chunk, calling `on_event` for each completed event and copying
+    /// each line at once. `on_event` returning `Break` skips the rest of the
+    /// chunk; the decoder keeps its state for the next one.
     pub(crate) fn push_chunk(
         &mut self,
         mut bytes: &[u8],

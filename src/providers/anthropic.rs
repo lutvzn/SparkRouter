@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::ControlFlow};
 
 use axum::{http::StatusCode, response::Response};
 use bytes::Bytes;
@@ -821,12 +821,25 @@ where
         let mut decoder = SseDecoder::default();
         let mut state = StreamState::new(include_usage);
         while let Some(bytes) = source.next().await {
-            for byte in bytes? {
-                if let Some(event) = decoder.push(byte)? {
-                    for chunk in state.event(event)? { yield chunk; }
-                    if state.stopped { return; }
+            let bytes = bytes?;
+            // Output of the events before a failure is yielded first, as the
+            // failure would surface after it event by event.
+            let mut output = Vec::new();
+            let mut failed = None;
+            let decoded = decoder.push_chunk(&bytes, |event| match state.event(event) {
+                Ok(chunks) => {
+                    output.extend(chunks);
+                    if state.stopped { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
                 }
-            }
+                Err(error) => {
+                    failed = Some(error);
+                    ControlFlow::Break(())
+                }
+            });
+            for chunk in output { yield chunk; }
+            if let Some(error) = failed { Err(error)?; }
+            decoded?;
+            if state.stopped { return; }
         }
         // An HTTP EOF is not an Anthropic message_stop; signal truncation.
         Err(AttemptError::Retryable)?;
@@ -1150,7 +1163,7 @@ mod tests {
             json!({"type":"error", "error":{"type":"invalid_request_error", "message":"secret"}}),
         );
         let mut stream = translate_stream(
-            futures_util::stream::iter(vec![Ok(Bytes::from(error))]),
+            futures_util::stream::iter(vec![Ok(Bytes::from(error.clone()))]),
             false,
         );
         assert!(matches!(
@@ -1162,7 +1175,30 @@ mod tests {
         let start =
             event(json!({"type":"message_start", "message":{"id":"msg", "model":"claude"}}));
         let mut stream = translate_stream(
-            futures_util::stream::iter(vec![Ok(Bytes::from(start))]),
+            futures_util::stream::iter(vec![Ok(Bytes::from(start.clone()))]),
+            false,
+        );
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(AttemptError::Retryable))
+        ));
+        // Output of an event precedes a failure later in the same chunk.
+        let mut stream = translate_stream(
+            futures_util::stream::iter(vec![Ok(Bytes::from(format!("{start}{error}")))]),
+            false,
+        );
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(AttemptError::Permanent(AppError::Upstream(
+                StatusCode::BAD_REQUEST
+            ))))
+        ));
+        assert!(stream.next().await.is_none());
+        let invalid_utf8 = [start.as_bytes(), b"data: \xff\n"].concat();
+        let mut stream = translate_stream(
+            futures_util::stream::iter(vec![Ok(Bytes::from(invalid_utf8))]),
             false,
         );
         assert!(stream.next().await.unwrap().is_ok());
