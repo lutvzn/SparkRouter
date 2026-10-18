@@ -25,11 +25,15 @@ impl Capture {
         // Failure disables recording rather than accidentally persisting bodies.
         // Only the wait for a connection is bounded: cancelling the query after
         // it started would make the pool discard and reopen that connection.
-        let mode = match tokio::time::timeout(Duration::from_millis(200), state.db.acquire()).await
-        {
-            Ok(Ok(mut connection)) => settings::logging_mode(&mut *connection).await.ok(),
-            _ => None,
-        };
+        let mode = state
+            .config
+            .logging_mode(async {
+                match tokio::time::timeout(Duration::from_millis(200), state.db.acquire()).await {
+                    Ok(Ok(mut connection)) => settings::logging_mode(&mut *connection).await.ok(),
+                    _ => None,
+                }
+            })
+            .await;
         let mode = mode.unwrap_or_else(|| {
             tracing::warn!("request logging preference unavailable");
             LoggingMode::Off

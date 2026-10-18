@@ -23,6 +23,8 @@ pub struct AppState {
     /// connection from [`db::connect_history_writer`]. Reads and all other
     /// writes use `db`.
     pub(crate) history: db::history_writer::HistoryWriter,
+    /// Request-path configuration, invalidated by every commit on `db`.
+    pub(crate) config: Arc<db::config_cache::ConfigCache>,
     pub client: reqwest::Client,
     pub crypto: Arc<Crypto>,
     pub api_key: Option<Arc<SecretString>>,
@@ -63,6 +65,7 @@ impl AppState {
             started_at: std::time::Instant::now(),
             history,
             db,
+            config: Arc::default(),
             client,
             crypto: Arc::new(config.crypto),
             api_key: config.api_key.map(Arc::new),
@@ -168,9 +171,7 @@ pub(crate) async fn authorize(
             key: None,
         });
     }
-    if let Some(key) =
-        crate::db::api_keys::authenticate_key(&state.db, &state.crypto, supplied).await?
-    {
+    if let Some(key) = authenticate_key(state, supplied).await? {
         return Ok(Authorization {
             access: key.access.clone(),
             key: Some(key),
@@ -178,13 +179,30 @@ pub(crate) async fn authorize(
     }
     // Open only when neither the environment key nor a generated key exists.
     // Expired keys still keep authentication enabled until explicitly revoked.
-    if state.api_key.is_none() && !crate::db::api_keys::any(&state.db).await? {
+    if state.api_key.is_none() && !state.config.keys_exist(&state.db).await? {
         return Ok(Authorization {
             access: crate::db::api_keys::KeyAccess::All,
             key: None,
         });
     }
     Err(AppError::Unauthorized)
+}
+
+/// [`crate::db::api_keys::authenticate_key`] through the configuration cache.
+async fn authenticate_key(
+    state: &AppState,
+    secret: &str,
+) -> Result<Option<crate::db::api_keys::AuthenticatedKey>, AppError> {
+    if secret.is_empty() || secret.len() > 256 {
+        return Ok(None);
+    }
+    let fingerprint = state.crypto.gateway_key_fingerprint(secret)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+        .try_into()
+        .unwrap_or(i64::MAX);
+    state.config.key(&state.db, fingerprint, now).await
 }
 
 async fn dashboard_origin(request: Request, next: Next) -> Result<Response, AppError> {

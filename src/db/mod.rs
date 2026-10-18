@@ -3,6 +3,7 @@
 
 pub mod api_keys;
 pub mod combos;
+pub(crate) mod config_cache;
 pub mod config_transfer;
 pub mod connection_models;
 pub(crate) mod history_writer;
@@ -58,8 +59,10 @@ pub async fn connect(url: &str) -> Result<SqlitePool, AppError> {
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(BUSY_TIMEOUT);
 
+    let max_connections = if in_memory { 1 } else { MAX_FILE_CONNECTIONS };
+    // Commits on this pool invalidate the request-path configuration cache.
     let mut pool_options =
-        SqlitePoolOptions::new().max_connections(if in_memory { 1 } else { MAX_FILE_CONNECTIONS });
+        config_cache::track_commits(SqlitePoolOptions::new().max_connections(max_connections));
     if in_memory {
         // Closing the only connection would silently replace the database
         // with an empty one, so never retire it for idleness or age.

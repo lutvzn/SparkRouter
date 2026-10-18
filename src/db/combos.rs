@@ -129,6 +129,7 @@ pub struct Combo {
 }
 
 /// One entry in a combo's ordered fallback chain.
+#[derive(Clone)]
 pub struct ComboStep {
     pub id: String,
     pub combo_id: String,

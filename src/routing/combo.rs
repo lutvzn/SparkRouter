@@ -137,13 +137,17 @@ async fn route_inner(
     started: tokio::time::Instant,
     mut attempts: Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AppError> {
-    let (combo, snapshot) = combos::routing_snapshot(&state.db, name, context.category()).await?;
+    let routing = state
+        .config
+        .combo(&state.db, name, context.category())
+        .await?;
+    let (combo, snapshot) = &*routing;
     let mut steps: Vec<_> = snapshot
-        .into_iter()
+        .iter()
         .filter(|entry| entry.provider.enabled && context.accepts(&entry.provider))
-        .map(|entry| entry.step)
+        .map(|entry| entry.step.clone())
         .collect();
-    let binding = super::affinity::binding(&combo, context, &state.crypto, body)?;
+    let binding = super::affinity::binding(combo, context, &state.crypto, body)?;
     {
         // Disabled connections do not consume turns. Snapshot eligible steps
         // before selecting a start, but recheck providers below before calls so
@@ -191,16 +195,18 @@ async fn route_inner(
         if super::deadline_exhausted(deadline, remaining - index) {
             break;
         }
-        let (provider, slug, group_name) =
-            match crate::db::provider_slugs::connection_with_name(&state.db, &step.provider_id)
-                .await?
-            {
-                Some(provider) => provider,
-                // A dashboard edit can remove this snapshotted step and then its
-                // provider while an earlier upstream attempt is still in progress.
-                None => continue,
-            };
-        if !context.accepts(&provider) {
+        let connection = match state
+            .config
+            .connection(&state.db, &step.provider_id)
+            .await?
+        {
+            Some(connection) => connection,
+            // A dashboard edit can remove this snapshotted step and then its
+            // provider while an earlier upstream attempt is still in progress.
+            None => continue,
+        };
+        let (provider, slug, group_name) = &*connection;
+        if !context.accepts(provider) {
             continue;
         }
         if !provider.enabled {
@@ -217,12 +223,12 @@ async fn route_inner(
         );
         trace.routing = Some(selection.clone());
         trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
-            slug,
-            name: group_name,
+            slug: slug.clone(),
+            name: group_name.clone(),
         });
         let attempt = super::attempt(
             state,
-            &provider,
+            provider,
             &step.model,
             body,
             context,

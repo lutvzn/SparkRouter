@@ -16,7 +16,8 @@ OpenAI client ──> /v1/* ──> combo or direct model ──> protocol adapt
 There is one Cargo package with a library (`src/lib.rs`) and executable
 (`src/main.rs`). The library lets integration tests exercise the actual router
 without starting a separate gateway process. No frontend service, distributed
-state, response cache, queue, or routing worker is involved. Optional combo
+state, response cache, or routing worker is involved; the only in-process queue
+holds request history, and the only configuration cache is described below. Optional combo
 placement hints are bounded process-local state, not saved prompt/completion data.
 
 ## Module boundaries
@@ -29,6 +30,7 @@ placement hints are bounded process-local state, not saved prompt/completion dat
 | `error.rs` | `thiserror` categories and sanitized HTTP error envelopes |
 | `crypto.rs` | Versioned AES-256-GCM credential envelopes |
 | `db/mod.rs` | SQLite pool setup and embedded SQLx migrations |
+| `db/config_cache.rs` | Process-local copies of request-path configuration, invalidated by every main-pool commit |
 | `db/providers.rs` | Provider CRUD and ciphertext persistence |
 | `db/provider_favorites.rs` | Dashboard-only tile favorites; migration 0020 seeds defaults once, custom preferences cascade on group deletion |
 | `db/combos.rs` | Typed combo CRUD, step order, transactional mutations |
@@ -144,8 +146,17 @@ upstream error bodies are retained.
    queued request history to commit, then close the database pool.
 
 `AppState` clones share the SQLx pool and Reqwest client. Crypto state, optional
-gateway secret, optional dashboard authentication state, and CSRF token are shared through `Arc`. There is no global
-provider cache: routing reads persisted configuration for each request. Per-combo
+gateway secret, optional dashboard authentication state, and CSRF token are shared through `Arc`. Request-path
+configuration (logging mode, generated keys, combo routing snapshots, connections,
+and direct listings) is read through `db/config_cache.rs`, explicitly requested to
+take SQLite off the request path. A commit hook on every main-pool connection
+invalidates all of it: a commit marks the cache when it starts and settles once its
+connection returns to the pool or closes, and lookups that overlapped any unsettled
+commit are not kept, so a request never sees configuration older than the last
+finished commit. Only found entries are kept, bounding it by the stored
+configuration. History batches use their own pool and do not invalidate it. Writes
+from another process (for example the `sqlite3` shell) are not noticed until this
+process commits, so edit a running gateway through the dashboard. Per-combo
 round-robin cursors are ephemeral shared runtime state, protected by a short
 mutex reservation with no lock held during database or upstream I/O. They reset
 on process restart and dashboard deletion removes the combo's cursor.
@@ -232,8 +243,9 @@ of chain length. The same pure capability checks used by mutations validate ever
 step, including disabled steps, before strategy reservation. The transaction ends
 before upstream I/O; no provider credentials are loaded into this setup snapshot.
 The API boundary still checks the combo category separately before quota admission.
-Each actual attempt reloads its live provider configuration and namespace, so
-changes made during an active request are not frozen for the entire request. A provider removed after its snapshotted step is deleted
+Each actual attempt looks up its provider configuration and namespace again (through
+the configuration cache), so changes committed during an active request are not
+frozen for the entire request. A provider removed after its snapshotted step is deleted
 is skipped when no longer found; other database failures remain errors.
 
 ## Public API and fallback
@@ -276,7 +288,7 @@ Scopes are case-sensitive public IDs; allowing a combo permits its full fallback
 chain but not direct access to its step models. Renaming a combo does not rewrite
 key scopes; reusing an allowed public name authorizes that new configuration.
 Key expiry is an absolute Unix timestamp computed from SQLite's clock and checked
-at request start. Policy changes/revocation/expiry affect new requests, not active
+against the system clock at request start, including for cached keys. Policy changes/revocation/expiry affect new requests, not active
 generations. Updates serialize the flag, expiry, and allowlist in an immediate
 transaction without changing key fingerprints or reveal envelopes.
 Model listing returns configured combos as

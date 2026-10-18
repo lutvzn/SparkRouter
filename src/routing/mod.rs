@@ -22,6 +22,9 @@ pub(crate) async fn validate_combo_category(
     category: crate::db::combos::Category,
 ) -> Result<(), AppError> {
     if let Some(name) = model.strip_prefix("combo/") {
+        if state.config.has_combo(name, category) {
+            return Ok(());
+        }
         let combo = match crate::db::combos::by_name(&state.db, name).await {
             Ok(combo) => combo,
             Err(AppError::NotFound(_)) => return Ok(()), // Preserve normal not-found traces/history.

@@ -9,7 +9,7 @@ use crate::{
 };
 use sqlx::{Row, SqliteConnection};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Category {
     #[default]
     Text,

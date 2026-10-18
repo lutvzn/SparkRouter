@@ -215,6 +215,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             history: crate::db::history_writer::HistoryWriter::start(db.clone()),
             db,
+            config: Arc::default(),
             client: reqwest::Client::new(),
             crypto: Arc::new(
                 Crypto::from_base64(&SecretString::from(STANDARD.encode([3u8; 32]))).unwrap(),

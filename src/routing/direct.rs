@@ -5,12 +5,7 @@
 //! suffix is sent to enabled connections, oldest first. The retry policy matches
 //! combos: each connection at most once, and a permanent error stops the chain.
 
-use crate::{
-    app::AppState,
-    db::{connection_models, provider_slugs},
-    error::AppError,
-    providers::AttemptError,
-};
+use crate::{app::AppState, error::AppError, providers::AttemptError};
 use axum::response::Response;
 use serde_json::Value;
 
@@ -63,8 +58,7 @@ async fn route_inner(
         ));
     }
     let model = upstream_model.to_owned();
-    let provider_ids =
-        connection_models::providers_for_public_model(&state.db, slug, &model).await?;
+    let provider_ids = state.config.direct_targets(&state.db, slug, &model).await?;
     if provider_ids.is_empty() {
         return Err(AppError::NotFound(format!(
             "no connection lists public model '{public_model}'"
@@ -73,19 +67,19 @@ async fn route_inner(
     // Listed connections bound the chain; ineligible ones only add headroom.
     let remaining = provider_ids.len();
     let deadline = super::Budget::for_context(context).deadline(started, remaining);
-    for (index, provider_id) in provider_ids.into_iter().enumerate() {
+    for (index, provider_id) in provider_ids.iter().enumerate() {
         if super::deadline_exhausted(deadline, remaining - index) {
             break;
         }
-        let (provider, namespace, group_name) =
-            match provider_slugs::connection_with_name(&state.db, &provider_id).await? {
-                Some(provider) => provider,
-                // A refresh snapshot can outlive a connection deleted mid-request.
-                None => continue,
-            };
+        let connection = match state.config.connection(&state.db, provider_id).await? {
+            Some(connection) => connection,
+            // A refresh snapshot can outlive a connection deleted mid-request.
+            None => continue,
+        };
+        let (provider, namespace, group_name) = &*connection;
         // Endpoint edits can change an unassigned connection's namespace.
         // Validate the namespace from the same snapshot as its credentials/URL.
-        if namespace != slug || !context.accepts(&provider) {
+        if namespace != slug || !context.accepts(provider) {
             continue;
         }
         if !provider.enabled {
@@ -101,12 +95,12 @@ async fn route_inner(
             started,
         );
         trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
-            slug: namespace,
-            name: group_name,
+            slug: namespace.clone(),
+            name: group_name.clone(),
         });
         let attempt = super::attempt(
             state,
-            &provider,
+            provider,
             &model,
             body,
             context,

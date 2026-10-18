@@ -403,8 +403,19 @@ pub async fn authenticate_key(
         return Ok(None);
     }
     let fingerprint = crypto.gateway_key_fingerprint(secret)?;
+    Ok(by_fingerprint(pool, &fingerprint)
+        .await?
+        .map(|found| found.key))
+}
+
+/// The unexpired key with this fingerprint, with its expiry so a cached copy
+/// can stop authenticating on time.
+pub(crate) async fn by_fingerprint(
+    pool: &SqlitePool,
+    fingerprint: &str,
+) -> Result<Option<super::config_cache::CachedKey>, AppError> {
     let mut transaction = pool.begin().await?;
-    let found = sqlx::query("SELECT id, restricted, requests_per_minute, max_concurrent FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
+    let found = sqlx::query("SELECT id, restricted, requests_per_minute, max_concurrent, expires_at FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
         .bind(fingerprint)
         .fetch_optional(&mut *transaction)
         .await?;
@@ -423,13 +434,16 @@ pub async fn authenticate_key(
                 .await?;
                 KeyAccess::Selected(models)
             };
-            Some(AuthenticatedKey {
-                id,
-                access,
-                limits: KeyLimits {
-                    requests_per_minute: row.try_get("requests_per_minute")?,
-                    max_concurrent: row.try_get("max_concurrent")?,
+            Some(super::config_cache::CachedKey {
+                key: AuthenticatedKey {
+                    id,
+                    access,
+                    limits: KeyLimits {
+                        requests_per_minute: row.try_get("requests_per_minute")?,
+                        max_concurrent: row.try_get("max_concurrent")?,
+                    },
                 },
+                expires_at: row.try_get("expires_at")?,
             })
         }
     };

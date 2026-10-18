@@ -417,7 +417,7 @@ process environment variables.
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` for HTTPS deployment; marks dashboard session cookies Secure. Must be `true` or `false` |
 | `RUST_LOG` | `info` | `tracing` filter |
 
-The parent database directory must already exist and be writable. SQLite WAL/SHM sidecar files are normal while running. For backups, stop the application first or use SQLite's online backup facility rather than copying an active database file alone.
+The parent database directory must already exist and be writable. SQLite WAL/SHM sidecar files are normal while running. For backups, stop the application first or use SQLite's online backup facility rather than copying an active database file alone. Change configuration through the dashboard while the gateway runs: it caches request-path configuration (keys, combos, connections, logging mode) and does not notice edits made to the database by another process until it restarts or commits a change itself.
 
 ## Providers and protocols
 
