@@ -42,8 +42,24 @@ const MAX_PROVIDER_ID_CHARS: usize = 64;
 const MAX_PROVIDER_NAME_CHARS: usize = 128;
 
 /// Rows per multi-row statement, keeping bound parameters (at most 11 per row)
-/// far below SQLite's limit.
+/// far below SQLite's limit. A power of two; see [`statement_chunks`].
 const ROWS_PER_STATEMENT: usize = 256;
+
+/// Split rows into chunks whose sizes are powers of two up to
+/// [`ROWS_PER_STATEMENT`], so a multi-row statement has one of nine texts and
+/// stays prepared in the connection's statement cache. Parsing a new text for
+/// every batch cost more than executing it.
+fn statement_chunks<T>(mut rows: &[T]) -> impl Iterator<Item = &[T]> {
+    std::iter::from_fn(move || {
+        if rows.is_empty() {
+            return None;
+        }
+        let size = ROWS_PER_STATEMENT.min(1 << rows.len().ilog2());
+        let (chunk, rest) = rows.split_at(size);
+        rows = rest;
+        Some(chunk)
+    })
+}
 
 /// One recorded gateway request with its ordered attempt snapshots.
 #[derive(Clone)]
@@ -240,8 +256,7 @@ pub(crate) async fn insert_all(
     connection: &mut SqliteConnection,
     requests: &[&NewRequest],
 ) -> Result<(), sqlx::Error> {
-    // Statement text varies with the row count, so these are not cached.
-    for chunk in requests.chunks(ROWS_PER_STATEMENT) {
+    for chunk in statement_chunks(requests) {
         let mut query = QueryBuilder::<Sqlite>::new(
             "INSERT INTO request_history
                  (id, source, model, streaming, outcome, status, latency_ms,
@@ -261,11 +276,7 @@ pub(crate) async fn insert_all(
                 .push_bind(request.usage.cached_tokens)
                 .push_bind(request.usage.cost_usd);
         });
-        query
-            .build()
-            .persistent(false)
-            .execute(&mut *connection)
-            .await?;
+        query.build().execute(&mut *connection).await?;
     }
     let attempts: Vec<_> = requests
         .iter()
@@ -281,7 +292,7 @@ pub(crate) async fn insert_all(
                 })
         })
         .collect();
-    for chunk in attempts.chunks(ROWS_PER_STATEMENT) {
+    for chunk in statement_chunks(&attempts) {
         let mut query = QueryBuilder::<Sqlite>::new(
             "INSERT INTO request_attempts
                  (request_id, ordinal, position, provider_id, provider_name,
@@ -299,27 +310,19 @@ pub(crate) async fn insert_all(
                 .push_bind(snapshot.map(|s| &s.slug))
                 .push_bind(snapshot.map(|s| &s.name));
         });
-        query
-            .build()
-            .persistent(false)
-            .execute(&mut *connection)
-            .await?;
+        query.build().execute(&mut *connection).await?;
     }
     let routing: Vec<_> = requests
         .iter()
         .filter_map(|request| Some((&request.record.id, request.diagnostics.as_ref()?)))
         .collect();
-    for chunk in routing.chunks(ROWS_PER_STATEMENT) {
+    for chunk in statement_chunks(&routing) {
         let mut query =
             QueryBuilder::<Sqlite>::new("INSERT INTO request_routing (request_id, details) ");
         query.push_values(chunk, |mut row, (id, details)| {
             row.push_bind(*id).push_bind(*details);
         });
-        query
-            .build()
-            .persistent(false)
-            .execute(&mut *connection)
-            .await?;
+        query.build().execute(&mut *connection).await?;
     }
     Ok(())
 }
@@ -360,7 +363,7 @@ pub(crate) async fn finish_all(
     connection: &mut SqliteConnection,
     terminals: &[&Terminal],
 ) -> Result<(), sqlx::Error> {
-    for chunk in terminals.chunks(ROWS_PER_STATEMENT) {
+    for chunk in statement_chunks(terminals) {
         let mut query = QueryBuilder::<Sqlite>::new(
             "WITH terminal (id, outcome, latency_ms, input_tokens, output_tokens,
                             cached_tokens, cost_usd) AS (",
@@ -383,11 +386,7 @@ pub(crate) async fn finish_all(
              FROM terminal
              WHERE request_history.id = terminal.id",
         );
-        query
-            .build()
-            .persistent(false)
-            .execute(&mut *connection)
-            .await?;
+        query.build().execute(&mut *connection).await?;
     }
     Ok(())
 }
@@ -624,6 +623,21 @@ mod tests {
                 latency_ms: 0,
             }],
         }
+    }
+
+    #[test]
+    fn statement_chunks_use_power_of_two_sizes_in_order() {
+        let sizes = |count: usize| {
+            let rows: Vec<usize> = (0..count).collect();
+            let chunks: Vec<&[usize]> = statement_chunks(&rows).collect();
+            assert_eq!(chunks.concat(), rows);
+            chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>()
+        };
+        assert!(sizes(0).is_empty());
+        assert_eq!(sizes(1), [1]);
+        assert_eq!(sizes(7), [4, 2, 1]);
+        assert_eq!(sizes(256), [256]);
+        assert_eq!(sizes(600), [256, 256, 64, 16, 8]);
     }
 
     #[tokio::test]
