@@ -678,7 +678,8 @@ clear cascade bodies but are not secure disk erasure. No content enters tracing.
 bytes, response envelopes, strategy state, or fallback semantics. JSON responses
 carry best-effort usage metadata in internal response extensions. The streaming
 observer frames bounded SSE events and reads usage without re-encoding events;
-malformed observer data never alters forwarding. Terminal body errors record
+it parses only events whose data contains `"usage"` (a key written with JSON
+escapes is not recognized). Malformed observer data never alters forwarding. Terminal body errors record
 interruption; dropped bodies record cancellation (or success if `[DONE]` was
 already observed). History inserts, streaming finalization (completion, body
 error, or drop), and Extended captures are queued without waiting for the

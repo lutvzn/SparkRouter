@@ -5,7 +5,7 @@
 //! [`HistoryWriter`], so neither the first response byte nor the end of the
 //! body waits on SQLite. The queue is ordered, so a fast client cannot leave a
 //! completed stream recorded as still streaming.
-use std::time::Instant;
+use std::{ops::ControlFlow, time::Instant};
 
 use axum::{body::Body, response::Response};
 use futures_util::StreamExt;
@@ -29,9 +29,31 @@ pub(crate) struct Usage {
     cost_usd: Option<f64>,
 }
 
+/// A streamed event with every field except `usage` skipped unparsed.
+#[derive(serde::Deserialize)]
+struct UsageEvent {
+    #[serde(default)]
+    usage: Value,
+}
+
 impl Usage {
     pub(crate) fn from_value(value: &Value) -> Self {
-        let usage = &value["usage"];
+        Self::from_usage(&value["usage"])
+    }
+
+    /// Usage reported by one streamed event. Most events carry none, so only
+    /// those mentioning the key are parsed; a key spelled with JSON escapes
+    /// is not recognized.
+    fn from_event(data: &str) -> Self {
+        if !data.contains("\"usage\"") {
+            return Self::default();
+        }
+        serde_json::from_str::<UsageEvent>(data)
+            .map(|event| Self::from_usage(&event.usage))
+            .unwrap_or_default()
+    }
+
+    fn from_usage(usage: &Value) -> Self {
         let mut result = Self {
             input: usage
                 .get("prompt_tokens")
@@ -218,18 +240,15 @@ pub(crate) async fn record_response(
             match &chunk {
                 Ok(bytes) => {
                     if let Some(observer) = decoder.as_mut() {
-                        let mut invalid = false;
-                        for byte in bytes {
-                            match observer.push(*byte) {
-                                Ok(Some(event)) if event.data.trim() == "[DONE]" => { guard.done = true; break; }
-                                Ok(Some(event)) => {
-                                    if let Ok(value) = serde_json::from_str::<Value>(&event.data) { guard.usage.merge(Usage::from_value(&value)); }
-                                }
-                                Ok(None) => {},
-                                Err(_) => { invalid = true; break; }
+                        let observed = observer.push_chunk(bytes, |event| {
+                            if event.data.trim() == "[DONE]" {
+                                guard.done = true;
+                                return ControlFlow::Break(());
                             }
-                        }
-                        if invalid { decoder = None; }
+                            guard.usage.merge(Usage::from_event(&event.data));
+                            ControlFlow::Continue(())
+                        });
+                        if observed.is_err() { decoder = None; }
                     }
                 }
                 Err(_) => guard.finish("interrupted"),
@@ -322,6 +341,39 @@ mod tests {
             assert_eq!(invalid.cached, None);
             assert_eq!(invalid.cost_usd, None);
         }
+    }
+
+    #[test]
+    fn streamed_events_read_usage_like_the_full_value() {
+        let events = [
+            r#"{"choices":[{"delta":{"content":"usage"}}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"cost":0.5}}"#,
+            r#"{"type":"message_delta","usage":{"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":1,"cost_usd":0.25}}"#,
+            r#"{"usage":{"cost":1.5,"currency":"EUR","prompt_tokens":-1}}"#,
+            r#"{"usage":null}"#,
+            r#"["usage"]"#,
+            "not json \"usage\"",
+        ];
+        for data in events {
+            let expected = serde_json::from_str::<Value>(data)
+                .map(|value| Usage::from_value(&value))
+                .unwrap_or_default();
+            let actual = Usage::from_event(data);
+            assert_eq!(
+                (actual.input, actual.output, actual.cached, actual.cost_usd),
+                (
+                    expected.input,
+                    expected.output,
+                    expected.cached,
+                    expected.cost_usd
+                ),
+                "{data}"
+            );
+        }
+        assert_eq!(
+            Usage::from_event(r#"{"usage":{"prompt_tokens":5}}"#).input,
+            Some(5)
+        );
     }
 
     #[test]

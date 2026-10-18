@@ -6,6 +6,8 @@
 //! boundaries align with events. The history observer also uses this bounded
 //! decoder without changing forwarded bytes.
 
+use std::ops::ControlFlow;
+
 use super::AttemptError;
 
 /// Upper bound for a single framed SSE event, including field lines,
@@ -47,6 +49,43 @@ impl SseDecoder {
             self.line.push(byte);
             return Ok(None);
         }
+        self.end_line()
+    }
+
+    /// Decode a whole chunk exactly like pushing its bytes one at a time,
+    /// copying each line at once. `on_event` returning `Break` skips the rest
+    /// of the chunk, as breaking out of a byte loop would.
+    pub(crate) fn push_chunk(
+        &mut self,
+        mut bytes: &[u8],
+        mut on_event: impl FnMut(SseEvent) -> ControlFlow<()>,
+    ) -> Result<(), AttemptError> {
+        while !bytes.is_empty() {
+            let newline = bytes.iter().position(|&byte| byte == b'\n');
+            let consumed = newline.map_or(bytes.len(), |index| index + 1);
+            // The bound is checked per line rather than per byte; a line ends
+            // the event only at its newline, so the outcome is the same.
+            self.size += consumed;
+            if self.size > MAX_EVENT_BYTES {
+                return Err(AttemptError::Retryable);
+            }
+            let (segment, rest) = bytes.split_at(consumed);
+            bytes = rest;
+            let Some(index) = newline else {
+                self.line.extend_from_slice(segment);
+                break;
+            };
+            self.line.extend_from_slice(&segment[..index]);
+            if let Some(event) = self.end_line()?
+                && on_event(event).is_break()
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn end_line(&mut self) -> Result<Option<SseEvent>, AttemptError> {
         if self.line.last() == Some(&b'\r') {
             self.line.pop();
         }
@@ -74,5 +113,89 @@ impl SseDecoder {
         }
         self.line.clear();
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Decoded = (Vec<(String, String)>, bool);
+
+    fn bytewise(chunks: &[&[u8]], stop: &str) -> Decoded {
+        let mut decoder = SseDecoder::default();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            for byte in *chunk {
+                match decoder.push(*byte) {
+                    Ok(Some(event)) => {
+                        let done = event.data == stop;
+                        events.push((event.name, event.data));
+                        if done {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => return (events, true),
+                }
+            }
+        }
+        (events, false)
+    }
+
+    fn chunked(chunks: &[&[u8]], stop: &str) -> Decoded {
+        let mut decoder = SseDecoder::default();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            let result = decoder.push_chunk(chunk, |event| {
+                let done = event.data == stop;
+                events.push((event.name, event.data));
+                if done {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            if result.is_err() {
+                return (events, true);
+            }
+        }
+        (events, false)
+    }
+
+    #[test]
+    fn chunks_decode_exactly_like_single_bytes_at_every_split() {
+        let oversized = format!("data: {}\n\n", "x".repeat(MAX_EVENT_BYTES));
+        let inputs: [&[u8]; 6] = [
+            b"event: a\ndata: one\ndata: two\n\n: comment\nid: 7\ndata: three\r\n\r\n",
+            b"data: first\n\ndata: stop\n\ndata: after stop\n\ndata: tail\n\n",
+            b"data:no-space\n\nretry: 5\n\n\n\ndata\n\ndata: \xc3\xa9\n\n",
+            b"data: ok\n\ndata: \xff\n\ndata: never\n\n",
+            b"data: unterminated",
+            oversized.as_bytes(),
+        ];
+        for input in inputs {
+            let expected = bytewise(&[input], "stop");
+            assert_eq!(chunked(&[input], "stop"), expected);
+            for split in 0..=input.len().min(80) {
+                let (head, tail) = input.split_at(split);
+                assert_eq!(
+                    chunked(&[head, tail], "stop"),
+                    bytewise(&[head, tail], "stop")
+                );
+            }
+            let singles: Vec<&[u8]> = input.chunks(1).collect();
+            assert_eq!(chunked(&singles, "stop"), bytewise(&singles, "stop"));
+        }
+    }
+
+    #[test]
+    fn the_event_bound_includes_the_newline_that_ends_it() {
+        let fits = format!("data: {}\n\n", "x".repeat(MAX_EVENT_BYTES - 8));
+        assert_eq!(fits.len(), MAX_EVENT_BYTES);
+        assert!(!chunked(&[fits.as_bytes()], "").1);
+        let over = format!("data: {}\n\n", "x".repeat(MAX_EVENT_BYTES - 7));
+        assert!(chunked(&[over.as_bytes()], "").1);
+        assert!(bytewise(&[over.as_bytes()], "").1);
     }
 }
