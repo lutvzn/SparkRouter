@@ -118,6 +118,14 @@ fn token_count(value: &Value) -> Option<i64> {
     value.as_i64().filter(|n| (0..=1_000_000_000).contains(n))
 }
 
+/// A new history record ID. Time-ordered (UUIDv7), so inserts append to the
+/// right edge of every index keyed by it and retention deletes from the left
+/// edge. Random IDs dirtied a random page per index on each insert and prune,
+/// roughly doubling the bytes written per record.
+fn history_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
 fn millis(started: Instant) -> i64 {
     started.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
@@ -155,7 +163,7 @@ pub(crate) async fn record_response(
         .copied()
         .unwrap_or_default();
     let record = Record {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: history_id(),
         source: source.into(),
         model: model.chars().take(321).collect(),
         streaming,
@@ -297,6 +305,14 @@ impl Drop for StreamRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_ids_sort_in_creation_order() {
+        let ids: Vec<String> = (0..1000).map(|_| history_id()).collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        let parsed = uuid::Uuid::parse_str(&ids[0]).unwrap();
+        assert_eq!(parsed.get_version_num(), 7);
+    }
 
     #[test]
     fn unknown_and_invalid_usage_stays_unknown() {

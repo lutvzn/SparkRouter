@@ -209,7 +209,8 @@ an upstream cache hit.
 | `request_history` | Bounded metadata snapshots for routed API/test-chat requests, including usage/cost and retained provider identity |
 | `request_attempts` | Ordered attempt snapshots with provider slug/group name; cascade with history deletion |
 | `dashboard_settings` | Singleton retention (1–10,000), and logging mode (off/basic/extended, default basic) |
-| `request_payloads` | Opt-in bounded sensitive gateway bodies, truncation/completion flags; cascade with history |
+| `request_payloads` | Opt-in bounded sensitive gateway request body and truncation flag; cascade with history |
+| `request_payload_responses` | The matching response body, truncation/completion flags, in its own row so the later capture never rewrites the request body; cascade with the request capture |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
 reference it. An index supports provider-reference lookups. There is no models
@@ -700,7 +701,10 @@ per-write commit ceiling. It is the one background task: it owns the single
 history connection, so writes never contend for SQLite's write lock while
 holding connections that authentication and routing reads need, and it commits
 everything queued since its previous commit in one transaction (multi-row
-statements, one retention prune; at most 1024 writes). There is no timer; a
+statements, Extended captures included, one retention prune; at most 1024
+writes). History IDs are time-ordered UUIDv7 strings, so every index keyed by
+them grows at one edge and prunes from the other; random IDs dirtied a random
+page per index on each insert and prune. There is no timer; a
 lone write commits at once. The queue is FIFO and each transaction writes
 inserts before terminal outcomes and captures, so a stream is never left
 recorded as streaming after its outcome was queued. The queue is bounded

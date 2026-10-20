@@ -234,30 +234,31 @@ async fn commit(pool: &SqlitePool, ops: &[&Op]) -> Result<(), sqlx::Error> {
 }
 
 async fn write_captures(connection: &mut SqliteConnection, ops: &[&Op]) -> Result<(), sqlx::Error> {
-    for op in ops {
-        if let Op::Insert(request, Some(capture)) = op {
-            request_payloads::insert(
-                &mut *connection,
-                &request.record.id,
-                &capture.body,
+    let requests: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Insert(request, Some(capture)) => Some((
+                request.record.id.as_str(),
+                capture.body.as_str(),
                 capture.truncated,
-            )
-            .await?;
-        }
-    }
-    for op in ops {
-        if let Op::FinishPayload(id, capture) = op {
-            request_payloads::finish(
-                &mut *connection,
-                id,
-                &capture.body,
+            )),
+            _ => None,
+        })
+        .collect();
+    let responses: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::FinishPayload(id, capture) => Some((
+                id.as_str(),
+                capture.body.as_str(),
                 capture.truncated,
                 capture.complete,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+            )),
+            _ => None,
+        })
+        .collect();
+    request_payloads::insert_all(connection, &requests).await?;
+    request_payloads::finish_all(connection, &responses).await
 }
 
 fn warn_dropped(op: &Op) {
@@ -452,13 +453,80 @@ mod tests {
         // Once written, the budget is free for the response capture again.
         history.finish_payload("req-0".into(), "done".into(), false, true);
         history.flush().await;
-        let response: (String, bool) = sqlx::query_as(
-            "SELECT response_body, response_complete FROM request_payloads WHERE request_id = 'req-0'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(response, ("done".into(), true));
+        let payload = request_payloads::get(&pool, "req-0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (payload.response_body.as_str(), payload.response_complete),
+            ("done", true)
+        );
+    }
+
+    #[tokio::test]
+    async fn captures_in_one_batch_pair_requests_with_their_responses() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        // More captures than one multi-row statement holds, with responses
+        // queued in the same batch as their requests and for unknown records.
+        let connection = pool.acquire().await.unwrap();
+        for n in 0..300 {
+            let id = format!("req-{n:03}");
+            let body = format!("request {n}");
+            assert!(history.insert(request(&id, false), Some((body, n == 7))));
+            if n % 3 == 0 {
+                let body = format!("response {n}");
+                history.finish_payload(id, body, n == 9, n != 12);
+            }
+        }
+        history.finish_payload("missing".into(), "orphan".into(), false, true);
+        // A repeated response capture replaces the earlier one.
+        history.finish_payload("req-000".into(), "again".into(), false, true);
+        drop(connection);
+        history.flush().await;
+        assert_eq!(history.batches(), 1);
+        assert_eq!(count(&pool, "request_payloads").await, 300);
+
+        let row = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let payload = request_payloads::get(&pool, id).await.unwrap().unwrap();
+                (
+                    payload.request_body,
+                    payload.request_truncated,
+                    payload.response_body,
+                    payload.response_truncated,
+                    payload.response_complete,
+                )
+            }
+        };
+        assert_eq!(
+            row("req-007").await,
+            ("request 7".into(), true, String::new(), false, false)
+        );
+        assert_eq!(
+            row("req-009").await,
+            ("request 9".into(), false, "response 9".into(), true, true)
+        );
+        assert_eq!(
+            row("req-012").await,
+            (
+                "request 12".into(),
+                false,
+                "response 12".into(),
+                false,
+                false
+            )
+        );
+        assert_eq!(
+            row("req-299").await,
+            ("request 299".into(), false, String::new(), false, false)
+        );
+        assert_eq!(
+            row("req-000").await,
+            ("request 0".into(), false, "again".into(), false, true)
+        );
+        assert_eq!(count(&pool, "request_payload_responses").await, 100);
     }
 
     #[tokio::test]

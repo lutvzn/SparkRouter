@@ -49,7 +49,7 @@ const ROWS_PER_STATEMENT: usize = 256;
 /// [`ROWS_PER_STATEMENT`], so a multi-row statement has one of nine texts and
 /// stays prepared in the connection's statement cache. Parsing a new text for
 /// every batch cost more than executing it.
-fn statement_chunks<T>(mut rows: &[T]) -> impl Iterator<Item = &[T]> {
+pub(super) fn statement_chunks<T>(mut rows: &[T]) -> impl Iterator<Item = &[T]> {
     std::iter::from_fn(move || {
         if rows.is_empty() {
             return None;
