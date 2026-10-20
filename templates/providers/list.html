@@ -37,8 +37,9 @@
   <h2 id="provider-all-heading">All providers</h2>
   <div id="provider-grid" class="provider-grid" data-provider-grid>
     {% for t in tiles %}{% include "providers/_tile.html" %}{% endfor %}
-    <a class="provider-tile" href="/providers/new">
+    <a class="provider-tile provider-tile-create" href="/providers/new">
       <span class="provider-tile-heading">
+          <span class="provider-tile-icon" aria-hidden="true"><svg class="icon" focusable="false"><use href="/static/icons.svg#plus"></use></svg></span>
           <span class="provider-title-row"><span class="provider-tile-title">Custom provider</span></span>
       </span>
       <span class="provider-tile-meta">Create a provider, then add connections.</span>

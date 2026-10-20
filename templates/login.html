@@ -9,8 +9,13 @@
 </head>
 <body>
   <main class="login-page">
-    <h1>{{ app_name }}</h1>
-    <p class="hint">Your self-hosted LLM gateway.</p>
+    <div class="login-brand">
+      <span class="brand-mark" aria-hidden="true"><svg class="icon" focusable="false"><use href="/static/icons.svg#zap"></use></svg></span>
+      <div>
+        <h1>{{ app_name }}</h1>
+        <p class="hint">Your self-hosted LLM gateway.</p>
+      </div>
+    </div>
     <section class="card">
       <h2>Dashboard login</h2>
       {% if !error.is_empty() %}<p class="test fail" role="alert">{{ error }}</p>{% endif %}

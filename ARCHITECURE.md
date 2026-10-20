@@ -534,7 +534,7 @@ other platforms or read failure). Retained success and failure counts exclude
 pending streams; failures include errors, interruptions, and cancellations.
 Unavailable database/history reads render unknown totals with a sanitized notice;
 the history summary has a two-second deadline. No monitoring worker is used.
-It reads retained history and displays five usage summary cards (requests, input/output/
+It reads retained history and displays four usage summary cards (input/output/
 cache-read tokens, USD spend) plus the ten providers ranked by distinct requests.
 It performs summary and leaderboard reads in SQL read transactions; it does not
 call providers or use a worker. Pending streams are excluded. Only the selected

@@ -107,7 +107,7 @@ pub(super) async fn render_page(
         },
         api_auth,
         database_status: if ready { "Connected" } else { "Unavailable" },
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::APP_VERSION,
         uptime: format!(
             "{}d {}h {}m {}s",
             elapsed / 86400,

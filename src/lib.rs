@@ -14,3 +14,4 @@ pub mod routing;
 pub mod web;
 
 pub const APP_NAME: &str = "SparkRouter";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

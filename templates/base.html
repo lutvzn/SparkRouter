@@ -13,14 +13,21 @@
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <aside class="sidebar">
-    <div class="brand"><a href="/">{{ app_name }}</a></div>
+    <div class="brand">
+      <a class="brand-link" href="/"><span class="brand-mark" aria-hidden="true"><svg class="icon" focusable="false"><use href="/static/icons.svg#zap"></use></svg></span><span class="brand-text"><span class="brand-name">{{ app_name }}</span><span class="brand-tag">LLM gateway</span></span></a>
+      <span class="brand-version" title="{{ app_name }} version">v{{ crate::APP_VERSION }}</span>
+    </div>
     <nav aria-label="Dashboard">
+      <span class="nav-section">Workspace</span>
       <a href="/"{% block nav_home %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#chart"></use></svg>Overview</a>
       <a href="/providers"{% block nav_providers %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#server"></use></svg>Providers</a>
       <a href="/combos"{% block nav_combos %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#layers"></use></svg>Combos</a>
+      <span class="nav-section">Developer</span>
       <a href="/api-keys"{% block nav_api_keys %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#key"></use></svg>API keys</a>
       <a href="/test"{% block nav_test %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#flask-conical"></use></svg>Test</a>
+      <span class="nav-section">Monitoring</span>
       <a href="/history"{% block nav_history %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#clock"></use></svg>History</a>
+      <span class="nav-section">System</span>
       <a href="/settings"{% block nav_settings %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#sliders"></use></svg>Settings</a>
       <a class="nav-logout" href="/logout"{% block nav_logout %}{% endblock %}><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#log-out"></use></svg>Log out</a>
     </nav>

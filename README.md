@@ -39,7 +39,7 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 
 Open **http://127.0.0.1:14673/** for the Overview dashboard:
 
-The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in five cards (requests, input/output/cache tokens, and USD spend) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**; **Log out** sits at its foot. On smaller screens navigation becomes one horizontally scrollable row above the page. With JavaScript enabled, deleting a provider, connection, or combo, revoking a key, and clearing history ask for browser confirmation first, and history/key creation times are shown in the browser's local time (hover for the stored UTC value).
+The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in four cards (input/output/cache tokens and USD spend; the request total is the successful plus failed counts) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**; **Log out** sits at its foot. On smaller screens navigation becomes one horizontally scrollable row above the page. With JavaScript enabled, deleting a provider, connection, or combo, revoking a key, and clearing history ask for browser confirmation first, and history/key creation times are shown in the browser's local time (hover for the stored UTC value).
 The top-right theme button switches between **Light** and **Dark**. Initially it
 matches your device's theme; after toggling, your choice is saved in your browser.
 Dashboard icons use locally embedded Lucide SVGs, with no icon CDN or external
@@ -607,8 +607,8 @@ backups. Off pauses new Overview totals but does not suppress operational
 `tracing` logs. Configuration export never includes captures or logging settings.
 
 **Overview** (`/`) uses that same retained history, including finished API and
-test-chat requests; pending streams are excluded. Its five summary cards show
-requests, input, output, cache-read, and USD spend, with a top-ten provider
+test-chat requests; pending streams are excluded. Its four usage cards show
+input, output, cache-read, and USD spend, with a top-ten provider
 leaderboard ranked by requests (distinct requests per provider). A retry is
 counted as an attempt, not an additional request for the leaderboard; usage is
 from the selected successful attempt only, so retries are not double-counted.

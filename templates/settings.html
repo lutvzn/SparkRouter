@@ -5,6 +5,7 @@
 {% block content %}
 {% if !notice.is_empty() %}<p class="callout ok" role="status">{{ notice }}</p>{% endif %}
 <div class="settings-grid">
+<div class="settings-column settings-side">
 <section class="settings-card" aria-labelledby="appearance-heading">
   <h2 id="appearance-heading">Appearance</h2>
   <label for="settings-theme">Theme</label>
@@ -13,6 +14,20 @@
   <p id="theme-storage-status" class="hint" role="status"></p>
   <noscript><p class="hint">Enable JavaScript to change the theme.</p></noscript>
 </section>
+<section class="settings-card" aria-labelledby="security-heading">
+  <h2 id="security-heading">Security</h2>
+  <dl class="settings-facts"><dt>Dashboard authentication</dt><dd>{{ dashboard_auth }}</dd><dt>Gateway API authentication</dt><dd>{{ api_auth }}</dd></dl>
+  <p class="hint">API keys do not protect the dashboard. Expired generated keys keep API authentication enabled until revoked. Protect network access with HTTPS and dashboard authentication or an authenticated reverse proxy.</p>
+  <a class="btn" href="/api-keys">Manage API keys</a>
+  <p class="hint">Passwords, the master encryption key, bind address, database location and environment keys stay in deployment configuration. Change them outside this UI and restart. Existing encrypted credentials require their original master key.</p>
+</section>
+<section class="settings-card" aria-labelledby="system-heading">
+  <div class="home-section-head"><h2 id="system-heading">System</h2><a class="btn" href="/settings">Refresh</a></div>
+  <dl class="settings-facts"><dt>Version</dt><dd>{{ version }}</dd><dt>Uptime</dt><dd>{{ uptime }}</dd><dt>Database status</dt><dd>{{ database_status }}</dd><dt>Memory usage</dt><dd>{{ memory }}</dd></dl>
+  <p class="hint">Sampled on page load. Database status checks read connectivity, not write access or provider health. Memory is current process resident RAM on Linux; unavailable on other platforms.</p>
+</section>
+</div>
+<div class="settings-column settings-main">
 <section class="settings-card" aria-labelledby="history-heading">
   <h2 id="history-heading">Request history</h2>
   <p class="hint">Basic records outcomes, models, attempts, latency, tokens and reported cost. Extended also captures gateway request and response bodies for development.</p>
@@ -57,17 +72,6 @@
   {% include "config_transfer.html" %}
   <p class="hint">For a full backup, stop SparkRouter cleanly before copying SQLite, or use SQLite’s online backup facility. Save your existing master key separately and securely. Do not copy a live database file alone or generate a replacement master key.</p>
 </section>
-<section class="settings-card" aria-labelledby="security-heading">
-  <h2 id="security-heading">Security</h2>
-  <dl class="settings-facts"><dt>Dashboard authentication</dt><dd>{{ dashboard_auth }}</dd><dt>Gateway API authentication</dt><dd>{{ api_auth }}</dd></dl>
-  <p class="hint">API keys do not protect the dashboard. Expired generated keys keep API authentication enabled until revoked. Protect network access with HTTPS and dashboard authentication or an authenticated reverse proxy.</p>
-  <a class="btn" href="/api-keys">Manage API keys</a>
-  <p class="hint">Passwords, the master encryption key, bind address, database location and environment keys stay in deployment configuration. Change them outside this UI and restart. Existing encrypted credentials require their original master key.</p>
-</section>
-<section class="settings-card" aria-labelledby="system-heading">
-  <div class="home-section-head"><h2 id="system-heading">System</h2><a class="btn" href="/settings">Refresh</a></div>
-  <dl class="settings-facts"><dt>Version</dt><dd>{{ version }}</dd><dt>Uptime</dt><dd>{{ uptime }}</dd><dt>Database status</dt><dd>{{ database_status }}</dd><dt>Memory usage</dt><dd>{{ memory }}</dd></dl>
-  <p class="hint">Sampled on page load. Database status checks read connectivity, not write access or provider health. Memory is current process resident RAM on Linux; unavailable on other platforms.</p>
-</section>
+</div>
 </div>
 {% endblock %}

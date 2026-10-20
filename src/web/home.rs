@@ -14,7 +14,6 @@ use crate::{
 #[template(path = "home.html")]
 struct Home {
     app_name: &'static str,
-    requests: String,
     successes: String,
     failures: String,
     database_status: &'static str,
@@ -63,7 +62,6 @@ pub(crate) async fn page(State(state): State<AppState>) -> Result<Html<String>, 
         None => {
             let mut home = build_home(Overview::default());
             home.usage_available = false;
-            home.requests = "—".into();
             home.successes = "—".into();
             home.failures = "—".into();
             home.input_coverage = "Usage unavailable".into();
@@ -84,10 +82,8 @@ pub(crate) async fn page(State(state): State<AppState>) -> Result<Html<String>, 
 
 fn build_home(data: Overview) -> Home {
     let total = data.requests;
-    let requests = number(total);
     Home {
         app_name: crate::APP_NAME,
-        requests,
         successes: number(data.successes),
         failures: number(total - data.successes),
         database_status: "Unavailable",

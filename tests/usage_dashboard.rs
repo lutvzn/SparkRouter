@@ -113,7 +113,8 @@ async fn overview_shows_connectivity_memory_and_finished_outcomes() {
     assert!(html.contains("<span>Database status</span><strong>Connected</strong>"));
     assert!(html.contains("<span>Successful requests</span><strong>1</strong>"));
     assert!(html.contains("<span>Errors / failed requests</span><strong>3</strong>"));
-    assert!(html.contains("<span>Requests</span><strong>4</strong>"));
+    // Total requests would repeat the success and failure cards.
+    assert!(!html.contains("<span>Requests</span>"));
     assert!(html.contains("<span>Memory usage</span><strong>"));
     assert!(!html.contains("Usage unavailable"));
     history::clear(&state.db).await.unwrap();
@@ -145,7 +146,7 @@ async fn overview_history_failure_does_not_invent_zero_counts() {
     let html = get_page(&app::router(state), "/").await;
     assert!(html.contains("<span>Database status</span><strong>Connected</strong>"));
     assert!(html.contains("Usage unavailable"));
-    assert!(html.contains("<span>Requests</span><strong>—</strong>"));
+    assert!(html.contains("<span>Successful requests</span><strong>—</strong>"));
     assert!(!html.contains("no such table"));
 }
 

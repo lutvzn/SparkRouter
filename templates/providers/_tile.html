@@ -1,6 +1,7 @@
 <div class="provider-card" data-provider-tags="{{ t.tag_values() }}">
   <div class="provider-tile">
     <div class="provider-tile-heading">
+      <span class="provider-tile-icon" aria-hidden="true"><svg class="icon" focusable="false"><use href="/static/icons.svg#server"></use></svg></span>
       <div class="provider-title-row">
         <a class="provider-title-link" href="{{ t.href }}"><span class="provider-tile-title">{{ t.name }}</span></a>
         <form class="provider-favorite-form" method="post" action="{{ t.href }}/favorite">
