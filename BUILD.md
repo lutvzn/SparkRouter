@@ -255,6 +255,8 @@ never escalates to SIGKILL. Adjust with `--timeout SECONDS`. On Windows, backgro
 `run` and Ctrl+C for graceful Windows shutdown. Forced shutdown does not provide a
 clean database-backup window: use SQLite online backup or graceful shutdown.
 
+`start`, `run`, and `status` print the address the server listens on, taken from
+`ROUTER_BIND`; `status` reports the address recorded when `start` launched it.
 `health` derives its URL from `ROUTER_BIND` (default loopback), mapping wildcard
 binds to loopback. Override with `--url URL` / `-Url URL` for HTTPS/reverse proxies.
 Pass the same env file when using a nondefault port. These helpers are conveniences,

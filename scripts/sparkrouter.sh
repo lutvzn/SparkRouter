@@ -78,19 +78,31 @@ lock() {
 identity() {
   local actual stamp
   [[ -f "$PID_FILE" ]] || return 1
-  { IFS= read -r PID; IFS= read -r SAVED_STAMP; IFS= read -r SAVED_BINARY; } < "$PID_FILE" || fail 'Invalid process state; refusing to signal a PID'
+  SAVED_ADDRESS=''
+  { IFS= read -r PID; IFS= read -r SAVED_STAMP; IFS= read -r SAVED_BINARY; IFS= read -r SAVED_ADDRESS || true; } < "$PID_FILE" || fail 'Invalid process state; refusing to signal a PID'
   [[ "$PID" =~ ^[1-9][0-9]*$ && -n "$SAVED_STAMP" && -n "$SAVED_BINARY" ]] || fail 'Invalid process state; refusing to signal a PID'
   kill -0 "$PID" 2>/dev/null || return 1
   actual=$(ps -p "$PID" -o args= 2>/dev/null) || return 1
   stamp=$(ps -p "$PID" -o lstart= 2>/dev/null) || return 1
   [[ "$actual" == "$SAVED_BINARY" && "$stamp" == "$SAVED_STAMP" ]] || return 1
 }
+# Map wildcard binds to the matching loopback so the URL is usable locally.
+local_url() {
+  local bind=${ROUTER_BIND:-127.0.0.1:14673}
+  case "$bind" in 0.0.0.0:*) bind="127.0.0.1:${bind#0.0.0.0:}";; '[::]:'*) bind="[::1]:${bind#\[::\]:}";; esac
+  printf 'http://%s' "$bind"
+}
+address() {
+  local bind=${ROUTER_BIND:-127.0.0.1:14673} url
+  url=$(local_url)
+  if [[ "$url" == "http://$bind" ]]; then printf '%s' "$url"; else printf '%s (bound to %s)' "$url" "$bind"; fi
+}
 build() {
   if [[ "$PROFILE" == release ]]; then cargo build --release --locked; else cargo build --locked; fi
 }
 ensure_binary() { [[ -x "$BINARY" ]] || build; }
 start() {
-  if identity; then printf 'Already running (PID %s).\n' "$PID"; return; fi
+  if identity; then printf 'Already running (PID %s)%s.\n' "$PID" "${SAVED_ADDRESS:+ at $SAVED_ADDRESS}"; return; fi
   [[ -n "${ROUTER_MASTER_KEY:-}" ]] || fail 'Set ROUTER_MASTER_KEY or pass --env-file FILE; use keygen once and save the key'
   ensure_binary
   : > "$OUT"; : > "$ERR"
@@ -102,8 +114,9 @@ start() {
     fail "Startup failed; inspect $ERR (logs may contain configuration details)"
   fi
   SAVED_STAMP=$(ps -p "$PID" -o lstart=)
-  printf '%s\n%s\n%s\n' "$PID" "$SAVED_STAMP" "$BINARY" > "$PID_FILE"
-  printf 'Started PID %s. Logs: %s\n' "$PID" "$STATE_DIR"
+  SAVED_ADDRESS=$(address)
+  printf '%s\n%s\n%s\n%s\n' "$PID" "$SAVED_STAMP" "$BINARY" "$SAVED_ADDRESS" > "$PID_FILE"
+  printf 'Started PID %s at %s. Logs: %s\n' "$PID" "$SAVED_ADDRESS" "$STATE_DIR"
   printf 'Use health to check readiness; process startup alone does not prove readiness.\n'
 }
 stop() {
@@ -129,15 +142,11 @@ case "$ACTION" in
   start|stop|restart|rebuild)
     lock
     case "$ACTION" in start) start;; stop) stop;; restart) stop; start;; rebuild) stop; build; start;; esac;;
-  run) [[ -n "${ROUTER_MASTER_KEY:-}" ]] || fail 'Set ROUTER_MASTER_KEY or pass --env-file FILE'; ensure_binary; exec "$BINARY";;
-  status) if identity; then printf 'Running (PID %s).\n' "$PID"; else printf 'Not running (or process identity no longer matches).\n'; exit 1; fi;;
+  run) [[ -n "${ROUTER_MASTER_KEY:-}" ]] || fail 'Set ROUTER_MASTER_KEY or pass --env-file FILE'; ensure_binary; printf 'Running at %s (Ctrl+C to stop).\n' "$(address)"; exec "$BINARY";;
+  status) if identity; then printf 'Running (PID %s)%s.\n' "$PID" "${SAVED_ADDRESS:+ at $SAVED_ADDRESS}"; else printf 'Not running (or process identity no longer matches).\n'; exit 1; fi;;
   logs) for file in "$OUT" "$ERR"; do if [[ -f "$file" ]]; then printf '\n== %s ==\n' "$file"; tail -n 100 -- "$file"; fi; done;;
   health)
     command -v curl >/dev/null || fail 'health requires curl'
-    if [[ -z "$URL" ]]; then
-      bind=${ROUTER_BIND:-127.0.0.1:14673}
-      case "$bind" in 0.0.0.0:*) bind="127.0.0.1:${bind#0.0.0.0:}";; '[::]:'*) bind="[::1]:${bind#\[::\]:}";; esac
-      URL="http://$bind"
-    fi
+    [[ -n "$URL" ]] || URL=$(local_url)
     curl --fail --silent --show-error --max-time 5 "${URL%/}/readyz"; printf '\n';;
 esac

@@ -24,6 +24,7 @@ $LockStream = $null
 $Locked = $false
 $OriginalLocation = Get-Location
 $OriginalEnvironment = @{}
+$ManagedAddress = $null
 
 function Show-Help {
     @'
@@ -75,6 +76,19 @@ function Build-Binary {
 function Ensure-Binary {
     if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { Build-Binary }
 }
+# Map wildcard binds to the matching loopback so the URL is usable locally.
+function Get-LocalUrl {
+    $BindAddress = if ($env:ROUTER_BIND) { $env:ROUTER_BIND } else { '127.0.0.1:14673' }
+    'http://' + ($BindAddress -replace '^0\.0\.0\.0:', '127.0.0.1:' -replace '^\[::\]:', '[::1]:')
+}
+function Get-Address {
+    $BindAddress = if ($env:ROUTER_BIND) { $env:ROUTER_BIND } else { '127.0.0.1:14673' }
+    $LocalUrl = Get-LocalUrl
+    if ($LocalUrl -eq "http://$BindAddress") { $LocalUrl } else { "$LocalUrl (bound to $BindAddress)" }
+}
+function Format-Address {
+    if ($script:ManagedAddress) { " at $($script:ManagedAddress)" } else { '' }
+}
 function Lock-State {
     [IO.Directory]::CreateDirectory($StateDir) | Out-Null
     try {
@@ -92,6 +106,9 @@ function Get-ManagedProcess {
         if (-not [int]::TryParse([string]$Saved.pid, [ref]$ProcessId) -or $ProcessId -le 0 -or
             -not $Saved.binary -or -not $Saved.startedUtcTicks) { throw 'Invalid state' }
     } catch { throw 'Invalid process state; refusing to terminate a PID' }
+    # State files written before the address was recorded have no address property.
+    $SavedAddress = $Saved.PSObject.Properties['address']
+    $script:ManagedAddress = if ($null -ne $SavedAddress) { [string]$SavedAddress.Value } else { $null }
     $Process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($null -eq $Process) { return $null }
     try {
@@ -106,7 +123,7 @@ function Get-ManagedProcess {
 function Start-Router {
     $Existing = Get-ManagedProcess
     if ($null -ne $Existing) {
-        Write-Host "Already running (PID $($Existing.Id))."; $Existing.Dispose(); return
+        Write-Host "Already running (PID $($Existing.Id))$(Format-Address)."; $Existing.Dispose(); return
     }
     if (-not $env:ROUTER_MASTER_KEY) {
         throw 'Set ROUTER_MASTER_KEY or pass -EnvFile FILE; use keygen once and save the key'
@@ -118,9 +135,10 @@ function Start-Router {
         Start-Sleep -Seconds 1
         $Process.Refresh()
         if ($Process.HasExited) { throw "Startup failed; inspect $ErrLog (logs may contain configuration details)" }
-        $Saved = @{ pid = $Process.Id; binary = $Binary; startedUtcTicks = $Process.StartTime.ToUniversalTime().Ticks.ToString() }
+        $Address = Get-Address
+        $Saved = @{ pid = $Process.Id; binary = $Binary; startedUtcTicks = $Process.StartTime.ToUniversalTime().Ticks.ToString(); address = $Address }
         $Saved | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
-        Write-Host "Started PID $($Process.Id). Logs: $StateDir"
+        Write-Host "Started PID $($Process.Id) at $Address. Logs: $StateDir"
         Write-Host 'Use health to check readiness; process startup alone does not prove readiness.'
     } finally { $Process.Dispose() }
 }
@@ -168,13 +186,14 @@ try {
         'run' {
             if (-not $env:ROUTER_MASTER_KEY) { throw 'Set ROUTER_MASTER_KEY or pass -EnvFile FILE' }
             Ensure-Binary
+            Write-Host "Running at $(Get-Address) (Ctrl+C to stop)."
             & $Binary
             if ($LASTEXITCODE -ne 0) { throw "SparkRouter exited with code $LASTEXITCODE" }
         }
         'status' {
             $Process = Get-ManagedProcess
             if ($null -eq $Process) { Write-Host 'Not running (or process identity no longer matches).'; exit 1 }
-            Write-Host "Running (PID $($Process.Id))."; $Process.Dispose()
+            Write-Host "Running (PID $($Process.Id))$(Format-Address)."; $Process.Dispose()
         }
         'logs' {
             foreach ($File in @($OutLog,$ErrLog)) {
@@ -184,11 +203,7 @@ try {
             }
         }
         'health' {
-            if (-not $Url) {
-                $BindAddress = if ($env:ROUTER_BIND) { $env:ROUTER_BIND } else { '127.0.0.1:14673' }
-                $BindAddress = $BindAddress -replace '^0\.0\.0\.0:', '127.0.0.1:' -replace '^\[::\]:', '[::1]:'
-                $Url = "http://$BindAddress"
-            }
+            if (-not $Url) { $Url = Get-LocalUrl }
             $Response = Invoke-WebRequest -Uri ($Url.TrimEnd('/') + '/readyz') -TimeoutSec 5 -UseBasicParsing
             $Response.Content
         }
