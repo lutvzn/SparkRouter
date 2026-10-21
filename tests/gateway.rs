@@ -2384,6 +2384,8 @@ async fn openai_invalid_success_bodies_fall_back() -> TestResult {
         "7",
         "{}",
         r#"{"choices":null}"#,
+        // Field order alone must not make an array a completion envelope.
+        r#"[[],null,null]"#,
         r#"{"choices":[],"error":{"message":"failure"}}"#,
         r#"{"error":{"message":"failure"}}"#,
     ]

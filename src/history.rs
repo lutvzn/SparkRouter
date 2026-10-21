@@ -53,7 +53,7 @@ impl Usage {
             .unwrap_or_default()
     }
 
-    fn from_usage(usage: &Value) -> Self {
+    pub(crate) fn from_usage(usage: &Value) -> Self {
         let mut result = Self {
             input: usage
                 .get("prompt_tokens")

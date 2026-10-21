@@ -1,16 +1,17 @@
 use crate::{app::AppState, error::AppError, routing};
 use axum::{
-    Extension, Json,
-    extract::{State, rejection::JsonRejection},
+    Extension,
+    extract::{State, rejection::BytesRejection},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use serde_json::Value;
 
 pub(crate) async fn complete(
     State(state): State<AppState>,
     Extension(auth): Extension<crate::app::Authorization>,
     headers: axum::http::HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
+    payload: Result<Bytes, BytesRejection>,
 ) -> Result<Response, AppError> {
     execute(state, auth, headers, payload, false).await
 }
@@ -19,7 +20,7 @@ pub(crate) async fn systemone(
     State(state): State<AppState>,
     Extension(auth): Extension<crate::app::Authorization>,
     headers: axum::http::HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
+    payload: Result<Bytes, BytesRejection>,
 ) -> Result<Response, AppError> {
     execute(state, auth, headers, payload, true).await
 }
@@ -28,11 +29,11 @@ async fn execute(
     state: AppState,
     auth: crate::app::Authorization,
     headers: axum::http::HeaderMap,
-    payload: Result<Json<Value>, JsonRejection>,
+    payload: Result<Bytes, BytesRejection>,
     systemone: bool,
 ) -> Result<Response, AppError> {
     let started = std::time::Instant::now();
-    let Json(body) = payload.map_err(|error| AppError::RequestBody(error.status()))?;
+    let body = super::json_body(&headers, payload)?;
     if !body.is_object() {
         return Err(AppError::InvalidRequest(
             "Request must be a JSON object".into(),

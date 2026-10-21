@@ -3,8 +3,7 @@ use axum::response::Response;
 use serde_json::Value;
 
 use super::{
-    AttemptError, check_status, json_response, read_bounded, replace_model, request,
-    transport_error,
+    AttemptError, check_status, json_response, model_body, read_bounded, request, transport_error,
 };
 use crate::{
     crypto::Crypto,
@@ -19,9 +18,9 @@ pub async fn call(
     model: &str,
     body: &Value,
 ) -> Result<Response, AttemptError> {
-    let body = replace_model(body, model)?;
     let response = request(client, crypto, provider, reqwest::Method::POST, "systemone")?
-        .json(&body)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(model_body(body, model)?)
         .send()
         .await
         .map_err(transport_error)?;

@@ -106,6 +106,41 @@ pub fn replace_model(body: &Value, model: &str) -> Result<Value, AppError> {
     Ok(Value::Object(body))
 }
 
+/// [`replace_model`] serialized for the upstream request. The request object
+/// is written with its model swapped rather than deep-cloned first.
+pub(crate) fn model_body(body: &Value, model: &str) -> Result<Vec<u8>, AppError> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| AppError::InvalidRequest("Request body must be an object".into()))?;
+    let encoded = if object.contains_key("model") {
+        serde_json::to_vec(&WithModel { object, model })
+    } else {
+        // The API boundary requires a model; keep the inserted key's position exact.
+        serde_json::to_vec(&replace_model(body, model)?)
+    };
+    encoded.map_err(|_| AppError::Routing)
+}
+
+struct WithModel<'a> {
+    object: &'a serde_json::Map<String, Value>,
+    model: &'a str,
+}
+
+impl serde::Serialize for WithModel<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.object.len()))?;
+        for (key, value) in self.object {
+            if key == "model" {
+                map.serialize_entry(key, self.model)?;
+            } else {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
 #[derive(Debug)]
 pub enum AttemptError {
     Retryable,
@@ -746,6 +781,15 @@ fn json_response(status: StatusCode, body: Bytes) -> Response {
         .ok()
         .map(|value| crate::history::Usage::from_value(&value))
         .unwrap_or_default();
+    json_response_with_usage(status, body, usage)
+}
+
+/// [`json_response`] for an adapter that already parsed the usage.
+fn json_response_with_usage(
+    status: StatusCode,
+    body: Bytes,
+    usage: crate::history::Usage,
+) -> Response {
     let mut response = Response::new(Body::from(body));
     response.extensions_mut().insert(usage);
     *response.status_mut() = status;
@@ -922,6 +966,19 @@ mod tests {
         assert_eq!(replaced["custom"], original["custom"]);
         assert_eq!(original["model"], "combo");
         assert!(replace_model(&json!([]), "model").is_err());
+    }
+
+    #[test]
+    fn model_body_matches_the_replaced_request() {
+        let original = json!({"a":1, "model":"combo", "messages":[{"role":"user","content":"hi"}], "z":{"model":"nested"}});
+        for body in [original.clone(), json!({"messages":[]}), json!({"zz":1})] {
+            assert_eq!(
+                model_body(&body, "real/model").unwrap(),
+                serde_json::to_vec(&replace_model(&body, "real/model").unwrap()).unwrap()
+            );
+        }
+        assert_eq!(original["model"], "combo");
+        assert!(model_body(&json!([]), "model").is_err());
     }
 
     #[tokio::test]

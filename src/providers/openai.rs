@@ -8,8 +8,8 @@ use serde_json::Value;
 use super::sse::SseDecoder;
 use super::transport_error;
 use super::{
-    AttemptError, ResponseStream, check_sse, check_status, json_response, read_bounded,
-    replace_model, request, streaming_response,
+    AttemptError, ResponseStream, check_sse, check_status, json_response_with_usage, model_body,
+    read_bounded, request, streaming_response,
 };
 use crate::{crypto::Crypto, db::providers::Provider};
 
@@ -20,7 +20,6 @@ pub async fn call(
     model: &str,
     body: &Value,
 ) -> Result<Response, AttemptError> {
-    let body = replace_model(body, model)?;
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let response = request(
         client,
@@ -29,7 +28,8 @@ pub async fn call(
         reqwest::Method::POST,
         "chat/completions",
     )?
-    .json(&body)
+    .header(reqwest::header::CONTENT_TYPE, "application/json")
+    .body(model_body(body, model)?)
     .send()
     .await
     .map_err(transport_error)?;
@@ -45,20 +45,29 @@ pub async fn call(
         let bytes = read_bounded(response).await?;
         // Validate the completion envelope, but preserve original bytes and
         // unknown fields rather than enforcing a full provider response schema.
-        let completion: Value =
-            serde_json::from_slice(&bytes).map_err(|_| AttemptError::Retryable)?;
-        if completion
-            .get("choices")
-            .and_then(Value::as_array)
-            .is_none()
-            || completion
-                .get("error")
-                .is_some_and(|error| !error.is_null())
-        {
+        if bytes.trim_ascii_start().first() != Some(&b'{') {
             return Err(AttemptError::Retryable);
         }
-        Ok(json_response(status, bytes))
+        let completion: Completion =
+            serde_json::from_slice(&bytes).map_err(|_| AttemptError::Retryable)?;
+        if completion.error.is_some() {
+            return Err(AttemptError::Retryable);
+        }
+        let usage = crate::history::Usage::from_usage(&completion.usage);
+        Ok(json_response_with_usage(status, bytes, usage))
     }
+}
+
+/// The envelope fields a completion is checked for. Choices are skipped
+/// unparsed; a null `error` is the same as none.
+#[derive(serde::Deserialize)]
+struct Completion {
+    #[allow(dead_code)]
+    choices: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    error: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    usage: Value,
 }
 
 /// Raw OpenAI SSE passthrough with terminal-event tracking.
