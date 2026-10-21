@@ -190,9 +190,12 @@ drop does not establish a new hint or re-enter fallback.
 
 `api/chat.rs` and `web/test.rs` pass authenticated caller context and one selected
 session header into routing; no bearer header is retained or forwarded. Basic
-uses explicit header/body IDs; Smart additionally fingerprints consecutive
-initial system/developer messages, the first user message, and tools using exact
-JSON content (ordered object maps). Serialized fingerprint material is temporary
+uses explicit header/body IDs, then the provider-native `prompt_cache_key` and
+Responses `conversation` (ignored, not rejected, when unusable). Smart
+additionally fingerprints consecutive initial system/developer messages, the
+first user message, and tools (for Responses: `instructions`, the initial
+system/developer `input` items, the first user item or string `input`, and tools)
+using exact JSON content (ordered object maps). Serialized fingerprint material is temporary
 and zeroizing. IDs are bounded/validated with sanitized errors, never logged.
 Off/Sticky ignore session fields for routing. Header precedence and accepted
 body fields are documented in the README. Smart requires a first user message
@@ -549,7 +552,10 @@ pending streams; failures include errors, interruptions, and cancellations.
 Unavailable database/history reads render unknown totals with a sanitized notice;
 the history summary has a two-second deadline. No monitoring worker is used.
 It reads retained history and displays four usage summary cards (input/output/
-cache-read tokens, USD spend) plus the ten providers ranked by distinct requests.
+cache-read tokens, USD spend) plus the ten providers ranked by distinct requests
+and, for the ten busiest `combo/<name>` models, cache hits among requests that
+reported cache usage, the cached share of their input, and the combo's current
+cache-awareness setting (joined by name; deleted combos are labelled).
 It performs summary and leaderboard reads in SQL read transactions; it does not
 call providers or use a worker. Pending streams are excluded. Only the selected
 successful attempt contributes usage, preventing fallback retries from being

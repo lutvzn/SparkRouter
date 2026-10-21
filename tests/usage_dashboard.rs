@@ -445,3 +445,78 @@ async fn same_provider_retries_are_deduplicated_and_explicit_zero_is_known() {
     assert_eq!(empty.cost_usd, None);
     assert!(empty.providers.is_empty());
 }
+
+#[tokio::test]
+async fn prompt_cache_by_combo_counts_reporting_requests_and_shows_cached_tokens() {
+    use db::combos::{self, AffinityMode, AffinityOptions, Strategy};
+    let state = state().await;
+    combos::create_with_options(
+        &state.db,
+        "coding",
+        Strategy::Priority,
+        AffinityOptions {
+            mode: AffinityMode::Smart,
+            sticky_minutes: 9,
+        },
+    )
+    .await
+    .unwrap();
+    // (id, model, outcome, input, cached)
+    for (id, model, outcome, input, cached) in [
+        ("hit", "combo/coding", "success", Some(1000), Some(900)),
+        ("miss", "combo/coding", "success", Some(1000), Some(0)),
+        ("unreported", "combo/coding", "success", Some(1000), None),
+        ("failed", "combo/coding", "error", None, None),
+        (
+            "pending",
+            "combo/coding",
+            history::OUTCOME_STREAMING,
+            Some(9),
+            Some(9),
+        ),
+        ("gone", "combo/deleted", "success", Some(10), Some(5)),
+        ("direct", "openai/gpt", "success", Some(10), Some(10)),
+    ] {
+        let mut row = record(id);
+        row.model = model.into();
+        row.outcome = outcome.into();
+        row.input_tokens = input;
+        history::save_with_usage(
+            &state.db,
+            &row,
+            history::UsageMetrics {
+                cached_tokens: cached,
+                cost_usd: None,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+    let combos = usage::overview(&state.db).await.unwrap().combos;
+    assert_eq!(combos.len(), 2, "direct model IDs are not combos");
+    let coding = &combos[0];
+    assert_eq!(coding.name, "coding");
+    assert_eq!(coding.affinity_mode.as_deref(), Some("smart"));
+    assert_eq!(coding.affinity_minutes, Some(9));
+    // The pending stream is excluded; the failure counts as a request only.
+    assert_eq!((coding.requests, coding.reported, coding.hits), (4, 2, 1));
+    // Input is summed over reporting requests only: 900 of 2000.
+    assert_eq!(
+        (coding.cached_tokens, coding.input_tokens),
+        (Some(900), Some(2000))
+    );
+    assert_eq!(combos[1].name, "deleted");
+    assert_eq!(combos[1].affinity_mode, None);
+
+    let router = app::router(state.clone());
+    let home = get_page(&router, "/").await;
+    assert!(home.contains("<code>combo/coding</code></td><td>Smart · 9 min</td>"));
+    assert!(home.contains("50% · 1 of 2 reporting requests"));
+    assert!(home.contains("45% of input tokens"));
+    assert!(home.contains("Combo no longer exists"));
+    let history_page = get_page(&router, "/history").await;
+    assert!(history_page.contains(">Cached</th>"));
+    assert!(history_page.contains("<td class=\"nowrap\">900 (90%)</td>"));
+    assert!(history_page.contains("<td class=\"nowrap\">0 (0%)</td>"));
+}

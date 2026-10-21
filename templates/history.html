@@ -26,7 +26,7 @@
     <div><dt>Reported tokens in / out</dt><dd>{{ stats.input_tokens }} / {{ stats.output_tokens }}</dd></div>
     <div><dt>Average latency</dt><dd>{{ stats.average_latency_ms }} ms</dd></div>
   </dl>
-  <p class="hint">Figures cover finished requests only; token sums include reported usage only. A dash means unknown usage, not zero. Only the newest {{ max_retained }} requests are kept; older rows are deleted as new ones arrive. Clearing removes the retained history permanently.</p>
+  <p class="hint">Figures cover finished requests only; token sums include reported usage only. A dash means unknown usage, not zero. Cached shows the input tokens the provider served from its prompt cache and their share of the input; the attempts list shows whether cache-awareness picked the starting step. Only the newest {{ max_retained }} requests are kept; older rows are deleted as new ones arrive. Clearing removes the retained history permanently.</p>
 </section>
 {% if rows.is_empty() %}
 <p class="empty">No requests recorded yet.</p>
@@ -43,6 +43,7 @@
       <th scope="col">Status</th>
       <th scope="col">Latency</th>
       <th scope="col">Tokens</th>
+      <th scope="col" title="Cached input tokens reported by the provider, and their share of the input">Cached</th>
       <th scope="col">Attempts</th>
       <th scope="col">Bodies</th>
     </tr>
@@ -58,6 +59,7 @@
       <td>{{ row.status }}</td>
       <td class="nowrap num">{{ row.latency_ms }} ms</td>
       <td>{{ row.tokens }}</td>
+      <td class="nowrap">{{ row.cached }}</td>
       <td>
         {% if row.attempts.is_empty() %}
         <span class="hint">none</span>

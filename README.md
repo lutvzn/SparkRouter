@@ -190,7 +190,7 @@ Each combo has one **Cache-awareness** dropdown:
 | --- | --- |
 | **Off** (default) | Use the combo's Priority, Round robin, or Random strategy unchanged |
 | **Basic** | Reuse the last successful connection/model for the same explicit session ID |
-| **Smart** | Same as Basic; without an explicit ID, fingerprint the initial consecutive system/developer messages, first user message, and tool definitions |
+| **Smart** | Same as Basic; without an explicit ID, fingerprint the start of the prompt: for chat, the initial consecutive system/developer messages, first user message, and tool definitions; for `/v1/responses`, `instructions`, the initial system/developer `input` items, the first user item (or a string `input`), and tools |
 | **Sticky** | Reuse this caller's last successful connection/model for this combo, regardless of session or prompt |
 
 Set **Affinity timeout (minutes)** on that combo to **1–1440 minutes** (default 5).
@@ -216,7 +216,11 @@ Supported header precedence is `X-SparkRouter-Session-Id`,
 If the selected header is absent/blank, string `session_id`, `conversation_id`,
 or `chat_id` fields in the request body, then in its `metadata` object, are checked
 in that order. Blank/null body fields mean absent; other types, control characters,
-or IDs longer than 256 bytes are rejected in Basic/Smart. IDs are trimmed and
+or IDs longer than 256 bytes are rejected in Basic/Smart. After those, the
+provider-native keys are used: OpenAI's `prompt_cache_key`, then the Responses
+API's `conversation` (a string or `{"id": ...}`). Both are forwarded upstream
+unchanged, and an unusable value there is ignored rather than rejected, since the
+upstream validates its own fields. IDs are trimmed and
 case-sensitive. Header IDs are not forwarded upstream. Body extension fields are
 preserved by the OpenAI adapter, so use a header if your upstream rejects them.
 No identifiers are extracted from prompt text, tool-call IDs, `user`, or
@@ -228,7 +232,26 @@ environment key share one namespace, and unauthenticated clients share another;
 use separate generated keys for caller isolation. Smart fingerprints preserve
 exact message/tool content but ignore JSON object-key ordering. Identical initial
 prompts can share a hint; this is not proof that they are the same conversation.
-Without a first user message, Smart falls back to normal selection.
+Without a first user message, Smart falls back to normal selection. A Responses
+request that continues with `previous_response_id` sends only the new turn, so
+its fingerprint changes every turn; send a session ID, `prompt_cache_key`, or
+`conversation` for those.
+
+Cache-awareness only places requests; the provider decides what it caches. When
+chat requests are translated for **Anthropic**-protocol connections, `cache_control`
+breakpoints are kept so that prompt caching works there: on a content part, on a
+message (applied to that message's last block), or on a tool definition, as
+OpenRouter and LiteLLM accept them. The value (for example
+`{"type":"ephemeral","ttl":"1h"}`) is forwarded unchanged; nothing is added to
+requests that do not set it. OpenAI-protocol steps forward the request as is,
+so a strict OpenAI-compatible upstream may reject the extra field.
+
+To check whether it works, the History page shows each request's **Cached**
+input tokens and their share of the input, and the attempts list states whether
+cache-awareness chose the starting step. Overview's **Prompt cache by combo**
+shows, for the ten busiest combos, the share of requests with cached tokens and
+the cached share of input tokens, counting only requests whose provider reported
+cache usage, next to the combo's current mode and timeout.
 
 This is **placement affinity for upstream prompt caches**, not response caching,
 cache-hit prediction, or a guarantee of lower bills. It works with logging Off
@@ -527,7 +550,7 @@ SystemOne model refresh reads `{ "models": [{ "name": "jev-latest", ... }] }`.
 `/v1/models` includes these qualified IDs alongside chat models; it is a shared
 catalog, not a guarantee that every model supports every endpoint. The Test page's **SystemOne** mode sends native evaluations through
 `POST /test/systemone`; its Chat mode remains chat-only. Basic session affinity and Sticky work for evaluation combos;
-Smart without a session ID has no chat-message fingerprint and uses the strategy.
+Smart without a session ID has no message fingerprint and uses the strategy.
 
 
 Vendors sharing a protocol use the same adapter through configuration; native media protocols have explicit translators. The dashboard includes OmniRoute's API-key chat presets that use the **OpenAI** or **Anthropic** adapters, including OpenRouter, Groq, DeepSeek, Together, and Fireworks. Local OpenAI-compatible servers use the **OpenAI** protocol too. Include any required API prefix (usually `/v1`) in the base URL. Trailing slashes are normalized; URL credentials, query strings, and fragments are rejected. HTTP is supported for local servers. An empty API key is allowed for unauthenticated local servers.
@@ -669,7 +692,8 @@ backups. Off pauses new Overview totals but does not suppress operational
 **Overview** (`/`) uses that same retained history, including finished API and
 test-chat requests; pending streams are excluded. Its four usage cards show
 input, output, cache-read, and USD spend, with a top-ten provider
-leaderboard ranked by requests (distinct requests per provider). A retry is
+leaderboard ranked by requests (distinct requests per provider) and a
+**Prompt cache by combo** table for the ten busiest combos. A retry is
 counted as an attempt, not an additional request for the leaderboard; usage is
 from the selected successful attempt only, so retries are not double-counted.
 Cache reads are a subset of input, not an additional input quantity. Missing
@@ -870,4 +894,4 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
-Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking, server-tool, and other auxiliary content blocks (and citation metadata) are not exposed as answer text. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.
+Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; `cache_control` on parts, messages, and tools is kept; unknown extension fields pass through. Thinking, server-tool, and other auxiliary content blocks (and citation metadata) are not exposed as answer text. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.

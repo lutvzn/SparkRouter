@@ -25,7 +25,7 @@ use sparkrouter::{
     config::{Config, DashboardLogin},
     crypto::Crypto,
     db::{
-        combos::{self, Category, Strategy},
+        combos::{self, AffinityMode, AffinityOptions, Category, Strategy},
         connection_models::{self, StoredModel},
         providers as provider_db,
     },
@@ -340,6 +340,66 @@ async fn targets_without_the_endpoint_fall_back_but_invalid_requests_stop() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(invalid.hits.count(), 1);
     assert_eq!(good.hits.count(), 2);
+}
+
+#[tokio::test]
+async fn cache_awareness_keeps_responses_conversations_on_one_target() {
+    let state = test_state().await;
+    let a = spawn_upstream(responses_echo()).await;
+    let b = spawn_upstream(responses_echo()).await;
+    save_provider(&state, "a", &a.url(), Protocol::OpenAi).await;
+    save_provider(&state, "b", &b.url(), Protocol::OpenAi).await;
+    for (name, mode) in [
+        ("smart", AffinityMode::Smart),
+        ("basic", AffinityMode::Basic),
+    ] {
+        let combo = combos::create_with_options(
+            &state.db,
+            name,
+            Strategy::RoundRobin,
+            AffinityOptions {
+                mode,
+                sticky_minutes: 7,
+            },
+        )
+        .await
+        .unwrap();
+        for provider in ["a", "b"] {
+            combos::add_step(&state.db, &combo.id, provider, provider)
+                .await
+                .unwrap();
+        }
+    }
+    let target = |body: Value| {
+        let state = state.clone();
+        async move {
+            let response = send(&state, post_json("/v1/responses", &body)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await["upstream_saw"]["model"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    // Smart: a continued conversation keeps its start, so it stays put even
+    // though round robin would move the next request to the other step.
+    let start = json!([{"role":"user","content":"plan a trip"}]);
+    let mut continued = start.clone();
+    continued.as_array_mut().unwrap().extend([
+        json!({"role":"assistant","content":"where to?"}),
+        json!({"role":"user","content":"Lisbon"}),
+    ]);
+    let first =
+        target(json!({"model":"combo/smart", "instructions":"be brief", "input":start})).await;
+    let second =
+        target(json!({"model":"combo/smart", "instructions":"be brief", "input":continued})).await;
+    assert_eq!(first, second);
+    // Basic: prompt_cache_key is a session ID even when the prompts differ.
+    let keyed =
+        |input: &str| json!({"model":"combo/basic", "input":input, "prompt_cache_key":"user-7"});
+    let first = target(keyed("one")).await;
+    assert_eq!(target(keyed("two")).await, first);
+    assert_eq!(target(keyed("three")).await, first);
 }
 
 const STREAM: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n";

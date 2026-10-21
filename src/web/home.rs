@@ -6,7 +6,10 @@ use axum::{extract::State, response::Html};
 use super::render;
 use crate::{
     app::AppState,
-    db::usage::{self, Overview, ProviderTotals},
+    db::{
+        combos::AffinityMode,
+        usage::{self, ComboCache, Overview, ProviderTotals},
+    },
     error::AppError,
 };
 
@@ -29,6 +32,15 @@ struct Home {
     cost_coverage: String,
     has_data: bool,
     providers: Vec<ProviderView>,
+    combos: Vec<ComboCacheView>,
+}
+
+struct ComboCacheView {
+    name: String,
+    affinity: String,
+    requests: String,
+    hit_rate: String,
+    cached_share: String,
 }
 
 struct ProviderView {
@@ -104,6 +116,45 @@ fn build_home(data: Overview) -> Home {
             .take(10)
             .map(|p| provider_view(p, total))
             .collect(),
+        combos: data.combos.into_iter().map(combo_cache_view).collect(),
+    }
+}
+
+fn percent(part: i64, whole: i64) -> i64 {
+    (part * 100 / whole).clamp(0, 100)
+}
+
+fn combo_cache_view(c: ComboCache) -> ComboCacheView {
+    let affinity = match c.affinity_mode.as_deref().map(AffinityMode::parse) {
+        None => "Combo no longer exists".to_owned(),
+        Some(Ok(AffinityMode::Off)) => "Cache-awareness off".to_owned(),
+        Some(Ok(mode)) => format!(
+            "{} · {} min",
+            mode.label(),
+            c.affinity_minutes.unwrap_or_default()
+        ),
+        Some(Err(_)) => "Unknown mode".to_owned(),
+    };
+    ComboCacheView {
+        name: c.name,
+        affinity,
+        requests: number(c.requests),
+        hit_rate: if c.reported > 0 {
+            format!(
+                "{}% · {} of {} reporting requests",
+                percent(c.hits, c.reported),
+                number(c.hits),
+                number(c.reported)
+            )
+        } else {
+            "Not reported".to_owned()
+        },
+        cached_share: match (c.cached_tokens, c.input_tokens) {
+            (Some(cached), Some(input)) if input > 0 => {
+                format!("{}% of input tokens", percent(cached, input))
+            }
+            _ => "—".to_owned(),
+        },
     }
 }
 
@@ -219,6 +270,7 @@ mod tests {
             cache_known: 0,
             cost_known: 0,
             providers: vec![],
+            combos: vec![],
         });
         let html = empty.render().expect("render empty overview");
         assert!(html.contains("No requests yet"));
@@ -244,9 +296,46 @@ mod tests {
                 usage_requests: 0,
                 cost_known: 0,
             }],
+            combos: vec![],
         });
         let html = populated.render().expect("render overview");
         assert!(!html.contains("<provider>"));
         assert!(html.contains("Reported for 0 of 1 requests"));
+        assert!(!html.contains("id=\"cache-heading\""));
+    }
+
+    #[test]
+    fn combo_cache_rates_count_only_reporting_requests() {
+        let combo = |mode: Option<&str>, reported, hits, cached, input| ComboCache {
+            name: "<coding>".into(),
+            affinity_mode: mode.map(str::to_owned),
+            affinity_minutes: mode.map(|_| 5),
+            requests: 12,
+            reported,
+            hits,
+            cached_tokens: cached,
+            input_tokens: input,
+        };
+        let view = combo_cache_view(combo(Some("smart"), 8, 6, Some(3000), Some(4000)));
+        assert_eq!(view.affinity, "Smart · 5 min");
+        assert_eq!(view.hit_rate, "75% · 6 of 8 reporting requests");
+        assert_eq!(view.cached_share, "75% of input tokens");
+        let view = combo_cache_view(combo(Some("off"), 0, 0, None, None));
+        assert_eq!(view.affinity, "Cache-awareness off");
+        assert_eq!(view.hit_rate, "Not reported");
+        assert_eq!(view.cached_share, "—");
+        assert_eq!(
+            combo_cache_view(combo(None, 1, 0, Some(0), Some(0))).affinity,
+            "Combo no longer exists"
+        );
+        let html = build_home(Overview {
+            requests: 12,
+            combos: vec![combo(Some("basic"), 8, 6, Some(3000), Some(4000))],
+            ..Overview::default()
+        })
+        .render()
+        .expect("render combo cache");
+        assert!(html.contains("id=\"cache-heading\""));
+        assert!(html.contains("combo/&lt;coding&gt;") || html.contains("combo/&#60;coding&#62;"));
     }
 }

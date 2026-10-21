@@ -211,7 +211,74 @@ fn explicit_session<'a>(
             }
         }
     }
+    // Provider-native conversation keys: OpenAI's `prompt_cache_key` and the
+    // Responses `conversation` (an ID or `{"id": ...}`). The upstream validates
+    // its own fields, so an unusable value is ignored here rather than rejected.
+    let conversation = body
+        .get("conversation")
+        .and_then(|value| value.as_str().or_else(|| value.get("id")?.as_str()));
+    for value in [
+        body.get("prompt_cache_key").and_then(Value::as_str),
+        conversation,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(Some(value)) = session_value(value) {
+            return Ok(Some(value));
+        }
+    }
     Ok(None)
+}
+
+fn role(item: &Value) -> Option<&str> {
+    item.get("role").and_then(Value::as_str)
+}
+
+/// The leading system/developer items and the first user item of a conversation.
+fn conversation_start(items: &[Value]) -> Option<(Vec<&Value>, &Value)> {
+    let initial = items
+        .iter()
+        .take_while(|item| matches!(role(item), Some("system" | "developer")))
+        .collect();
+    let user = items.iter().find(|item| role(item) == Some("user"))?;
+    Some((initial, user))
+}
+
+/// The stable start of a prompt, serialized for Smart fingerprinting. Exact
+/// content and all fields are kept; serde_json's default ordered object maps
+/// make object key order immaterial.
+fn prompt_start(endpoint: Endpoint, body: &Value) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
+    let tools = body.get("tools");
+    let serialized = if endpoint == Endpoint::Responses {
+        // Responses carry the prompt in `instructions` and `input`: the first
+        // user message as a string, or a list of conversation items.
+        let instructions = body.get("instructions");
+        match body.get("input") {
+            Some(Value::String(text)) => {
+                serde_json::to_vec(&(instructions, Vec::<&Value>::new(), text, tools))
+            }
+            Some(Value::Array(items)) => {
+                let Some((initial, user)) = conversation_start(items) else {
+                    return Ok(None);
+                };
+                serde_json::to_vec(&(instructions, initial, user, tools))
+            }
+            _ => return Ok(None),
+        }
+    } else {
+        let Some((initial, user)) = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| conversation_start(messages))
+        else {
+            return Ok(None);
+        };
+        serde_json::to_vec(&(initial, user, tools))
+    };
+    serialized
+        .map(|bytes| Some(Zeroizing::new(bytes)))
+        .map_err(|_| AppError::Routing)
 }
 
 pub(crate) fn binding(
@@ -232,31 +299,10 @@ pub(crate) fn binding(
                     crypto.affinity_fingerprint(session.as_bytes())?
                 )
             } else if mode == AffinityMode::Smart {
-                let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+                let Some(start) = prompt_start(context.endpoint, body)? else {
                     return Ok(None);
                 };
-                let initial: Vec<&Value> = messages
-                    .iter()
-                    .take_while(|message| {
-                        matches!(
-                            message.get("role").and_then(Value::as_str),
-                            Some("system" | "developer")
-                        )
-                    })
-                    .collect();
-                let Some(user) = messages
-                    .iter()
-                    .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-                else {
-                    return Ok(None);
-                };
-                // Preserve all message/tool fields and exact content. serde_json's
-                // default ordered object maps make object key order immaterial.
-                let bytes = Zeroizing::new(
-                    serde_json::to_vec(&(initial, user, body.get("tools")))
-                        .map_err(|_| AppError::Routing)?,
-                );
-                format!("prompt:{}", crypto.affinity_fingerprint(&bytes)?)
+                format!("prompt:{}", crypto.affinity_fingerprint(&start)?)
             } else {
                 return Ok(None);
             }
@@ -478,6 +524,87 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_native_conversation_keys_are_session_ids() {
+        let crypto = crypto();
+        let context = RequestContext::default();
+        let basic = combo(AffinityMode::Basic);
+        let key = |body: Value| {
+            binding(&basic, &context, &crypto, &body)
+                .unwrap()
+                .map(|b| b.key)
+        };
+        let session = key(json!({"session_id":"abc"})).unwrap();
+        assert!(key(json!({"prompt_cache_key":"abc"})) == Some(session.clone()));
+        assert!(key(json!({"conversation":"abc"})) == Some(session.clone()));
+        assert!(key(json!({"conversation":{"id":"abc"}})) == Some(session.clone()));
+        // Gateway fields win over provider-native ones, and the cache key
+        // over the conversation.
+        assert!(
+            key(json!({"session_id":"abc", "prompt_cache_key":"other"})) == Some(session.clone())
+        );
+        assert!(key(json!({"prompt_cache_key":"abc", "conversation":"other"})) == Some(session));
+        // Unusable provider-native values are ignored, not rejected.
+        for body in [
+            json!({"prompt_cache_key":12}),
+            json!({"prompt_cache_key":"  "}),
+            json!({"prompt_cache_key":"x".repeat(MAX_SESSION_BYTES + 1)}),
+            json!({"conversation":{"id":7}}),
+            json!({"conversation":null}),
+        ] {
+            assert!(
+                binding(&basic, &context, &crypto, &body).unwrap().is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_fingerprints_the_start_of_responses_prompts() {
+        let crypto = crypto();
+        let context = RequestContext::default().for_endpoint(Endpoint::Responses);
+        let smart = combo(AffinityMode::Smart);
+        let key = |body: &Value| {
+            binding(&smart, &context, &crypto, body)
+                .unwrap()
+                .map(|b| b.key)
+        };
+        let body = json!({"instructions":"rules", "tools":[{"type":"function","name":"a"}], "input":[
+            {"role":"developer","content":"style"},
+            {"role":"user","content":[{"type":"input_text","text":"question"}]}
+        ]});
+        let first = key(&body).unwrap();
+        let mut next = body.clone();
+        next["input"].as_array_mut().unwrap().extend([
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}),
+            json!({"type":"function_call_output","call_id":"c","output":"x"}),
+            json!({"role":"user","content":"follow-up"}),
+        ]);
+        assert!(key(&next) == Some(first.clone()));
+        for change in ["instructions", "developer", "user", "tools"] {
+            let mut changed = next.clone();
+            match change {
+                "instructions" => changed["instructions"] = json!("other"),
+                "developer" => changed["input"][0]["content"] = json!("other"),
+                "user" => changed["input"][1]["content"] = json!("other"),
+                _ => changed["tools"] = json!([]),
+            }
+            assert!(key(&changed) != Some(first.clone()), "{change}");
+        }
+        let text = key(&json!({"instructions":"rules", "input":"question"})).unwrap();
+        assert!(key(&json!({"instructions":"rules", "input":"question"})) == Some(text.clone()));
+        assert!(key(&json!({"instructions":"other", "input":"question"})) != Some(text));
+        assert!(key(&json!({"input":[{"role":"developer","content":"only rules"}]})).is_none());
+        assert!(key(&json!({"instructions":"rules"})).is_none());
+        // The chat fingerprint still reads `messages`, not `input`.
+        let chat = RequestContext::default();
+        assert!(
+            binding(&smart, &chat, &crypto, &json!({"input":"question"}))
+                .unwrap()
+                .is_none()
         );
     }
 

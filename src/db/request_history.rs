@@ -100,9 +100,11 @@ pub struct ProviderSnapshot {
 }
 
 /// A stored [`Record`] plus the `created_at` timestamp the database assigned
-/// on save; timestamps are never supplied by the caller.
+/// on save (timestamps are never supplied by the caller) and its reported
+/// cached input tokens.
 pub struct StoredRecord {
     pub created_at: String,
+    pub cached_tokens: Option<i64>,
     pub record: Record,
 }
 
@@ -468,7 +470,7 @@ pub async fn list_page(
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query(
         "SELECT id, source, model, streaming, outcome, status, latency_ms,
-                input_tokens, output_tokens, created_at
+                input_tokens, output_tokens, cached_tokens, created_at
          FROM request_history
          ORDER BY created_at DESC, rowid DESC
          LIMIT ? OFFSET ?",
@@ -481,6 +483,7 @@ pub async fn list_page(
     for row in &rows {
         records.push(StoredRecord {
             created_at: row.try_get("created_at")?,
+            cached_tokens: row.try_get("cached_tokens")?,
             record: Record {
                 id: row.try_get("id")?,
                 source: row.try_get("source")?,

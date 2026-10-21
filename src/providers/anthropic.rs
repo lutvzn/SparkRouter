@@ -72,6 +72,28 @@ fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, AppErro
         .ok_or_else(|| invalid("Missing or invalid message/tool field"))
 }
 
+/// Copy a client's prompt-cache breakpoint (`cache_control`, as OpenRouter and
+/// LiteLLM accept it on OpenAI-format parts, messages, and tools) onto the
+/// translated block. Anthropic caches only up to marked blocks, so dropping it
+/// would silently disable prompt caching. The value is forwarded unchanged.
+fn keep_cache_control(mut block: Value, source: &Value) -> Result<Value, AppError> {
+    if let Some(marker) = source.get("cache_control").filter(|value| !value.is_null()) {
+        if !marker.is_object() {
+            return Err(invalid("cache_control must be an object"));
+        }
+        block["cache_control"] = marker.clone();
+    }
+    Ok(block)
+}
+
+/// Apply a message-level `cache_control` to the last block that message produced.
+fn mark_last(parts: &mut [Value], message: &Value) -> Result<(), AppError> {
+    if let Some(last) = parts.last_mut() {
+        *last = keep_cache_control(std::mem::take(last), message)?;
+    }
+    Ok(())
+}
+
 fn content_parts(content: &Value, images: bool) -> Result<Vec<Value>, AppError> {
     if let Some(text) = content.as_str() {
         return Ok(vec![json!({"type":"text", "text":text})]);
@@ -82,7 +104,7 @@ fn content_parts(content: &Value, images: bool) -> Result<Vec<Value>, AppError> 
     parts
         .iter()
         .map(|part| {
-            match part.get("type").and_then(Value::as_str) {
+            let block = match part.get("type").and_then(Value::as_str) {
                 Some("text") => Ok(json!({"type":"text", "text":required_string(part, "text")?})),
                 Some("image_url") if images => {
                     let image = part
@@ -121,7 +143,8 @@ fn content_parts(content: &Value, images: bool) -> Result<Vec<Value>, AppError> 
                     Ok(json!({"type":"image", "source":source}))
                 }
                 _ => Err(invalid("Unsupported message content part for Anthropic")),
-            }
+            }?;
+            keep_cache_control(block, part)
         })
         .collect()
 }
@@ -278,7 +301,9 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
         }
         let content = message.get("content").unwrap_or(&Value::Null);
         if role == "system" {
-            system.extend(content_parts(content, false)?);
+            let mut parts = content_parts(content, false)?;
+            mark_last(&mut parts, message)?;
+            system.extend(parts);
             continue;
         }
         let (role, mut parts) = match role {
@@ -322,6 +347,7 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
                 parts.push(json!({"type":"tool_use", "id":required_string(call, "id")?, "name":required_string(function, "name")?, "input":input}));
             }
         }
+        mark_last(&mut parts, message)?;
         if let Some(last) = converted.last_mut().filter(|last| last["role"] == role) {
             last["content"]
                 .as_array_mut()
@@ -373,7 +399,7 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
             if let Some(description) = function.get("description") {
                 target.insert("description".into(), description.clone());
             }
-            converted.push(Value::Object(target));
+            converted.push(keep_cache_control(Value::Object(target), tool)?);
         }
         output.insert("tools".into(), Value::Array(converted));
     }
@@ -894,6 +920,50 @@ mod tests {
             json!({"type":"any", "disable_parallel_tool_use":true})
         );
         assert_eq!(translated["custom_extension"], request["custom_extension"]);
+    }
+
+    #[test]
+    fn keeps_prompt_cache_breakpoints_on_parts_messages_and_tools() {
+        let hour = json!({"type":"ephemeral", "ttl":"1h"});
+        let request = json!({"messages":[
+            {"role":"system", "content":[{"type":"text", "text":"Rules", "cache_control":{"type":"ephemeral"}}]},
+            {"role":"system", "content":"More rules", "cache_control":hour},
+            {"role":"user", "content":[{"type":"text", "text":"Long document"}, {"type":"image_url", "image_url":{"url":"https://example.test/a.png"}, "cache_control":{"type":"ephemeral"}}]},
+            {"role":"assistant", "content":"ok", "tool_calls":[{"id":"call_1", "type":"function", "function":{"name":"look", "arguments":"{}"}}], "cache_control":{"type":"ephemeral"}},
+            {"role":"tool", "tool_call_id":"call_1", "content":"result", "cache_control":{"type":"ephemeral"}},
+            {"role":"user", "content":"Question"}
+        ], "tools":[
+            {"type":"function", "function":{"name":"look"}},
+            {"type":"function", "function":{"name":"read"}, "cache_control":{"type":"ephemeral"}}
+        ]});
+        let translated = translate_request(&request, "claude").unwrap();
+        let ephemeral = json!({"type":"ephemeral"});
+        assert_eq!(translated["system"][0]["cache_control"], ephemeral);
+        assert_eq!(translated["system"][1]["cache_control"], hour);
+        let messages = &translated["messages"];
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(messages[0]["content"][1]["type"], "image");
+        assert_eq!(messages[0]["content"][1]["cache_control"], ephemeral);
+        // A message-level marker lands on that message's last block.
+        assert!(messages[1]["content"][0].get("cache_control").is_none());
+        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][1]["cache_control"], ephemeral);
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["cache_control"], ephemeral);
+        assert!(messages[2]["content"][1].get("cache_control").is_none());
+        assert!(translated["tools"][0].get("cache_control").is_none());
+        assert_eq!(translated["tools"][1]["cache_control"], ephemeral);
+        // Unmarked requests gain no breakpoints.
+        let plain = translate_request(
+            &json!({"messages":[{"role":"user", "content":"hi"}]}),
+            "claude",
+        )
+        .unwrap();
+        assert!(!plain.to_string().contains("cache_control"));
+        for marker in [json!("ephemeral"), json!(true)] {
+            let body = json!({"messages":[{"role":"user", "content":[{"type":"text", "text":"x", "cache_control":marker}]}]});
+            assert!(translate_request(&body, "claude").is_err());
+        }
     }
 
     #[test]

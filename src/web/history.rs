@@ -43,6 +43,7 @@ struct HistoryRow {
     status: i64,
     latency_ms: i64,
     tokens: String,
+    cached: String,
     attempts: Vec<AttemptView>,
     routing: String,
 }
@@ -160,6 +161,7 @@ impl HistoryRow {
                     output.map_or_else(|| "—".into(), |n| n.to_string())
                 ),
             },
+            cached: cached(stored.cached_tokens, record.input_tokens),
             attempts: record
                 .attempts
                 .into_iter()
@@ -177,6 +179,17 @@ impl HistoryRow {
                 })
                 .collect(),
         }
+    }
+}
+
+/// Cached input tokens and their share of the input, when both are reported.
+fn cached(cached: Option<i64>, input: Option<i64>) -> String {
+    match (cached, input) {
+        (None, _) => "—".to_owned(),
+        (Some(cached), Some(input)) if input > 0 => {
+            format!("{cached} ({}%)", (cached * 100 / input).clamp(0, 100))
+        }
+        (Some(cached), _) => cached.to_string(),
     }
 }
 
@@ -198,6 +211,7 @@ mod tests {
     fn partial_usage_is_not_rendered_as_zero() {
         let row = HistoryRow::from_stored(StoredRecord {
             created_at: "now".into(),
+            cached_tokens: None,
             record: request_history::Record {
                 id: "test".into(),
                 source: "api".into(),
@@ -212,6 +226,16 @@ mod tests {
             },
         });
         assert_eq!(row.tokens, "5 / —");
+        assert_eq!(row.cached, "—");
         assert_eq!(outcome_class("selected"), "badge ok");
+    }
+
+    #[test]
+    fn cached_tokens_show_their_share_of_reported_input() {
+        assert_eq!(cached(Some(1920), Some(2048)), "1920 (93%)");
+        assert_eq!(cached(Some(0), Some(500)), "0 (0%)");
+        assert_eq!(cached(Some(40), None), "40");
+        assert_eq!(cached(Some(40), Some(0)), "40");
+        assert_eq!(cached(None, Some(500)), "—");
     }
 }
