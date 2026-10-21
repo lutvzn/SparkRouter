@@ -70,7 +70,7 @@ options remain visible and ordinary form submissions still work.
 
 Choose **Priority**, **Round robin**, or **Random** when creating or editing a
 combo. Existing combos default to Priority. The Combos list shows its strategy
-and cache-aware/sticky mode.
+and cache-awareness mode.
 
 ### Category-specific combos
 
@@ -182,20 +182,22 @@ completion: the final request outcome still reports interrupted/cancelled bodies
 Older records do not reconstruct routing settings from today's configuration.
 Logging Off skips these new diagnostics too; retention/clear cascade to them.
 
-### Per-combo cache-aware and sticky routing
+### Per-combo cache-awareness
 
-Each combo has one **Cache-aware / sticky routing** dropdown:
+Each combo has one **Cache-awareness** dropdown:
 
 | Mode | Starting-target preference |
 | --- | --- |
 | **Off** (default) | Use the combo's Priority, Round robin, or Random strategy unchanged |
 | **Basic** | Reuse the last successful connection/model for the same explicit session ID |
 | **Smart** | Same as Basic; without an explicit ID, fingerprint the initial consecutive system/developer messages, first user message, and tool definitions |
-| **Sticky** | Reuse this caller's last successful connection/model for this combo, regardless of session or prompt, within its configured timeout |
+| **Sticky** | Reuse this caller's last successful connection/model for this combo, regardless of session or prompt |
 
-Set **Sticky timeout (minutes)** on that combo to **1–1440 minutes** (default 5).
-It is used only in Sticky mode. Basic/Smart hints expire after 30 idle minutes.
-Successful requests renew hints; streams establish/renew them only when the body
+Set **Affinity timeout (minutes)** on that combo to **1–1440 minutes** (default 5).
+Basic, Smart, and Sticky hints all expire that long after their last success;
+match it to how long your upstream keeps prompt caches warm. Combos already in
+Basic or Smart mode before this setting applied to them were set to 30 minutes,
+their previous fixed expiry. Successful requests renew hints; streams establish/renew them only when the body
 finishes successfully, not when response headers arrive. Failures or cancellation
 do not establish a new hint. On a miss, expiry, or unavailable target, the normal
 strategy chooses the start. Round robin still advances exactly once per request,
@@ -459,7 +461,10 @@ are forwarded unchanged. It uses **Text** combos and direct IDs, and only OpenAI
 and xAI-protocol connections are eligible (Anthropic, MiniMax and SystemOne
 steps are skipped, as other wrong-protocol steps are). Fallback follows the chat
 rules: retryable failures before the first streamed byte try the next target,
-and nothing falls back afterwards. A stream is complete only at a
+and nothing falls back afterwards. Many OpenAI-compatible vendors implement only
+chat completions, so on `/v1/responses` and `/v1/embeddings` an upstream 405 or
+501 (endpoint not available there) also tries the next target; 400 and 422 still
+stop the chain. A stream is complete only at a
 `response.completed`, `response.incomplete`, or `response.failed` event; an
 upstream EOF before that ends the body as interrupted. Usage from the final
 response is recorded in history. Stateful features such as
@@ -679,7 +684,7 @@ unknown. Clearing history clears these statistics, not lifetime totals.
 Combo categories are included; older version 1 files without a category default
 to Text and must still pass category/protocol validation. Conflicting model
 classifications within a document are rejected before import. Unused model
-classifications are not exported. Sticky timeouts are included; older version 1 files without those fields default
+classifications are not exported. Affinity timeouts are included; older version 1 files without those fields default
 to Off and 5 minutes. Distinct and empty custom groups are preserved. **All imported connections start disabled**: review endpoints, enter required provider keys, enable the connections, and refresh models for direct-model routing. Exported URLs and names may still be sensitive; share files carefully.
 Group slugs are exported too. Version 1 documents without a slug remain accepted;
 imports preserve requested slugs when available and add a suffix on conflicts.

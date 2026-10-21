@@ -129,6 +129,43 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn the_affinity_timeout_migration_keeps_basic_and_smart_at_thirty_minutes() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let mut before = sqlx::migrate!();
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 27)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        before.run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO combos (id, name, strategy, affinity_mode, sticky_minutes) VALUES \
+             ('o', 'off', 'priority', 'off', 5), ('b', 'basic', 'priority', 'basic', 5), \
+             ('m', 'smart', 'priority', 'smart', 12), ('s', 'sticky', 'priority', 'sticky', 7)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let minutes: Vec<(String, i64)> =
+            sqlx::query_as("SELECT id, sticky_minutes FROM combos ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            minutes,
+            [
+                ("b".into(), 30),
+                ("m".into(), 30),
+                ("o".into(), 5),
+                ("s".into(), 7)
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn the_embedding_category_migration_keeps_combos_steps_and_declarations() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query("PRAGMA foreign_keys = ON")

@@ -154,10 +154,14 @@ pub(crate) async fn list(
             },
             category_label: combo.category.label().to_owned(),
             strategy_label: combo.strategy.label().to_owned(),
-            affinity_label: if combo.affinity.mode == AffinityMode::Sticky {
-                format!("Sticky · {} min", combo.affinity.sticky_minutes)
+            affinity_label: if combo.affinity.mode == AffinityMode::Off {
+                "Affinity: Off".to_owned()
             } else {
-                format!("Affinity: {}", combo.affinity.mode.label())
+                format!(
+                    "{} · {} min",
+                    combo.affinity.mode.label(),
+                    combo.affinity.sticky_minutes
+                )
             },
             id: combo.id,
             name: combo.name,

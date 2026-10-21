@@ -20,7 +20,6 @@ use crate::{
     error::AppError,
 };
 
-const CACHE_IDLE: Duration = Duration::from_secs(30 * 60);
 const MAX_ENTRIES: usize = 4096;
 const MAX_SESSION_BYTES: usize = 256;
 
@@ -221,14 +220,13 @@ pub(crate) fn binding(
     crypto: &Crypto,
     body: &Value,
 ) -> Result<Option<Binding>, AppError> {
-    let (identity, ttl) = match combo.affinity.mode {
+    // Every mode keeps a hint for the combo's timeout after its last success.
+    let ttl = Duration::from_secs(u64::from(combo.affinity.sticky_minutes) * 60);
+    let identity = match combo.affinity.mode {
         AffinityMode::Off => return Ok(None),
-        AffinityMode::Sticky => (
-            "sticky".into(),
-            Duration::from_secs(u64::from(combo.affinity.sticky_minutes) * 60),
-        ),
+        AffinityMode::Sticky => "sticky".into(),
         mode => {
-            let identity = if let Some(session) = explicit_session(context, body)? {
+            if let Some(session) = explicit_session(context, body)? {
                 format!(
                     "session:{}",
                     crypto.affinity_fingerprint(session.as_bytes())?
@@ -261,8 +259,7 @@ pub(crate) fn binding(
                 format!("prompt:{}", crypto.affinity_fingerprint(&bytes)?)
             } else {
                 return Ok(None);
-            };
-            (identity, CACHE_IDLE)
+            }
         }
     };
     Ok(Some(Binding {
@@ -488,16 +485,17 @@ mod tests {
     fn successful_requests_renew_timeout_and_old_snapshots_cannot_clear_new_targets() {
         let crypto = crypto();
         let context = RequestContext::default();
-        for mode in [AffinityMode::Basic, AffinityMode::Sticky] {
+        // Basic/Smart and Sticky all use the combo's timeout (3 minutes here).
+        for mode in [
+            AffinityMode::Basic,
+            AffinityMode::Smart,
+            AffinityMode::Sticky,
+        ] {
             let memory = Affinity::default();
             let mut combo = combo(mode);
             let body = json!({"session_id":"id"});
             let make = |combo: &Combo| binding(combo, &context, &crypto, &body).unwrap().unwrap();
-            let ttl = if mode == AffinityMode::Basic {
-                CACHE_IDLE
-            } else {
-                Duration::from_secs(180)
-            };
+            let ttl = Duration::from_secs(180);
             let start = Instant::now();
             memory.remember_at(make(&combo), target(), start);
             let mut backup = target();

@@ -271,6 +271,77 @@ async fn responses_reject_wrong_categories_and_invalid_success_bodies_fall_back(
     assert_eq!(not_boolean.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn targets_without_the_endpoint_fall_back_but_invalid_requests_stop() {
+    let state = test_state().await;
+    // OpenAI-compatible servers that only implement chat answer 405 or 501.
+    let not_allowed = spawn_upstream(
+        failing("/responses", StatusCode::METHOD_NOT_ALLOWED)
+            .merge(failing("/embeddings", StatusCode::METHOD_NOT_ALLOWED)),
+    )
+    .await;
+    let not_implemented = spawn_upstream(
+        failing("/responses", StatusCode::NOT_IMPLEMENTED)
+            .merge(failing("/embeddings", StatusCode::NOT_IMPLEMENTED)),
+    )
+    .await;
+    let invalid = spawn_upstream(failing("/responses", StatusCode::BAD_REQUEST)).await;
+    let good = spawn_upstream(responses_echo().merge(embeddings_echo())).await;
+    save_provider(&state, "chat-only", &not_allowed.url(), Protocol::OpenAi).await;
+    save_provider(&state, "partial", &not_implemented.url(), Protocol::OpenAi).await;
+    save_provider(&state, "invalid", &invalid.url(), Protocol::OpenAi).await;
+    save_provider(&state, "good", &good.url(), Protocol::OpenAi).await;
+    combo(
+        &state,
+        "text",
+        Category::Text,
+        &[("chat-only", "m"), ("partial", "m"), ("good", "m")],
+    )
+    .await;
+    combo(
+        &state,
+        "vectors",
+        Category::Embedding,
+        &[("chat-only", "e"), ("partial", "e"), ("good", "e")],
+    )
+    .await;
+    combo(
+        &state,
+        "rejected",
+        Category::Text,
+        &[("invalid", "m"), ("good", "m")],
+    )
+    .await;
+
+    for (path, model) in [
+        ("/v1/responses", "combo/text"),
+        ("/v1/embeddings", "combo/vectors"),
+    ] {
+        let response = send(
+            &state,
+            post_json(path, &json!({"model": model, "input": "x"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+    assert_eq!(not_allowed.hits.count(), 2);
+    assert_eq!(not_implemented.hits.count(), 2);
+    assert_eq!(good.hits.count(), 2);
+
+    // A 400 still rejects the request itself and stops the chain.
+    let response = send(
+        &state,
+        post_json(
+            "/v1/responses",
+            &json!({"model": "combo/rejected", "input": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.hits.count(), 1);
+    assert_eq!(good.hits.count(), 2);
+}
+
 const STREAM: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n";
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n";
 

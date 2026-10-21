@@ -11,7 +11,7 @@ use super::{
     AttemptError, ResponseStream, check_sse, check_status, json_response_with_usage, model_body,
     read_bounded, request, streaming_response,
 };
-use crate::{crypto::Crypto, db::providers::Provider};
+use crate::{crypto::Crypto, db::providers::Provider, error::AppError};
 
 /// POST the request with its model swapped to `endpoint` under the base URL.
 async fn post(
@@ -30,6 +30,32 @@ async fn post(
         .map_err(transport_error)?;
     check_status(&response)?;
     Ok(response)
+}
+
+/// `post` for an endpoint many OpenAI-compatible servers do not implement.
+/// There, 405 or 501 means this target lacks the endpoint, not that the
+/// request is invalid, so the next target is tried.
+async fn post_optional(
+    client: &reqwest::Client,
+    crypto: &Crypto,
+    provider: &Provider,
+    endpoint: &str,
+    model: &str,
+    body: &Value,
+) -> Result<reqwest::Response, AttemptError> {
+    post(client, crypto, provider, endpoint, model, body)
+        .await
+        .map_err(|error| match error {
+            AttemptError::Permanent(AppError::Upstream(status))
+                if matches!(
+                    status,
+                    reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::NOT_IMPLEMENTED
+                ) =>
+            {
+                AttemptError::RetryableStatus(status)
+            }
+            error => error,
+        })
 }
 
 fn upstream_events(response: reqwest::Response) -> impl Stream<Item = Result<Bytes, AttemptError>> {
@@ -91,7 +117,7 @@ pub async fn responses(
     body: &Value,
 ) -> Result<Response, AttemptError> {
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let response = post(client, crypto, provider, "responses", model, body).await?;
+    let response = post_optional(client, crypto, provider, "responses", model, body).await?;
     if streaming {
         check_sse(&response)?;
         return streaming_response(terminated(upstream_events(response), is_response_end)).await;
@@ -130,7 +156,7 @@ pub async fn embeddings(
     model: &str,
     body: &Value,
 ) -> Result<Response, AttemptError> {
-    let response = post(client, crypto, provider, "embeddings", model, body).await?;
+    let response = post_optional(client, crypto, provider, "embeddings", model, body).await?;
     let status = response.status();
     let bytes = read_bounded(response).await?;
     if bytes.trim_ascii_start().first() != Some(&b'{') {

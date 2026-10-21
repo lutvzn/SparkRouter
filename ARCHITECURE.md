@@ -172,8 +172,9 @@ master-key HMAC of the explicit session ID or Smart prompt. Sticky uses a fixed
 identity within that caller/combo namespace. Only routing target IDs, digests,
 and monotonic expiry/last-success instants are retained. No locks span I/O, and
 expiry/oldest-entry eviction runs inline; there is no worker or history dependency.
-Basic/Smart expire 30 minutes after last success; Sticky uses the combo's 1–1440
-minute timeout. Generated keys have distinct namespaces; environment-key and
+Every mode expires the combo's 1–1440 minute affinity timeout after last success
+(stored as `sticky_minutes`; migration 0027 set existing Basic/Smart combos to
+their former fixed 30 minutes). Generated keys have distinct namespaces; environment-key and
 open access each share one namespace. Concurrent misses are not serialized
 through upstream completion.
 
@@ -240,7 +241,7 @@ preserving its ID, combo, position, and the combo's strategy. Invalid connection
 or cross-combo step IDs never mutate configuration.
 Timestamps are updated on edits; provider creation time is preserved by upserts.
 An additive migration defaults existing combos to affinity Off and a 5-minute
-Sticky timeout. Name/strategy/affinity and step mutations increment the routing
+affinity timeout. Name/strategy/affinity and step mutations increment the routing
 revision, so an in-flight old snapshot cannot seed hints for an edited combo.
 Dashboard combo edits/deletion also clear hints; older revisions expire naturally.
 Duplication copies settings but uses fresh combo/step IDs and no runtime hints.
@@ -357,6 +358,9 @@ can also fail over before commitment. Local credential/configuration failures
 are permanent. Malformed-request statuses, including 400 and 422, stop the chain.
 403 stays permanent because it can reject the request itself. Upstream 401, 402,
 404, and 529 describe that target and try the next connection or combo step.
+On `/v1/responses` and `/v1/embeddings` only, 405 and 501 are retryable too:
+OpenAI-compatible servers often implement just chat completions, so those
+statuses mean the target lacks the endpoint rather than that the request is bad.
 There are no repeated attempts, hedged requests, cooldowns, or adaptive routing.
 
 Unknown combos and model IDs that no connection lists return `404`. Exhausted,
