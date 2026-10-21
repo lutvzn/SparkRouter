@@ -44,6 +44,10 @@ pub fn router() -> Router<AppState> {
         .route("/settings", get(settings::page).post(settings::save))
         .route("/settings/history/clear", post(settings::clear_history))
         .route("/settings/logging", post(settings::save_logging))
+        .route(
+            "/settings/history-buffer",
+            post(settings::save_history_buffer),
+        )
         .route("/history", get(history::page))
         .route("/history/{id}/payload", get(history::payload))
         .route("/history/clear", post(history::clear))

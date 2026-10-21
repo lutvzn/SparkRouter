@@ -47,6 +47,31 @@ pub async fn set_logging_mode(pool: &SqlitePool, mode: LoggingMode) -> Result<()
     Ok(())
 }
 
+/// Multiples of the history writer's default queue and Extended body budget
+/// that Settings offers.
+pub const HISTORY_BUFFER_SCALES: [u32; 4] = [1, 2, 4, 8];
+
+pub async fn history_buffer(pool: &SqlitePool) -> Result<u32, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT history_buffer FROM dashboard_settings WHERE id = 1")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+pub async fn set_history_buffer(pool: &SqlitePool, scale: u32) -> Result<(), AppError> {
+    if !HISTORY_BUFFER_SCALES.contains(&scale) {
+        return Err(AppError::InvalidRequest(
+            "history write buffer must be 1, 2, 4, or 8 times the default".into(),
+        ));
+    }
+    sqlx::query("UPDATE dashboard_settings SET history_buffer = ? WHERE id = 1")
+        .bind(scale)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn history_retention(pool: &SqlitePool) -> Result<i64, AppError> {
     Ok(
         sqlx::query_scalar("SELECT history_retention FROM dashboard_settings WHERE id = 1")

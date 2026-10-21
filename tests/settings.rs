@@ -334,3 +334,47 @@ async fn retention_prunes_immediately_cascades_and_survives_reopening() {
     assert_eq!(db::usage::overview(&pool).await.unwrap().requests, 0);
     pool.close().await;
 }
+
+#[tokio::test]
+async fn history_buffer_accepts_only_offered_sizes_with_csrf_and_origin() {
+    use db::settings::history_buffer;
+    let state = state(false).await;
+    assert_eq!(history_buffer(&state.db).await.unwrap(), 1);
+    let page = html(state.clone()).await;
+    assert!(page.contains("value=\"1\" selected"));
+    assert!(page.contains("request history write unavailable"));
+    for input in ["0", "3", "16", "-1", "abc"] {
+        assert_eq!(
+            post(
+                &state,
+                "/settings/history-buffer",
+                format!("_csrf={}&history_buffer={input}", state.csrf_token),
+                false
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for (body, cross_origin) in [
+        ("_csrf=wrong&history_buffer=4".to_owned(), false),
+        (format!("_csrf={}&history_buffer=4", state.csrf_token), true),
+    ] {
+        assert_eq!(
+            post(&state, "/settings/history-buffer", body, cross_origin).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(history_buffer(&state.db).await.unwrap(), 1);
+    assert_eq!(
+        post(
+            &state,
+            "/settings/history-buffer",
+            format!("_csrf={}&history_buffer=4", state.csrf_token),
+            false
+        )
+        .await,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(history_buffer(&state.db).await.unwrap(), 4);
+    assert!(html(state).await.contains("value=\"4\" selected"));
+}

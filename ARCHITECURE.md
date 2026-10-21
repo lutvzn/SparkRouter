@@ -208,7 +208,7 @@ an upstream cache hit.
 | `api_key_models` | Exact public model ID allowlist, unique `(key_id, model)`, cascading key deletion |
 | `request_history` | Bounded metadata snapshots for routed API/test-chat requests, including usage/cost and retained provider identity |
 | `request_attempts` | Ordered attempt snapshots with provider slug/group name; cascade with history deletion |
-| `dashboard_settings` | Singleton retention (1–10,000), and logging mode (off/basic/extended, default basic) |
+| `dashboard_settings` | Singleton retention (1–10,000), logging mode (off/basic/extended, default basic), and history write buffer multiple (1/2/4/8, default 1) |
 | `request_payloads` | Opt-in bounded sensitive gateway request body and truncation flag; cascade with history |
 | `request_payload_responses` | The matching response body, truncation/completion flags, in its own row so the later capture never rewrites the request body; cascade with the request capture |
 
@@ -708,8 +708,9 @@ page per index on each insert and prune. There is no timer; a
 lone write commits at once. The queue is FIFO and each transaction writes
 inserts before terminal outcomes and captures, so a stream is never left
 recorded as streaming after its outcome was queued. The queue is bounded
-(8192 writes, 32 MiB of bodies) and full queues drop writes rather than block
-the response. A constraint violation retries that batch one write per
+(8192 writes, 32 MiB of bodies, times the 1/2/4/8 multiple saved in Settings
+and applied to the running writer) and full queues drop writes rather than
+block the response. A constraint violation retries that batch one write per
 transaction; captures run in a savepoint so their failure keeps the metadata.
 Started transactions are never cancelled. Recording failures are logged only as
 fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.

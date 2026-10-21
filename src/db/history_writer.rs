@@ -30,22 +30,28 @@ use super::{
     request_payloads,
 };
 
-/// Writes waiting for the writer, bounding memory and how stale history can
-/// get behind a stalled disk. Writes beyond it are dropped.
+/// Writes waiting for the writer at the default buffer size, bounding memory
+/// and how stale history can get behind a stalled disk. Writes beyond it are
+/// dropped. Settings can raise it, with [`PAYLOAD_BUDGET`], by a whole multiple.
 const QUEUE_CAPACITY: usize = 8192;
 
 /// Most writes committed by one transaction.
 const MAX_BATCH: usize = 1024;
 
-/// Bytes of Extended request/response bodies allowed in the queue at once;
-/// captures beyond it are dropped while their metadata is still recorded.
+/// Bytes of Extended request/response bodies allowed in the queue at once at
+/// the default buffer size; captures beyond it are dropped while their
+/// metadata is still recorded.
 const PAYLOAD_BUDGET: usize = 32 * 1024 * 1024;
 
 /// Handle for queuing history writes; clones share one writer task.
 #[derive(Clone)]
 pub(crate) struct HistoryWriter {
-    queue: mpsc::Sender<Op>,
+    // Unbounded so the limit can change at runtime; `queued` enforces it.
+    queue: mpsc::UnboundedSender<Op>,
+    queued: Arc<AtomicUsize>,
     payload_bytes: Arc<AtomicUsize>,
+    /// Multiple of [`QUEUE_CAPACITY`] and [`PAYLOAD_BUDGET`] in effect.
+    scale: Arc<AtomicUsize>,
     batches: Arc<AtomicUsize>,
 }
 
@@ -76,14 +82,27 @@ impl HistoryWriter {
     /// Spawn the writer task for `pool`. It ends once every handle is dropped
     /// and the queue is empty.
     pub(crate) fn start(pool: SqlitePool) -> Self {
-        let (queue, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (queue, receiver) = mpsc::unbounded_channel();
         let writer = Self {
             queue,
+            queued: Arc::default(),
             payload_bytes: Arc::default(),
+            scale: Arc::new(AtomicUsize::new(1)),
             batches: Arc::default(),
         };
-        drop(tokio::spawn(run(pool, receiver, writer.batches.clone())));
+        drop(tokio::spawn(run(
+            pool,
+            receiver,
+            writer.queued.clone(),
+            writer.batches.clone(),
+        )));
         writer
+    }
+
+    /// Hold up to `scale` times the default queue and Extended body budget.
+    /// Shrinking keeps writes already queued; new ones wait for room.
+    pub(crate) fn set_buffer(&self, scale: u32) {
+        self.scale.store(scale.max(1) as usize, Ordering::Relaxed);
     }
 
     /// Batches taken from the queue so far, including flush-only ones.
@@ -102,10 +121,7 @@ impl HistoryWriter {
             }
             capture
         });
-        let queued = self
-            .queue
-            .try_send(Op::Insert(Box::new(request), capture))
-            .is_ok();
+        let queued = self.enqueue(Op::Insert(Box::new(request), capture));
         if !queued {
             tracing::warn!("request history write unavailable");
         }
@@ -115,7 +131,7 @@ impl HistoryWriter {
     /// Queue the terminal outcome of a record queued earlier.
     pub(crate) fn finish(&self, terminal: Terminal) {
         if request_history::validate_usage(terminal.usage).is_err()
-            || self.queue.try_send(Op::Finish(terminal)).is_err()
+            || !self.enqueue(Op::Finish(terminal))
         {
             tracing::warn!("request history finalization unavailable");
         }
@@ -125,26 +141,41 @@ impl HistoryWriter {
     pub(crate) fn finish_payload(&self, id: String, body: String, truncated: bool, complete: bool) {
         let queued = self
             .capture(body, truncated, complete)
-            .is_some_and(|capture| self.queue.try_send(Op::FinishPayload(id, capture)).is_ok());
+            .is_some_and(|capture| self.enqueue(Op::FinishPayload(id, capture)));
         if !queued {
             tracing::warn!("request payload write unavailable");
         }
     }
 
     /// Wait until every write queued before this call is committed or
-    /// dropped. Unlike queuing, this waits for queue capacity.
+    /// dropped. Flushes do not count against the queue limit.
     pub(crate) async fn flush(&self) {
         let (done, wait) = oneshot::channel();
-        if self.queue.send(Op::Flush(done)).await.is_ok() {
+        if self.queue.send(Op::Flush(done)).is_ok() {
             let _ = wait.await;
         }
+    }
+
+    /// Queue `op` unless the queue already holds its limit of writes.
+    fn enqueue(&self, op: Op) -> bool {
+        let limit = QUEUE_CAPACITY * self.scale.load(Ordering::Relaxed);
+        if self.queued.fetch_add(1, Ordering::Relaxed) >= limit {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        if self.queue.send(op).is_err() {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     fn capture(&self, body: String, truncated: bool, complete: bool) -> Option<Capture> {
         let bytes = body.len();
         // Reserve optimistically; a concurrent reservation may briefly see
         // the excess and drop its capture too, which only errs toward less.
-        if self.payload_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes > PAYLOAD_BUDGET {
+        let budget = PAYLOAD_BUDGET * self.scale.load(Ordering::Relaxed);
+        if self.payload_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes > budget {
             self.payload_bytes.fetch_sub(bytes, Ordering::Relaxed);
             return None;
         }
@@ -157,13 +188,20 @@ impl HistoryWriter {
     }
 }
 
-async fn run(pool: SqlitePool, mut receiver: mpsc::Receiver<Op>, batches: Arc<AtomicUsize>) {
+async fn run(
+    pool: SqlitePool,
+    mut receiver: mpsc::UnboundedReceiver<Op>,
+    queued: Arc<AtomicUsize>,
+    batches: Arc<AtomicUsize>,
+) {
     let mut batch = Vec::with_capacity(MAX_BATCH);
     while receiver.recv_many(&mut batch, MAX_BATCH).await > 0 {
         let writes: Vec<_> = batch
             .iter()
             .filter(|op| !matches!(op, Op::Flush(_)))
             .collect();
+        // Like a bounded channel, taking writes frees their room in the queue.
+        queued.fetch_sub(writes.len(), Ordering::Relaxed);
         match commit(&pool, &writes).await {
             Ok(()) => {}
             // A row the database rejects must not discard the rest of the
@@ -431,6 +469,40 @@ mod tests {
             history.insert(request("later", false), None),
             "capacity returns"
         );
+    }
+
+    #[tokio::test]
+    async fn a_larger_buffer_holds_more_and_shrinking_keeps_what_is_queued() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        history.set_buffer(2);
+        let connection = pool.acquire().await.unwrap();
+        let mut queued = 0;
+        while history.insert(request(&format!("req-{queued}"), false), None) {
+            queued += 1;
+            assert!(
+                queued <= 2 * QUEUE_CAPACITY + MAX_BATCH,
+                "queue is unbounded"
+            );
+        }
+        assert!(queued >= 2 * QUEUE_CAPACITY);
+        history.set_buffer(1);
+        assert!(!history.insert(request("over", false), None));
+        drop(connection);
+        history.flush().await;
+        // Everything queued was written; retention then kept the newest.
+        assert_eq!(
+            count(&pool, "request_history").await,
+            request_history::MAX_RETAINED.min(queued as i64)
+        );
+        assert_eq!(history.queued.load(Ordering::Relaxed), 0);
+
+        // The Extended body budget scales with it.
+        let body = "x".repeat(PAYLOAD_BUDGET + 1);
+        assert!(history.capture(body.clone(), false, false).is_none());
+        history.set_buffer(2);
+        assert!(history.capture(body, false, false).is_some());
+        assert_eq!(history.payload_bytes.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

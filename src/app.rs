@@ -61,6 +61,7 @@ impl AppState {
         let history = db::history_writer::HistoryWriter::start(
             db::connect_history_writer(&config.database_url, &db).await?,
         );
+        history.set_buffer(db::settings::history_buffer(&db).await?);
         Ok(Self {
             started_at: std::time::Instant::now(),
             history,

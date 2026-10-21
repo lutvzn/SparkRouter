@@ -55,6 +55,26 @@
     <button class="btn primary" type="submit">Save retention</button>
   </form>
   {% endif %}
+  {% if history_buffer.is_empty() %}<p class="test fail" role="status">History write buffer unavailable. Reload to try again.</p>{% else %}
+  <form method="post" action="/settings/history-buffer">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field-label">
+      <label for="history-buffer">History write buffer</label>
+      {% let info_id = "history-buffer-help" %}
+      {% let info_label = "About the history write buffer" %}
+      {% let info_text = "History is saved to the database in the background. When the disk briefly stalls (slow or encrypted storage, backups, other heavy load), new history waits here in memory. Once it is full, further history is dropped and the server logs “request history write unavailable”; requests themselves still succeed. Raise it if you see those warnings under heavy traffic, mostly with Extended logging. A larger buffer uses no extra memory while idle; during a stall it can grow to the listed size, and history appears on the dashboard later." %}
+      {% include "combos/_info.html" %}
+    </div>
+    <select id="history-buffer" name="history_buffer">
+      <option value="1"{% if history_buffer == "1" %} selected{% endif %}>Standard — 8,192 writes, 32 MiB of bodies (default)</option>
+      <option value="2"{% if history_buffer == "2" %} selected{% endif %}>2× — 16,384 writes, 64 MiB of bodies</option>
+      <option value="4"{% if history_buffer == "4" %} selected{% endif %}>4× — 32,768 writes, 128 MiB of bodies</option>
+      <option value="8"{% if history_buffer == "8" %} selected{% endif %}>8× — 65,536 writes, 256 MiB of bodies</option>
+    </select>
+    <p class="hint">Applies immediately. Bodies count only with Extended logging.</p>
+    <button class="btn primary" type="submit">Save buffer size</button>
+  </form>
+  {% endif %}
   <details><summary>Clear all history</summary>
     <form method="post" action="/settings/history/clear">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">

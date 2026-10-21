@@ -15,6 +15,7 @@ struct SettingsPage {
     csrf_token: String,
     retention: String,
     logging_mode: String,
+    history_buffer: String,
     notice: &'static str,
     dashboard_auth: &'static str,
     api_auth: &'static str,
@@ -87,16 +88,27 @@ pub(super) async fn render_page(
         Ok(Ok(mode)) => mode.as_str().to_owned(),
         _ => String::new(),
     };
+    let history_buffer = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        db::settings::history_buffer(&state.db),
+    )
+    .await
+    {
+        Ok(Ok(scale)) => scale.to_string(),
+        _ => String::new(),
+    };
     let elapsed = state.started_at.elapsed().as_secs();
     render(SettingsPage {
         app_name: crate::APP_NAME,
         csrf_token: state.csrf_token.as_str().to_owned(),
         retention,
         logging_mode,
+        history_buffer,
         preview,
         notice: match result {
             Some("saved") => "History retention saved.",
             Some("logging") => "Request logging mode saved. Existing history is unchanged.",
+            Some("buffer") => "History write buffer saved. It applies immediately.",
             Some("cleared") => "History cleared. Dashboard usage totals have been reset.",
             _ => "",
         },
@@ -161,6 +173,28 @@ pub(crate) async fn save_logging(
     }
     db::settings::set_logging_mode(&state.db, mode).await?;
     Ok(see_other("/settings?result=logging"))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct HistoryBufferForm {
+    _csrf: String,
+    history_buffer: String,
+}
+
+/// Saved and applied to the running writer at once; startup reapplies it.
+pub(crate) async fn save_history_buffer(
+    State(state): State<AppState>,
+    Form(form): Form<HistoryBufferForm>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    let scale = form.history_buffer.parse().map_err(|_| {
+        AppError::InvalidRequest(
+            "history write buffer must be 1, 2, 4, or 8 times the default".into(),
+        )
+    })?;
+    db::settings::set_history_buffer(&state.db, scale).await?;
+    state.history.set_buffer(scale);
+    Ok(see_other("/settings?result=buffer"))
 }
 
 #[derive(Deserialize)]
