@@ -1,6 +1,7 @@
-//! Integration tests for the optional single-admin dashboard login
-//! (`src/web/auth.rs`), covering the whole login lifecycle through the real
-//! `app::router`: open mode when no password is configured, redirects and
+//! Integration tests for the single-admin dashboard login (`src/web/auth.rs`),
+//! covering the whole login lifecycle through the real `app::router`: the
+//! default stored password with first-run setup (required even on loopback),
+//! open mode only when explicitly disabled, redirects and
 //! 401s for browser vs HTMX/unsafe requests, login CSRF and origin checks,
 //! session cookie attributes, forged-cookie rejection, logout revocation,
 //! login rate limiting, credential non-disclosure, gateway-API independence,
@@ -18,7 +19,7 @@ use http_body_util::BodyExt;
 use secrecy::SecretString;
 use sparkrouter::{
     app::{self, AppState},
-    config::Config,
+    config::{Config, DashboardLogin},
     crypto::Crypto,
     db,
 };
@@ -40,7 +41,10 @@ fn auth_config(password: Option<&str>, secure_cookie: bool, api_key: Option<&str
         bind: "127.0.0.1:0".parse().unwrap(),
         crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([61; 32]))).unwrap(),
         api_key: api_key.map(|key| SecretString::from(key.to_owned())),
-        dashboard_password: password.map(|password| SecretString::from(password.to_owned())),
+        dashboard_login: match password {
+            Some(password) => DashboardLogin::Environment(SecretString::from(password.to_owned())),
+            None => DashboardLogin::Disabled,
+        },
         dashboard_secure_cookie: secure_cookie,
     }
 }
@@ -183,11 +187,11 @@ fn is_43_char_base64url(token: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Open mode: no password configured
+// Open mode: login explicitly disabled
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn without_a_password_the_dashboard_stays_open() {
+async fn with_login_disabled_the_dashboard_stays_open() {
     let state = auth_state(None, false, None).await;
     let router = app::router(state.clone());
 
@@ -885,4 +889,347 @@ async fn restarting_the_process_invalidates_outstanding_sessions() {
     )
     .await;
     assert_eq!(authed.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Default: stored password with first-run setup
+// ---------------------------------------------------------------------------
+
+const STORED: &str = "stored admin password";
+
+async fn stored_state(database_url: &str) -> AppState {
+    let mut config = auth_config(None, false, None);
+    config.database_url = database_url.into();
+    config.dashboard_login = DashboardLogin::Stored;
+    AppState::from_config(config).await.unwrap()
+}
+
+async fn submit_setup(
+    router: &Router,
+    state: &AppState,
+    code: &str,
+    password: &str,
+    confirm: &str,
+) -> Response {
+    post_form(
+        router,
+        "/setup",
+        &[
+            ("_csrf", state.csrf_token.as_str()),
+            ("setup_code", code),
+            ("password", password),
+            ("confirm", confirm),
+        ],
+        &[],
+    )
+    .await
+}
+
+fn loopback() -> ConnectInfo<SocketAddr> {
+    ConnectInfo("127.0.0.1:50000".parse().unwrap())
+}
+
+#[tokio::test]
+async fn by_default_even_loopback_requests_must_complete_setup_first() {
+    let state = stored_state("sqlite::memory:").await;
+    let router = app::router(state.clone());
+    assert!(state.dashboard_setup_code().is_some());
+    for path in ["/", "/providers", "/settings", "/login", "/logout"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .extension(loopback())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "GET {path}");
+        assert_eq!(location(&response), "/setup", "GET {path}");
+    }
+    let htmx = get(&router, "/providers", &[("hx-request", "true")]).await;
+    assert_eq!(htmx.status(), StatusCode::UNAUTHORIZED);
+    let unsafe_post = post_form(
+        &router,
+        "/providers",
+        &[("_csrf", state.csrf_token.as_str())],
+        &[],
+    )
+    .await;
+    assert_eq!(unsafe_post.status(), StatusCode::UNAUTHORIZED);
+    // Logging in is not possible before a password exists.
+    let early = login(&router, &state, STORED).await;
+    assert_eq!(early.status(), StatusCode::UNAUTHORIZED);
+    assert!(session_cookie(&early).is_none());
+    let page = get(&router, "/setup", &[]).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let html = body(page).await;
+    assert!(html.contains("Setup code"));
+    // The page never shows the code itself.
+    assert!(!html.contains(&state.dashboard_setup_code().unwrap()));
+    assert_eq!(
+        get(&router, "/static/app.css", &[]).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn setup_needs_the_printed_code_a_confirmed_password_and_then_closes() {
+    let state = stored_state("sqlite::memory:").await;
+    let router = app::router(state.clone());
+    let code = state.dashboard_setup_code().unwrap();
+
+    let wrong = submit_setup(&router, &state, "AAAA-AAAA-AAAA-AAAA", STORED, STORED).await;
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert!(session_cookie(&wrong).is_none());
+    assert!(body(wrong).await.contains("Incorrect setup code"));
+    let short = submit_setup(&router, &state, &code, "too short", "too short").await;
+    assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+    assert!(body(short).await.contains("at least 12 characters"));
+    let mismatch = submit_setup(&router, &state, &code, STORED, "stored admin passwore").await;
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+    let missing_csrf = post_form(
+        &router,
+        "/setup",
+        &[
+            ("setup_code", code.as_str()),
+            ("password", STORED),
+            ("confirm", STORED),
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(missing_csrf.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let cross_origin = post_form(
+        &router,
+        "/setup",
+        &[
+            ("_csrf", state.csrf_token.as_str()),
+            ("setup_code", code.as_str()),
+            ("password", STORED),
+            ("confirm", STORED),
+        ],
+        &[("origin", "https://attacker.example")],
+    )
+    .await;
+    assert_eq!(cross_origin.status(), StatusCode::BAD_REQUEST);
+    assert!(state.dashboard_setup_code().is_some());
+
+    // Codes are accepted without dashes and in lower case.
+    let done = submit_setup(
+        &router,
+        &state,
+        &code.replace('-', "").to_lowercase(),
+        STORED,
+        STORED,
+    )
+    .await;
+    assert_eq!(done.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&done), "/");
+    let cookie = cookie_header(token_of(&session_cookie(&done).expect("setup logs in")));
+    assert_eq!(
+        get(&router, "/providers", &[("cookie", cookie.as_str())])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // Setup is over: the code is gone, setup redirects, and login is required.
+    assert!(state.dashboard_setup_code().is_none());
+    assert_eq!(location(&get(&router, "/setup", &[]).await), "/login");
+    let again = submit_setup(
+        &router,
+        &state,
+        &code,
+        "another admin password",
+        "another admin password",
+    )
+    .await;
+    assert_eq!(again.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(location(&get(&router, "/providers", &[]).await), "/login");
+    assert_eq!(
+        login(&router, &state, "another admin password")
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login(&router, &state, STORED).await.status(),
+        StatusCode::SEE_OTHER
+    );
+
+    // Only an Argon2id hash is stored, never the password.
+    let hash = db::dashboard_admin::password_hash(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(!hash.contains(STORED));
+}
+
+#[tokio::test]
+async fn wrong_setup_codes_are_throttled_per_peer() {
+    let state = stored_state("sqlite::memory:").await;
+    let router = app::router(state.clone());
+    for _ in 0..10 {
+        let response = submit_setup(&router, &state, "AAAA-AAAA-AAAA-AAAA", STORED, STORED).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let code = state.dashboard_setup_code().unwrap();
+    let blocked = submit_setup(&router, &state, &code, STORED, STORED).await;
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(state.dashboard_setup_code().is_some());
+}
+
+#[tokio::test]
+async fn the_stored_password_survives_restart_and_changing_it_revokes_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", directory.path().join("auth.db").display());
+    let first = stored_state(&url).await;
+    let router = app::router(first.clone());
+    let code = first.dashboard_setup_code().unwrap();
+    assert_eq!(
+        submit_setup(&router, &first, &code, STORED, STORED)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    first.db.close().await;
+
+    // A restart keeps the password: no new setup code, and login is required.
+    let state = stored_state(&url).await;
+    let router = app::router(state.clone());
+    assert!(state.dashboard_setup_code().is_none());
+    assert_eq!(location(&get(&router, "/", &[]).await), "/login");
+    let current = login(&router, &state, STORED).await;
+    let current = cookie_header(token_of(&session_cookie(&current).unwrap()));
+    let other = login(&router, &state, STORED).await;
+    let other = cookie_header(token_of(&session_cookie(&other).unwrap()));
+    let settings = get(&router, "/settings", &[("cookie", current.as_str())]).await;
+    let html = body(settings).await;
+    assert!(html.contains("action=\"/settings/password\""));
+    assert!(html.contains("stored password (Argon2id hash)"));
+
+    let change = |current_password: &'static str, password: &'static str, confirm: &'static str| {
+        let router = router.clone();
+        let state = state.clone();
+        let cookie = current.clone();
+        async move {
+            post_form(
+                &router,
+                "/settings/password",
+                &[
+                    ("_csrf", state.csrf_token.as_str()),
+                    ("current", current_password),
+                    ("password", password),
+                    ("confirm", confirm),
+                ],
+                &[("cookie", cookie.as_str())],
+            )
+            .await
+        }
+    };
+    const NEW: &str = "replacement admin password";
+    let wrong = change("not the password", NEW, NEW).await;
+    assert_eq!(location(&wrong), "/settings?result=password-wrong");
+    let mismatch = change(STORED, NEW, "replacement admin passwore").await;
+    assert_eq!(location(&mismatch), "/settings?result=password-mismatch");
+    let shown = get(
+        &router,
+        "/settings?result=password-mismatch",
+        &[("cookie", current.as_str())],
+    )
+    .await;
+    assert!(
+        body(shown)
+            .await
+            .contains("The new passwords do not match.")
+    );
+    assert_eq!(
+        location(&change(STORED, "short", "short").await),
+        "/settings?result=password-short"
+    );
+    // Changing the password requires a session like every other dashboard POST.
+    let anonymous = post_form(
+        &router,
+        "/settings/password",
+        &[
+            ("_csrf", state.csrf_token.as_str()),
+            ("current", STORED),
+            ("password", NEW),
+            ("confirm", NEW),
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let changed = change(STORED, NEW, NEW).await;
+    assert_eq!(location(&changed), "/settings?result=password");
+    let renewed = cookie_header(token_of(
+        &session_cookie(&changed).expect("the changing browser stays signed in"),
+    ));
+    assert_eq!(
+        get(&router, "/providers", &[("cookie", renewed.as_str())])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    for revoked in [&current, &other] {
+        assert_eq!(
+            location(&get(&router, "/providers", &[("cookie", revoked.as_str())]).await),
+            "/login"
+        );
+    }
+    assert_eq!(
+        login(&router, &state, STORED).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login(&router, &state, NEW).await.status(),
+        StatusCode::SEE_OTHER
+    );
+    state.db.close().await;
+
+    // Resetting removes the stored password and reopens setup on the next start.
+    let pool = db::connect(&url).await.unwrap();
+    assert!(db::dashboard_admin::reset(&pool).await.unwrap());
+    pool.close().await;
+    let reset = stored_state(&url).await;
+    assert!(reset.dashboard_setup_code().is_some());
+    assert_eq!(
+        location(&get(&app::router(reset), "/", &[]).await),
+        "/setup"
+    );
+}
+
+#[tokio::test]
+async fn an_environment_password_skips_setup_and_cannot_be_changed_in_the_dashboard() {
+    let state = auth_state(Some(PASSWORD), false, None).await;
+    let router = app::router(state.clone());
+    assert!(state.dashboard_setup_code().is_none());
+    assert_eq!(location(&get(&router, "/setup", &[]).await), "/login");
+    let cookie = cookie_header(token_of(
+        &session_cookie(&login(&router, &state, PASSWORD).await).unwrap(),
+    ));
+    let settings = body(get(&router, "/settings", &[("cookie", cookie.as_str())]).await).await;
+    assert!(settings.contains("password from ROUTER_DASHBOARD_PASSWORD"));
+    assert!(!settings.contains("action=\"/settings/password\""));
+    let change = post_form(
+        &router,
+        "/settings/password",
+        &[
+            ("_csrf", state.csrf_token.as_str()),
+            ("current", PASSWORD),
+            ("password", "replacement admin password"),
+            ("confirm", "replacement admin password"),
+        ],
+        &[("cookie", cookie.as_str())],
+    )
+    .await;
+    assert_eq!(change.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        login(&router, &state, PASSWORD).await.status(),
+        StatusCode::SEE_OTHER
+    );
 }

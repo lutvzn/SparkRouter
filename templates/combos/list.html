@@ -20,6 +20,7 @@
     <option value="music"{% if category == "music" %} selected{% endif %}>Music</option>
     <option value="tts"{% if category == "tts" %} selected{% endif %}>TTS</option>
     <option value="stt"{% if category == "stt" %} selected{% endif %}>STT</option>
+    <option value="embedding"{% if category == "embedding" %} selected{% endif %}>Embedding</option>
   </select>
   <button class="btn" type="submit">Filter</button>
   <a class="btn primary" href="/combos/new{% if !category.is_empty() %}?category={{ category }}{% endif %}"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Add combo</a>

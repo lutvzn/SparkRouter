@@ -29,9 +29,18 @@ pub(crate) struct Usage {
     cost_usd: Option<f64>,
 }
 
-/// A streamed event with every field except `usage` skipped unparsed.
+/// A streamed event with every field except `usage` skipped unparsed. The
+/// Responses API reports it inside the final event's `response` object.
 #[derive(serde::Deserialize)]
 struct UsageEvent {
+    #[serde(default)]
+    usage: Value,
+    #[serde(default)]
+    response: Option<UsageEnvelope>,
+}
+
+#[derive(serde::Deserialize)]
+struct UsageEnvelope {
     #[serde(default)]
     usage: Value,
 }
@@ -49,7 +58,10 @@ impl Usage {
             return Self::default();
         }
         serde_json::from_str::<UsageEvent>(data)
-            .map(|event| Self::from_usage(&event.usage))
+            .map(|event| match event.response {
+                Some(response) if event.usage.is_null() => Self::from_usage(&response.usage),
+                _ => Self::from_usage(&event.usage),
+            })
             .unwrap_or_default()
     }
 
@@ -249,11 +261,12 @@ pub(crate) async fn record_response(
                 Ok(bytes) => {
                     if let Some(observer) = decoder.as_mut() {
                         let observed = observer.push_chunk(bytes, |event| {
-                            if event.data.trim() == "[DONE]" {
+                            // The final Responses event also carries the usage.
+                            guard.usage.merge(Usage::from_event(&event.data));
+                            if crate::providers::openai::is_terminal(&event) {
                                 guard.done = true;
                                 return ControlFlow::Break(());
                             }
-                            guard.usage.merge(Usage::from_event(&event.data));
                             ControlFlow::Continue(())
                         });
                         if observed.is_err() { decoder = None; }
@@ -453,7 +466,7 @@ mod tests {
             ))
             .unwrap(),
             api_key: None,
-            dashboard_password: None,
+            dashboard_login: crate::config::DashboardLogin::Disabled,
             dashboard_secure_cookie: false,
         }
     }

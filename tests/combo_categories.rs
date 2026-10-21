@@ -28,7 +28,7 @@ async fn state() -> AppState {
         bind: "127.0.0.1:0".parse().unwrap(),
         crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([71; 32]))).unwrap(),
         api_key: None,
-        dashboard_password: None,
+        dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
     })
     .await
@@ -392,6 +392,8 @@ async fn picker_only_suggests_models_with_positive_category_evidence() {
             Category::Music => &["declared-music"],
             Category::Tts => &["speech", "declared-tts"],
             Category::Stt => &["transcription"],
+            // Text output alone never suggests an embedding model.
+            Category::Embedding => &[],
         };
         let html = get(&state, &format!("/combos/{}", combo.id)).await;
         for name in all {

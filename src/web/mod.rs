@@ -41,6 +41,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", get(auth::page).post(auth::login))
         .route("/logout", get(auth::logout_page).post(auth::logout))
+        .route("/setup", get(auth::setup_page).post(auth::setup))
+        .route("/settings/password", post(auth::change_password))
         .route("/settings", get(settings::page).post(settings::save))
         .route("/settings/history/clear", post(settings::clear_history))
         .route("/settings/logging", post(settings::save_logging))

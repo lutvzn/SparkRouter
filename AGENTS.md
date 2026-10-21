@@ -66,7 +66,8 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   whose last refresh listed it, oldest first, with once-each fallback. Never
   cross provider slugs or treat raw IDs as aliases. Combo steps retain upstream
   IDs unchanged. A missing model list never blocks a combo step. Each combo has
-  one enforced category (Text, Decision, Image, Video, Music, TTS, STT);
+  one enforced category (Text, Decision, Image, Video, Music, TTS, STT,
+  Embedding);
   wrong-mode requests are rejected rather than filtering a mixed chain. Model
   IDs are never guessed into categories: adding an unclassified connection/model
   explicitly declares its category, constrained by known modalities, endpoint

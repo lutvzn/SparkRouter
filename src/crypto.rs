@@ -13,6 +13,10 @@ use zeroize::Zeroizing;
 // Provider ID is authenticated too, preventing ciphertext swaps between records.
 pub struct Crypto {
     key: Zeroizing<[u8; 32]>,
+    /// HMAC key for fingerprints. It is the master key until the first
+    /// rotation, which seals it in SQLite so stored gateway-key fingerprints,
+    /// which cannot be recomputed without the keys, stay valid.
+    fingerprint_key: Zeroizing<[u8; 32]>,
 }
 
 impl Crypto {
@@ -29,7 +33,10 @@ impl Crypto {
             ));
         }
         key.copy_from_slice(&decoded);
-        Ok(Self { key })
+        Ok(Self {
+            fingerprint_key: key.clone(),
+            key,
+        })
     }
 
     pub fn encrypt_api_key(
@@ -37,6 +44,21 @@ impl Crypto {
         provider_id: &str,
         secret: &SecretString,
     ) -> Result<Vec<u8>, AppError> {
+        self.seal(provider_id.as_bytes(), secret.expose_secret().as_bytes())
+    }
+
+    pub fn decrypt_api_key(
+        &self,
+        provider_id: &str,
+        envelope: &[u8],
+    ) -> Result<SecretString, AppError> {
+        let plain = self.open(provider_id.as_bytes(), envelope)?;
+        let text = std::str::from_utf8(&plain).map_err(|_| AppError::Encryption)?;
+        Ok(SecretString::from(text))
+    }
+
+    /// Encrypt `plain` into a v1 envelope bound to `context`.
+    pub(crate) fn seal(&self, context: &[u8], plain: &[u8]) -> Result<Vec<u8>, AppError> {
         let cipher =
             Aes256Gcm::new_from_slice(self.key.as_ref()).map_err(|_| AppError::Encryption)?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -44,8 +66,8 @@ impl Crypto {
             .encrypt(
                 &nonce,
                 Payload {
-                    msg: secret.expose_secret().as_bytes(),
-                    aad: provider_id.as_bytes(),
+                    msg: plain,
+                    aad: context,
                 },
             )
             .map_err(|_| AppError::Encryption)?;
@@ -56,29 +78,46 @@ impl Crypto {
         Ok(envelope)
     }
 
-    pub fn decrypt_api_key(
+    /// Decrypt a v1 envelope sealed with this key for `context`.
+    pub(crate) fn open(
         &self,
-        provider_id: &str,
+        context: &[u8],
         envelope: &[u8],
-    ) -> Result<SecretString, AppError> {
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if envelope.len() < 29 || envelope[0] != 1 {
             return Err(AppError::Encryption);
         }
         let cipher =
             Aes256Gcm::new_from_slice(self.key.as_ref()).map_err(|_| AppError::Encryption)?;
-        let plain = Zeroizing::new(
+        Ok(Zeroizing::new(
             cipher
                 .decrypt(
                     Nonce::from_slice(&envelope[1..13]),
                     Payload {
                         msg: &envelope[13..],
-                        aad: provider_id.as_bytes(),
+                        aad: context,
                     },
                 )
                 .map_err(|_| AppError::Encryption)?,
-        );
-        let text = std::str::from_utf8(&plain).map_err(|_| AppError::Encryption)?;
-        Ok(SecretString::from(text))
+        ))
+    }
+
+    pub(crate) fn master_key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    pub(crate) fn set_fingerprint_key(&mut self, key: &[u8]) -> Result<(), AppError> {
+        if key.len() != self.fingerprint_key.len() {
+            return Err(AppError::Encryption);
+        }
+        self.fingerprint_key.copy_from_slice(key);
+        Ok(())
+    }
+
+    /// True when both values hold the same master key.
+    pub(crate) fn same_master_key(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq as _;
+        bool::from(self.key.as_slice().ct_eq(other.key.as_slice()))
     }
 
     /// HMAC-SHA256 fingerprint of a gateway API key. The master key is the HMAC
@@ -100,8 +139,9 @@ impl Crypto {
     }
 
     fn fingerprint_bytes(&self, domain: &[u8], value: &[u8]) -> Result<String, AppError> {
-        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.key.as_ref())
-            .map_err(|_| AppError::Encryption)?;
+        let mut mac =
+            <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.fingerprint_key.as_ref())
+                .map_err(|_| AppError::Encryption)?;
         <Hmac<Sha256> as Mac>::update(&mut mac, domain);
         <Hmac<Sha256> as Mac>::update(&mut mac, value);
         Ok(STANDARD.encode(<Hmac<Sha256> as Mac>::finalize(mac).into_bytes()))

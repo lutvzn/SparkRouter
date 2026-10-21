@@ -20,7 +20,13 @@ async fn state(password: bool) -> AppState {
         bind: "127.0.0.1:0".parse().unwrap(),
         crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([27; 32]))).unwrap(),
         api_key: Some(SecretString::from("private-api-value")),
-        dashboard_password: password.then(|| SecretString::from("private-dashboard-password")),
+        dashboard_login: if password {
+            sparkrouter::config::DashboardLogin::Environment(SecretString::from(
+                "private-dashboard-password",
+            ))
+        } else {
+            sparkrouter::config::DashboardLogin::Disabled
+        },
         dashboard_secure_cookie: false,
     })
     .await

@@ -1,4 +1,8 @@
-use crate::{app::AppState, error::AppError, routing};
+use crate::{
+    app::AppState,
+    error::AppError,
+    routing::{self, affinity::Endpoint},
+};
 use axum::{
     Extension,
     extract::{State, rejection::BytesRejection},
@@ -13,7 +17,7 @@ pub(crate) async fn complete(
     headers: axum::http::HeaderMap,
     payload: Result<Bytes, BytesRejection>,
 ) -> Result<Response, AppError> {
-    execute(state, auth, headers, payload, false).await
+    execute(state, auth, headers, payload, Endpoint::Chat).await
 }
 
 pub(crate) async fn systemone(
@@ -22,7 +26,25 @@ pub(crate) async fn systemone(
     headers: axum::http::HeaderMap,
     payload: Result<Bytes, BytesRejection>,
 ) -> Result<Response, AppError> {
-    execute(state, auth, headers, payload, true).await
+    execute(state, auth, headers, payload, Endpoint::SystemOne).await
+}
+
+pub(crate) async fn responses(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::app::Authorization>,
+    headers: axum::http::HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    execute(state, auth, headers, payload, Endpoint::Responses).await
+}
+
+pub(crate) async fn embeddings(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::app::Authorization>,
+    headers: axum::http::HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Response, AppError> {
+    execute(state, auth, headers, payload, Endpoint::Embeddings).await
 }
 
 async fn execute(
@@ -30,7 +52,7 @@ async fn execute(
     auth: crate::app::Authorization,
     headers: axum::http::HeaderMap,
     payload: Result<Bytes, BytesRejection>,
-    systemone: bool,
+    endpoint: Endpoint,
 ) -> Result<Response, AppError> {
     let started = std::time::Instant::now();
     let body = super::json_body(&headers, payload)?;
@@ -50,7 +72,7 @@ async fn execute(
     if body.get("stream").is_some_and(|v| !v.is_boolean()) {
         return Err(AppError::InvalidRequest("stream must be a boolean".into()));
     }
-    if systemone {
+    if endpoint == Endpoint::SystemOne {
         if !body
             .get("state")
             .is_some_and(|state| state.is_string() || state.is_object() || state.is_array())
@@ -70,6 +92,16 @@ async fn execute(
             ));
         }
     }
+    if endpoint == Endpoint::Embeddings {
+        if body.get("input").is_none_or(Value::is_null) {
+            return Err(AppError::InvalidRequest("input is required".into()));
+        }
+        if body.get("stream").and_then(Value::as_bool) == Some(true) {
+            return Err(AppError::InvalidRequest(
+                "Embeddings do not support streaming".into(),
+            ));
+        }
+    }
     if !auth.access.allows(model) {
         return Err(AppError::Forbidden);
     }
@@ -79,12 +111,8 @@ async fn execute(
     if model == "combo/" {
         return Err(AppError::InvalidRequest("Use model: combo/<name>".into()));
     }
-    let context = routing::affinity::RequestContext::new(auth.affinity_scope(&state), &headers);
-    let context = if systemone {
-        context.for_systemone()
-    } else {
-        context
-    };
+    let context = routing::affinity::RequestContext::new(auth.affinity_scope(&state), &headers)
+        .for_endpoint(endpoint);
     routing::validate_combo_category(&state, model, context.category()).await?;
     let permit = auth.admit(&state)?;
     let capture = crate::history_payload::Capture::start(&state, &body).await;

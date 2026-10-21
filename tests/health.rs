@@ -18,7 +18,9 @@ async fn state() -> AppState {
         bind: "127.0.0.1:0".parse().unwrap(),
         crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([8; 32]))).unwrap(),
         api_key: Some(SecretString::from("probe-secret-key")),
-        dashboard_password: Some(SecretString::from("probe-dashboard-password")),
+        dashboard_login: sparkrouter::config::DashboardLogin::Environment(SecretString::from(
+            "probe-dashboard-password",
+        )),
         dashboard_secure_cookie: false,
     })
     .await

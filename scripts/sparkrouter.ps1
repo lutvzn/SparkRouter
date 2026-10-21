@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'run', 'stop', 'restart', 'rebuild', 'status', 'logs', 'health', 'build', 'check', 'test', 'keygen', 'help')]
+    [ValidateSet('start', 'run', 'stop', 'restart', 'rebuild', 'status', 'logs', 'health', 'build', 'check', 'test', 'keygen', 'rotate-key', 'reset-password', 'help')]
     [string]$Command = 'help',
     [string]$EnvFile,
     [string]$StateDir,
@@ -29,7 +29,8 @@ $ManagedAddress = $null
 function Show-Help {
     @'
 Usage: ./scripts/sparkrouter.ps1 COMMAND [options]
-Commands: start, run, stop, restart, rebuild, status, logs, health, build, check, test, keygen, help
+Commands: start, run, stop, restart, rebuild, status, logs, health, build, check, test, keygen,
+          rotate-key, reset-password, help
 Options: -EnvFile FILE  -StateDir DIR  -DebugBuild  -Url URL  -TimeoutSeconds N
 Defaults: release build, .sparkrouter state directory, 30-second stop timeout.
 Loads .env from the caller working directory if present unless -EnvFile is specified.
@@ -38,12 +39,15 @@ start builds if the binary is missing. run stays in the foreground (Ctrl+C to st
 rebuild stops, builds, and starts again; a failed build leaves the server stopped.
 On Windows, stop forcibly terminates the managed process; it cannot drain streams.
 Use run and Ctrl+C when you need graceful shutdown.
+The first start prints a one-time dashboard setup code; open /setup to choose the password.
+rotate-key re-encrypts stored credentials to ROUTER_NEW_MASTER_KEY (server must be stopped).
+reset-password removes the stored dashboard password (server must be stopped).
 '@
 }
 function Import-EnvironmentFile {
     param([string]$Path)
-    $Allowed = @('ROUTER_MASTER_KEY','ROUTER_DATABASE_URL','ROUTER_API_KEY','ROUTER_BIND',
-        'ROUTER_DASHBOARD_PASSWORD','ROUTER_DASHBOARD_SECURE_COOKIE','RUST_LOG')
+    $Allowed = @('ROUTER_MASTER_KEY','ROUTER_NEW_MASTER_KEY','ROUTER_DATABASE_URL','ROUTER_API_KEY','ROUTER_BIND',
+        'ROUTER_DASHBOARD_PASSWORD','ROUTER_DASHBOARD_AUTH','ROUTER_DASHBOARD_SECURE_COOKIE','RUST_LOG')
     foreach ($Line in [IO.File]::ReadAllLines($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))) {
         if ($Line -match '^\s*(#|$)') { continue }
         if ($Line -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
@@ -120,6 +124,28 @@ function Get-ManagedProcess {
     } catch { $Process.Dispose(); throw 'Unable to verify process identity; refusing to terminate it' }
     return $Process
 }
+# The server prints a one-time code while no dashboard password exists and
+# logs when setup completes; only an unused code is worth showing.
+function Show-SetupHint {
+    if (-not (Test-Path -LiteralPath $OutLog -PathType Leaf)) { return }
+    $Found = Select-String -LiteralPath $OutLog -Pattern 'dashboard setup code [A-Z0-9-]+|first-run setup complete' |
+        Select-Object -Last 1
+    if ($null -ne $Found -and $Found.Matches[0].Value.StartsWith('dashboard setup code')) {
+        Write-Host "First run: open $(Get-LocalUrl)/setup and enter the $($Found.Matches[0].Value)."
+    }
+}
+# Offline maintenance commands refuse to run beside a managed server.
+function Invoke-Offline {
+    param([string]$Subcommand)
+    Lock-State
+    $Running = Get-ManagedProcess
+    if ($null -ne $Running) {
+        $Id = $Running.Id; $Running.Dispose(); throw "Stop the server first (PID $Id is running)"
+    }
+    Ensure-Binary
+    & $Binary $Subcommand
+    if ($LASTEXITCODE -ne 0) { throw "SparkRouter exited with code $LASTEXITCODE" }
+}
 function Start-Router {
     $Existing = Get-ManagedProcess
     if ($null -ne $Existing) {
@@ -139,6 +165,7 @@ function Start-Router {
         $Saved = @{ pid = $Process.Id; binary = $Binary; startedUtcTicks = $Process.StartTime.ToUniversalTime().Ticks.ToString(); address = $Address }
         $Saved | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
         Write-Host "Started PID $($Process.Id) at $Address. Logs: $StateDir"
+        Show-SetupHint
         Write-Host 'Use health to check readiness; process startup alone does not prove readiness.'
     } finally { $Process.Dispose() }
 }
@@ -160,7 +187,7 @@ try {
     }
     if ($EnvFile) { Import-EnvironmentFile $EnvFile }
     Set-Location -LiteralPath $Root
-    if ($Command -in @('start','stop','restart','rebuild','run','status') -and $env:OS -ne 'Windows_NT') {
+    if ($Command -in @('start','stop','restart','rebuild','run','status','rotate-key','reset-password') -and $env:OS -ne 'Windows_NT') {
         throw 'Use scripts/sparkrouter.sh for Linux/macOS/WSL lifecycle management'
     }
     switch ($Command) {
@@ -170,8 +197,14 @@ try {
             $Rng = [Security.Cryptography.RandomNumberGenerator]::Create()
             try { $Rng.GetBytes($Bytes); [Convert]::ToBase64String($Bytes) }
             finally { $Rng.Dispose(); [Array]::Clear($Bytes, 0, $Bytes.Length) }
-            [Console]::Error.WriteLine('Save this master key securely and reuse it; this does not rotate stored credentials.')
+            [Console]::Error.WriteLine('Save this master key securely and reuse it. To rotate, set it as ROUTER_NEW_MASTER_KEY and run rotate-key.')
         }
+        'rotate-key' {
+            if (-not $env:ROUTER_MASTER_KEY) { throw 'Set ROUTER_MASTER_KEY or pass -EnvFile FILE' }
+            if (-not $env:ROUTER_NEW_MASTER_KEY) { throw 'Set ROUTER_NEW_MASTER_KEY to a new key from keygen (save it first)' }
+            Invoke-Offline 'rotate-master-key'
+        }
+        'reset-password' { Invoke-Offline 'reset-dashboard-password' }
         'build' { Build-Binary }
         'check' {
             Invoke-Cargo -CargoArguments @('fmt','--check')
@@ -193,7 +226,7 @@ try {
         'status' {
             $Process = Get-ManagedProcess
             if ($null -eq $Process) { Write-Host 'Not running (or process identity no longer matches).'; exit 1 }
-            Write-Host "Running (PID $($Process.Id))$(Format-Address)."; $Process.Dispose()
+            Write-Host "Running (PID $($Process.Id))$(Format-Address)."; $Process.Dispose(); Show-SetupHint
         }
         'logs' {
             foreach ($File in @($OutLog,$ErrLog)) {
@@ -211,7 +244,7 @@ try {
 } catch {
     # Do not echo exception details that could contain submitted configuration/secrets.
     # Our own fixed messages provide context; native command output remains unchanged.
-    if ($_.Exception.Message -match '^(Invalid environment|Unsupported environment|Unmatched environment|Another helper|Invalid process state|Unable to verify|Set ROUTER_MASTER_KEY|Startup failed|Shutdown timed out|Use scripts/|cargo failed|SparkRouter exited)') {
+    if ($_.Exception.Message -match '^(Invalid environment|Unsupported environment|Unmatched environment|Another helper|Invalid process state|Unable to verify|Set ROUTER_MASTER_KEY|Set ROUTER_NEW_MASTER_KEY|Stop the server first|Startup failed|Shutdown timed out|Use scripts/|cargo failed|SparkRouter exited)') {
         Write-Error $_.Exception.Message -ErrorAction Continue
     } else { Write-Error 'Helper operation failed; check file permissions, configuration, and command availability.' -ErrorAction Continue }
     exit 1

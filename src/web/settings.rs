@@ -18,6 +18,8 @@ struct SettingsPage {
     history_buffer: String,
     notice: &'static str,
     dashboard_auth: &'static str,
+    password_changeable: bool,
+    password_error: &'static str,
     api_auth: &'static str,
     database_status: &'static str,
     version: &'static str,
@@ -110,12 +112,22 @@ pub(super) async fn render_page(
             Some("logging") => "Request logging mode saved. Existing history is unchanged.",
             Some("buffer") => "History write buffer saved. It applies immediately.",
             Some("cleared") => "History cleared. Dashboard usage totals have been reset.",
+            Some("password") => "Dashboard password changed. Other sessions were signed out.",
             _ => "",
         },
-        dashboard_auth: if state.dashboard_auth.is_some() {
-            "Enabled"
-        } else {
-            "Disabled — dashboard is open"
+        dashboard_auth: state.dashboard_auth.as_ref().map_or(
+            "Disabled by ROUTER_DASHBOARD_AUTH — dashboard is open",
+            |auth| auth.describe(),
+        ),
+        password_changeable: state
+            .dashboard_auth
+            .as_ref()
+            .is_some_and(|auth| auth.changeable()),
+        password_error: match result {
+            Some("password-wrong") => "The current password is incorrect.",
+            Some(code) => super::auth::PasswordProblem::from_code(code)
+                .map_or("", super::auth::PasswordProblem::message),
+            None => "",
         },
         api_auth,
         database_status: if ready { "Connected" } else { "Unavailable" },

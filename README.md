@@ -35,9 +35,9 @@ $env:ROUTER_API_KEY = 'a-long-random-gateway-key'
 .\target\release\sparkrouter.exe
 ```
 
-**Save the generated master key securely and reuse it on every restart.** Changing it does not rotate stored credentials; existing credentials become unreadable. Back up the key separately from the database. The executable reads process environment variables; `.env.example` is a reference, not an automatically loaded configuration file.
+**Save the generated master key securely and reuse it on every restart.** Starting with a different key fails with a mismatch error; to change it, rotate it as described in [Master-key rotation](#master-key-rotation). Back up the key separately from the database. The executable reads process environment variables; `.env.example` is a reference, not an automatically loaded configuration file.
 
-Open **http://127.0.0.1:14673/** for the Overview dashboard:
+Open **http://127.0.0.1:14673/** for the Overview dashboard. The dashboard always requires a password, including on localhost. On first start the server logs `dashboard setup required: open http://…/setup and enter dashboard setup code XXXX-XXXX-XXXX-XXXX`; open `/setup`, enter that one-time code, and choose the admin password (at least 12 characters):
 
 The Overview is the default login destination and sidebar entry. It shows SQLite read connectivity, successful and failed request counts, and current process resident memory (Linux; unavailable on other platforms). Status is sampled on page load; reload to refresh. Failed counts include errors, interrupted streams, and cancellations, not authentication/validation/traffic-limit rejections. Pending streams are excluded. Database/history failures show unavailable values instead of fabricated zeros; connectivity does not prove write access. It also summarizes retained request usage in four cards (input/output/cache tokens and USD spend; the request total is the successful plus failed counts) and ranks the top ten providers by requests. Use the sidebar to switch between **Overview**, **Providers**, **Combos**, **API keys**, **Test**, **History**, and **Settings**; **Log out** sits at its foot. On smaller screens navigation becomes one horizontally scrollable row above the page. With JavaScript enabled, deleting a provider, connection, or combo, revoking a key, and clearing history ask for browser confirmation first, and history/key creation times are shown in the browser's local time (hover for the stored UTC value).
 The top-right theme button switches between **Light** and **Dark**. Initially it
@@ -120,8 +120,9 @@ Explicit `supported_endpoints` / `supportedEndpoints` discovery metadata is
 also recognized (chat, images, videos, music, speech, transcription/translation,
 and SystemOne, including common `/v1/` paths and hyphenated aliases). Endpoint
 metadata takes precedence over advisory catalog entries; contradictory modality
-metadata still blocks the model. Unknown/non-gateway-only endpoints, such as
-embeddings, do not silently become Text. The same policy applies to suggestions,
+metadata still blocks the model. An `embeddings` endpoint declaration is evidence
+for the Embedding category; unknown/non-gateway-only endpoints never silently
+become Text. The same policy applies to suggestions,
 step mutations, imports, and combo routing. Existing wrong-category declarations
 fail closed and must be corrected, not silently reassigned. Imports revalidate
 catalog entries; cached endpoint metadata is not transferred.
@@ -413,7 +414,8 @@ process environment variables.
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite URL; database and schema created on startup |
 | `ROUTER_API_KEY` | unset | Optional bearer key protecting `/v1/*`; an explicitly empty value is rejected. Dashboard-generated keys also authorize `/v1/*` and, once any exist, require authentication even when this variable is unset |
 | `ROUTER_BIND` | `127.0.0.1:14673` | IP address and port |
-| `ROUTER_DASHBOARD_PASSWORD` | unset | Optional separate admin login; 16–1024 bytes, not blank. Use a long random password |
+| `ROUTER_DASHBOARD_PASSWORD` | unset | Optional fixed admin password instead of the one chosen at first-run setup; 16–1024 bytes, not blank. It cannot be changed in the dashboard |
+| `ROUTER_DASHBOARD_AUTH` | `required` | `required` or `disabled`. Disable only behind an authenticating reverse proxy; cannot be combined with `ROUTER_DASHBOARD_PASSWORD` |
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` for HTTPS deployment; marks dashboard session cookies Secure. Must be `true` or `false` |
 | `RUST_LOG` | `info` | `tracing` filter |
 
@@ -448,6 +450,47 @@ requires JavaScript and resets on navigation/reload; tag assignments persist in
 SQLite across restarts. These dashboard-only assignments are included in full
 database backups, but not configuration export/import (imported providers use
 their protocol defaults).
+
+### Responses API and embeddings
+
+`POST /v1/responses` passes OpenAI Responses requests through like chat: only
+`model` is replaced, unknown fields are preserved, and upstream JSON or SSE bytes
+are forwarded unchanged. It uses **Text** combos and direct IDs, and only OpenAI-
+and xAI-protocol connections are eligible (Anthropic, MiniMax and SystemOne
+steps are skipped, as other wrong-protocol steps are). Fallback follows the chat
+rules: retryable failures before the first streamed byte try the next target,
+and nothing falls back afterwards. A stream is complete only at a
+`response.completed`, `response.incomplete`, or `response.failed` event; an
+upstream EOF before that ends the body as interrupted. Usage from the final
+response is recorded in history. Stateful features such as
+`previous_response_id`, `conversation`, and stored responses live at the upstream
+that created them, so a fallback to a different provider usually fails for those
+requests; use combo session affinity to keep a conversation on one target. Only
+`POST /v1/responses` is routed: retrieving, cancelling, or deleting a stored
+response by ID has no model to route by and is not proxied.
+
+```sh
+curl http://127.0.0.1:14673/v1/responses \
+  -H "Authorization: Bearer $ROUTER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"combo/coding","input":"Write a haiku about routers.","stream":true}'
+```
+
+`POST /v1/embeddings` requires an **Embedding** combo (or a direct ID) with
+OpenAI-protocol connections, which covers OpenAI and most OpenAI-compatible
+servers. The request needs `input` and cannot stream; everything else
+(`dimensions`, `encoding_format`, vendor fields) passes through, and the vector
+response is returned unchanged with its usage recorded. Embedding models are not
+in the bundled catalogs, so adding one to an Embedding combo declares it there;
+a model documented as a chat model is refused. Embedding combos never serve
+chat, and Text combos never serve embeddings.
+
+```sh
+curl http://127.0.0.1:14673/v1/embeddings \
+  -H "Authorization: Bearer $ROUTER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"combo/vectors","input":["first text","second text"]}'
+```
 
 ### SystemOne evaluations (TypeSafe AI)
 
@@ -563,7 +606,18 @@ only to the public IDs; an allowed combo does not expose its underlying direct I
 
 Keys are encrypted using AES-256-GCM with a fresh random nonce and authenticated provider ID. The database stores versioned ciphertext; the master key is never stored there. Secret values are wrapped with `secrecy` and key/decryption buffers use `zeroize`. Normal logs include routing IDs, model, latency, status, and fallback events; they omit credentials and upstream bodies.
 
-Set `ROUTER_DASHBOARD_PASSWORD` to enable a single-admin dashboard login at `/login`. Sessions expire after eight hours and are revoked by logout or restart; cookies are HttpOnly and SameSite=Strict. Set `ROUTER_DASHBOARD_SECURE_COOKIE=true` behind HTTPS. There are at most 128 active sessions, and ten failed logins per minute trigger a temporary limit per socket-peer IP; a successful login clears that peer's count. Forwarded headers are not trusted; behind a reverse proxy, add a per-client login limit there because clients share the proxy's peer IP. There are no user accounts or password recovery; change the environment password and restart to change it. Login is optional for existing local installations: **without the password, the dashboard remains open**. Keep it local or behind an authenticated reverse proxy. Do not expose dashboard passwords over public HTTP.
+The dashboard requires a single-admin login at `/login` by default, including on loopback. Until a password exists, every dashboard page redirects to `/setup`, which needs the one-time setup code the server logs at startup; the code proves control of the server, so whoever reaches an unconfigured dashboard first cannot claim it. The chosen password (12+ characters) is stored as an Argon2id hash in SQLite and can be changed in **Settings**, which signs out every other session. `ROUTER_DASHBOARD_PASSWORD` instead fixes the password in the environment (no setup, not changeable in the dashboard). If you forget a stored password, stop the server, run `sparkrouter reset-dashboard-password`, and use the new setup code printed at the next start. `ROUTER_DASHBOARD_AUTH=disabled` turns the login off for deployments behind an authenticating reverse proxy; the server logs a warning when it is off. Sessions expire after eight hours and are revoked by logout, a password change, or restart; cookies are HttpOnly and SameSite=Strict. Set `ROUTER_DASHBOARD_SECURE_COOKIE=true` behind HTTPS. There are at most 128 active sessions, and ten failed login, setup-code, or current-password attempts per minute trigger a temporary limit per socket-peer IP; a successful attempt clears that peer's count. Forwarded headers are not trusted; behind a reverse proxy, add a per-client login limit there because clients share the proxy's peer IP. There are no user accounts. Do not expose dashboard passwords over public HTTP.
+
+### Master-key rotation
+
+The database records an encrypted check value, so starting with the wrong `ROUTER_MASTER_KEY` fails instead of producing undecryptable credentials. To rotate the key, stop the server, generate and save a new key, then run:
+
+```sh
+ROUTER_NEW_MASTER_KEY="$(openssl rand -base64 32)"   # save this value first
+ROUTER_MASTER_KEY=<current key> ROUTER_NEW_MASTER_KEY=<new key> sparkrouter rotate-master-key
+```
+
+Every provider credential and unrevealed generated-key envelope is decrypted with the current key and re-encrypted with the new one in one transaction. If any stored credential does not decrypt, nothing changes. Afterwards set `ROUTER_MASTER_KEY` to the new key and start the server; the old key no longer starts it. Generated gateway API keys keep working: their fingerprints cannot be recomputed without the keys, so the first rotation stores the fingerprint key sealed with the new master key. Regenerate API keys if you also want to retire those fingerprints. Backups made before the rotation still need the old key. The helpers wrap this as `rotate-key`, and Docker as `docker run --rm -v sparkrouter-data:/data -e ROUTER_MASTER_KEY -e ROUTER_NEW_MASTER_KEY sparkrouter rotate-master-key`.
 
 `ROUTER_API_KEY` and dashboard-generated API keys protect gateway endpoints only; a dashboard session does not authorize API requests. Generated keys support model allowlists and expiry, are shown once, and are authenticated by a master-key fingerprint; the temporary encrypted reveal envelope is cleared on first viewing. Dashboard forms retain CSRF and origin checks; scripts/styles are local embedded assets. Provider URLs intentionally permit private/local endpoints, so dashboard access grants control over outbound connections. TLS termination belongs at your reverse proxy.
 
@@ -571,8 +625,9 @@ Set `ROUTER_DASHBOARD_PASSWORD` to enable a single-admin dashboard login at `/lo
 
 **Settings** (`/settings`) offers browser-local Light/Dark/System appearance,
 request-history retention (1–10,000 records, default 10,000), a confirmed clear
-history action, configuration export/import with inline preview, and read-only authentication
-and system status (version, uptime, database read connectivity, Linux resident
+history action, configuration export/import with inline preview, a dashboard
+password change form (stored passwords only; it requires the current password and
+signs out other sessions), and read-only authentication and system status (version, uptime, database read connectivity, Linux resident
 RAM). Refresh the page to update status. Retention persists in SQLite; lowering
 it immediately and irreversibly prunes older requests and attempts and updates
 Overview totals. Increasing it cannot recover deleted history. Clearing history
@@ -685,7 +740,7 @@ ROUTER_API_KEY=replace-with-a-long-random-gateway-key
 EOF
 ```
 
-Optionally add `ROUTER_DASHBOARD_PASSWORD` (and `ROUTER_DASHBOARD_SECURE_COOKIE=true` behind HTTPS). Do **not** copy `ROUTER_BIND` or `ROUTER_DATABASE_URL` from `.env.example`: its loopback bind would make the container unreachable from the host. Env files are plain `KEY=value` lines without quotes.
+On first start, read the dashboard setup code from the container log (`docker logs sparkrouter`) and open `/setup`. Optionally add `ROUTER_DASHBOARD_PASSWORD` to fix the password instead (and `ROUTER_DASHBOARD_SECURE_COOKIE=true` behind HTTPS). Do **not** copy `ROUTER_BIND` or `ROUTER_DATABASE_URL` from `.env.example`: its loopback bind would make the container unreachable from the host. Env files are plain `KEY=value` lines without quotes.
 
 #### 2a. Docker
 
@@ -808,6 +863,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-`/v1/chat/completions`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No embeddings, Responses API, Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+`/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
-Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking, server-tool, and other auxiliary content blocks (and citation metadata) are not exposed as answer text. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. There is no master-key rotation workflow in this version.
+Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; unknown extension fields pass through. Thinking, server-tool, and other auxiliary content blocks (and citation metadata) are not exposed as answer text. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.

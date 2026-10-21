@@ -24,11 +24,21 @@ const CACHE_IDLE: Duration = Duration::from_secs(30 * 60);
 const MAX_ENTRIES: usize = 4096;
 const MAX_SESSION_BYTES: usize = 256;
 
+/// The JSON API a non-media request arrived on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    #[default]
+    Chat,
+    SystemOne,
+    Responses,
+    Embeddings,
+}
+
 // No Debug: the transient header may contain a private session identifier.
 pub(crate) struct RequestContext {
     scope: String,
     session_header: Option<HeaderValue>,
-    pub(crate) systemone: bool,
+    pub(crate) endpoint: Endpoint,
     pub(crate) media: Option<crate::providers::media::Kind>,
     pub(crate) upload: Option<crate::providers::media::Upload>,
 }
@@ -38,7 +48,7 @@ impl Default for RequestContext {
         Self {
             scope: "anonymous".into(),
             session_header: None,
-            systemone: false,
+            endpoint: Endpoint::Chat,
             media: None,
             upload: None,
         }
@@ -46,9 +56,15 @@ impl Default for RequestContext {
 }
 
 impl RequestContext {
-    pub(crate) fn for_systemone(mut self) -> Self {
-        self.systemone = true;
-        self.scope.push_str(":systemone");
+    /// Endpoints keep separate placement hints: their eligible targets differ.
+    pub(crate) fn for_endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.endpoint = endpoint;
+        self.scope.push_str(match endpoint {
+            Endpoint::Chat => "",
+            Endpoint::SystemOne => ":systemone",
+            Endpoint::Responses => ":responses",
+            Endpoint::Embeddings => ":embeddings",
+        });
         self
     }
 
@@ -66,16 +82,15 @@ impl RequestContext {
 
     pub(crate) fn category(&self) -> crate::db::combos::Category {
         use crate::{db::combos::Category, providers::media::Kind};
-        if self.systemone {
-            return Category::Decision;
-        }
-        match self.media {
-            Some(Kind::Image | Kind::ImageEdit) => Category::Image,
-            Some(Kind::Video) => Category::Video,
-            Some(Kind::Music) => Category::Music,
-            Some(Kind::Speech) => Category::Tts,
-            Some(Kind::Transcription | Kind::Translation) => Category::Stt,
-            None => Category::Text,
+        match (self.media, self.endpoint) {
+            (Some(Kind::Image | Kind::ImageEdit), _) => Category::Image,
+            (Some(Kind::Video), _) => Category::Video,
+            (Some(Kind::Music), _) => Category::Music,
+            (Some(Kind::Speech), _) => Category::Tts,
+            (Some(Kind::Transcription | Kind::Translation), _) => Category::Stt,
+            (None, Endpoint::Chat | Endpoint::Responses) => Category::Text,
+            (None, Endpoint::SystemOne) => Category::Decision,
+            (None, Endpoint::Embeddings) => Category::Embedding,
         }
     }
 
@@ -84,13 +99,15 @@ impl RequestContext {
         if let Some(kind) = self.media {
             return kind.accepts(crate::providers::media::dialect(provider));
         }
-        if self.systemone {
-            provider.protocol == Protocol::SystemOne
-        } else {
-            matches!(
+        match self.endpoint {
+            Endpoint::SystemOne => provider.protocol == Protocol::SystemOne,
+            Endpoint::Chat => matches!(
                 provider.protocol,
                 Protocol::OpenAi | Protocol::Anthropic | Protocol::MiniMax | Protocol::Xai
-            )
+            ),
+            // Only these protocols implement OpenAI's `/responses` wire format.
+            Endpoint::Responses => matches!(provider.protocol, Protocol::OpenAi | Protocol::Xai),
+            Endpoint::Embeddings => provider.protocol == Protocol::OpenAi,
         }
     }
 
@@ -107,7 +124,7 @@ impl RequestContext {
         Self {
             scope,
             session_header,
-            systemone: false,
+            endpoint: Endpoint::Chat,
             media: None,
             upload: None,
         }

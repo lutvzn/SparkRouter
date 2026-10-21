@@ -82,7 +82,8 @@ See [category policy](README.md#category-specific-combos) for conservative mappi
 | `ROUTER_DATABASE_URL` | `sqlite://router.db` | SQLite storage location |
 | `ROUTER_API_KEY` | Unset | Optional bearer key for `/v1/*`; empty is invalid. Generated dashboard keys also authorize `/v1/*` |
 | `ROUTER_BIND` | `127.0.0.1:14673` | IP address and port, not a hostname |
-| `ROUTER_DASHBOARD_PASSWORD` | Unset | Optional single-admin login; nonblank 16–1024 bytes, preferably randomly generated |
+| `ROUTER_DASHBOARD_PASSWORD` | Unset | Optional fixed admin password instead of first-run setup; nonblank 16–1024 bytes, preferably randomly generated |
+| `ROUTER_DASHBOARD_AUTH` | `required` | `required` or `disabled`; disable only behind an authenticating reverse proxy |
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` when serving through HTTPS; only `true`/`false` accepted |
 | `RUST_LOG` | `info` | `tracing-subscriber` logging filter |
 
@@ -116,9 +117,17 @@ Open http://127.0.0.1:14673/providers. For development, `cargo run --locked` use
 the same environment configuration. Stop with Ctrl+C; Unix deployments also
 handle SIGTERM for graceful shutdown.
 
-**Do not generate a different master key every restart.** There is no automatic
-rotation: an old database requires its original key to decrypt provider keys.
-Back up that key separately from the database.
+**Do not generate a different master key every restart.** A database refuses to
+start with a key other than the one it was sealed with. To change the key, stop
+the server and run `sparkrouter rotate-master-key` with `ROUTER_MASTER_KEY` (current)
+and `ROUTER_NEW_MASTER_KEY` (new) set; see
+[Master-key rotation](README.md#master-key-rotation). Back up the key separately
+from the database.
+
+On first start the log prints a one-time `dashboard setup code`; open `/setup`
+and enter it to choose the dashboard password. Login is required even on
+localhost. `sparkrouter reset-dashboard-password` (server stopped) removes a
+forgotten stored password so the next start prints a new code.
 
 Request logging is configured in **Settings**, not `RUST_LOG`: Basic is
 metadata-only (default), Off skips new history, and Extended requires confirmation
@@ -167,6 +176,8 @@ organization's policy; the helper does not change execution policy for you.
 | `check` | Formatting check, `cargo check --locked`, and strict all-target/all-feature Clippy |
 | `test` | `cargo test --locked` |
 | `keygen` | Print a new random 32-byte Base64 master key; does not save or rotate keys |
+| `rotate-key` | With the server stopped, re-encrypt stored credentials from `ROUTER_MASTER_KEY` to `ROUTER_NEW_MASTER_KEY`; then replace `ROUTER_MASTER_KEY` with the new key and remove `ROUTER_NEW_MASTER_KEY` |
+| `reset-password` | With the server stopped, remove the stored dashboard password; the next start prints a new setup code |
 | `help` | List commands/options |
 
 `start` only verifies that the process survives initial startup; use `health` to
@@ -216,7 +227,7 @@ Env files are UTF-8 (use no BOM for Bash), with `KEY=value` lines, optional matc
 single/double quotes around literal values, blank lines, and full-line `#` comments.
 They are **data, not executable shell code**: no `export`, variable expansion,
 command substitution, multiline values, escape decoding, or inline comments.
-Only the seven documented `ROUTER_*`/`RUST_LOG` variables from `.env.example` are
+Only the documented `ROUTER_*`/`RUST_LOG` variables from `.env.example` are
 accepted. Empty values are rejected; omit optional unset variables instead.
 File values override inherited environment values for the command. PowerShell
 restores the caller's environment afterward. Errors do not echo submitted values.
@@ -257,11 +268,14 @@ clean database-backup window: use SQLite online backup or graceful shutdown.
 
 `start`, `run`, and `status` print the address the server listens on, taken from
 `ROUTER_BIND`; `status` reports the address recorded when `start` launched it.
+While no dashboard password exists, `start` and `status` also print the setup
+URL and the one-time setup code from the server log.
 `health` derives its URL from `ROUTER_BIND` (default loopback), mapping wildcard
 binds to loopback. Override with `--url URL` / `-Url URL` for HTTPS/reverse proxies.
 Pass the same env file when using a nondefault port. These helpers are conveniences,
 not a service manager: no boot registration, recovery supervisor, log rotation,
-backup automation, or master-key rotation is installed.
+or backup automation is installed. `rotate-key` and `reset-password` refuse to run
+while the managed server is running.
 
 ## SQLite and deployment layout
 
@@ -274,13 +288,14 @@ environment configuration. SQLite may create `router.db-wal` and `router.db-shm`
 while running. Do not delete these files from a live installation. Stop the
 application before a simple file-copy backup, or use SQLite's online backup API.
 
-The dashboard login is enabled only when `ROUTER_DASHBOARD_PASSWORD` is set.
-Otherwise leave the default loopback bind or use an authenticated reverse proxy.
+The dashboard login is required by default, even on loopback: choose the
+password at `/setup` with the logged setup code, or set `ROUTER_DASHBOARD_PASSWORD`.
+`ROUTER_DASHBOARD_AUTH=disabled` turns it off for an authenticating reverse proxy.
 Use TLS for network access and set `ROUTER_DASHBOARD_SECURE_COOKIE=true` for HTTPS.
 `ROUTER_API_KEY` alone does **not** protect provider management pages.
 Sessions expire after eight hours and restart revokes them. Pass the dashboard
-variables explicitly to Docker (`-e ROUTER_DASHBOARD_PASSWORD` and
-`-e ROUTER_DASHBOARD_SECURE_COOKIE`) if desired.
+variables explicitly to Docker (`-e ROUTER_DASHBOARD_PASSWORD`,
+`-e ROUTER_DASHBOARD_AUTH`, and `-e ROUTER_DASHBOARD_SECURE_COOKIE`) if desired.
 See [ARCHITECURE.md](ARCHITECURE.md) for the trust model.
 
 ## Docker
@@ -312,6 +327,10 @@ host localhost. Named-volume data survives container removal. Bind-mounted
 directories must be writable by UID 10001. Docker supports `--env-file`, but
 replace example placeholders and omit `ROUTER_BIND` if you want the container's
 default network binding rather than `.env.example`'s loopback value.
+On first start, `docker logs sparkrouter` shows the dashboard setup code. Offline
+commands use the same image and volume with the server container stopped, e.g.
+`docker run --rm -v sparkrouter-data:/data -e ROUTER_MASTER_KEY -e ROUTER_NEW_MASTER_KEY sparkrouter rotate-master-key`
+or `docker run --rm -v sparkrouter-data:/data -e ROUTER_MASTER_KEY sparkrouter reset-dashboard-password`.
 
 ### Podman
 
@@ -340,8 +359,11 @@ so `podman stop` drains gracefully within its default 10-second timeout
 - **Linker/C compiler missing:** install the native toolchain described above.
 - **Master-key configuration error:** check Base64 encoding and decoded length;
   do not substitute a password for 32 random bytes.
-- **Encryption failure after restart:** restore the original master key. A new
-  key cannot decrypt existing ciphertext.
+- **"ROUTER_MASTER_KEY does not match this database":** start with the key the
+  database was sealed with (the new key after a rotation). A different key cannot
+  decrypt existing ciphertext.
+- **Forgot the dashboard password:** stop the server, run
+  `sparkrouter reset-dashboard-password`, start again, and use the new setup code.
 - **SQLite cannot open or write:** check the URL, parent directory, process
   working directory, permissions, and container UID.
 - **Address already in use:** choose another port through `ROUTER_BIND`.

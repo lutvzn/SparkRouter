@@ -71,6 +71,7 @@ MOCK UPSTREAM
 GATEWAY
   --gateway-bin PATH       Binary to start  [target/release/sparkrouter]
   --logging MODE           Request history: off | basic | extended (default: gateway default)
+  --history-buffer N       History write buffer multiple: 1 | 2 | 4 | 8 (default: gateway default)
   --out DIR                Run directory for logs, DB and report.json [target/stress/<time>]
 
 EXTERNAL GATEWAY (skips spawning and setup; may incur provider charges)
@@ -110,6 +111,7 @@ struct Options {
     mock: MockConfig,
     gateway_bin: PathBuf,
     logging: Option<String>,
+    history_buffer: Option<String>,
     out: Option<PathBuf>,
     external: Option<External>,
 }
@@ -137,6 +139,7 @@ impl Default for Options {
             },
             gateway_bin: Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/sparkrouter"),
             logging: None,
+            history_buffer: None,
             out: None,
             external: None,
         }
@@ -200,6 +203,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--logging" => match value.as_str() {
                 "off" | "basic" | "extended" => options.logging = Some(value.clone()),
                 _ => return Err("--logging must be off, basic or extended".into()),
+            },
+            "--history-buffer" => match value.as_str() {
+                "1" | "2" | "4" | "8" => options.history_buffer = Some(value.clone()),
+                _ => return Err("--history-buffer must be 1, 2, 4 or 8".into()),
             },
             "--out" => options.out = Some(PathBuf::from(value)),
             "--url" => url = Some(value.trim_end_matches('/').to_owned()),
@@ -423,6 +430,8 @@ fn spawn_gateway(options: &Options, dir: &Path, port: u16) -> Result<ChildGuard,
     let child = Command::new(&options.gateway_bin)
         .env_remove("ROUTER_API_KEY")
         .env_remove("ROUTER_DASHBOARD_PASSWORD")
+        // The harness configures the throwaway instance through the dashboard.
+        .env("ROUTER_DASHBOARD_AUTH", "disabled")
         .env("ROUTER_MASTER_KEY", STANDARD.encode(&key))
         .env(
             "ROUTER_DATABASE_URL",
@@ -577,7 +586,12 @@ struct Target {
     direct_model: String,
 }
 
-async fn configure(base: &str, mock_port: u16, logging: Option<&str>) -> Result<Target, String> {
+async fn configure(
+    base: &str,
+    mock_port: u16,
+    logging: Option<&str>,
+    history_buffer: Option<&str>,
+) -> Result<Target, String> {
     let dashboard = Dashboard::connect(base).await?;
     let primary = dashboard
         .provider(
@@ -617,6 +631,11 @@ async fn configure(base: &str, mock_port: u16, logging: Option<&str>) -> Result<
                 "/settings/logging",
                 &[("logging_mode", mode), ("confirm_extended", "yes")],
             )
+            .await?;
+    }
+    if let Some(scale) = history_buffer {
+        dashboard
+            .submit("/settings/history-buffer", &[("history_buffer", scale)])
             .await?;
     }
     let key = dashboard
@@ -1190,7 +1209,13 @@ async fn run(options: Options) -> Result<(), String> {
                 "Mock upstream at 127.0.0.1:{mock_port}; run files in {}",
                 dir.display()
             );
-            let target = configure(&base, mock_port, options.logging.as_deref()).await?;
+            let target = configure(
+                &base,
+                mock_port,
+                options.logging.as_deref(),
+                options.history_buffer.as_deref(),
+            )
+            .await?;
             println!(
                 "Configured through the dashboard: 2 providers, combo/stress (primary -> backup), 1 API key"
             );

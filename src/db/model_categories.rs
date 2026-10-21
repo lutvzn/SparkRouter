@@ -19,6 +19,7 @@ pub enum Category {
     Music,
     Tts,
     Stt,
+    Embedding,
 }
 fn endpoint_fields(fields: &[ModelField]) -> impl Iterator<Item = &ModelField> {
     fields.iter().filter(|field| {
@@ -55,6 +56,7 @@ impl Category {
                 endpoint.as_str(),
                 "audio/transcriptions" | "audio/translations" | "transcriptions" | "translations"
             ),
+            Self::Embedding => matches!(endpoint.as_str(), "embeddings" | "embedding"),
         }
     }
 
@@ -73,7 +75,7 @@ impl Category {
                     .is_none_or(|known| known == self))
     }
 
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Text,
         Self::Decision,
         Self::Image,
@@ -81,6 +83,7 @@ impl Category {
         Self::Music,
         Self::Tts,
         Self::Stt,
+        Self::Embedding,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -91,6 +94,7 @@ impl Category {
             Self::Music => "music",
             Self::Tts => "tts",
             Self::Stt => "stt",
+            Self::Embedding => "embedding",
         }
     }
     pub fn label(self) -> &'static str {
@@ -102,6 +106,7 @@ impl Category {
             Self::Music => "Music",
             Self::Tts => "TTS",
             Self::Stt => "STT",
+            Self::Embedding => "Embedding",
         }
     }
     pub fn parse(value: &str) -> Result<Self, AppError> {
@@ -119,6 +124,7 @@ impl Category {
                 );
             }
             Self::Decision => return provider.protocol == Protocol::SystemOne,
+            Self::Embedding => return provider.protocol == Protocol::OpenAi,
             Self::Image => Kind::Image,
             Self::Video => Kind::Video,
             Self::Music => Kind::Music,
@@ -161,8 +167,9 @@ impl Category {
                 }
                 Self::Image | Self::Video => true,
                 Self::Stt | Self::Tts => has("input modalities"),
-                // Audio output alone cannot distinguish music from speech.
-                Self::Music | Self::Decision => false,
+                // Audio output alone cannot distinguish music from speech, and
+                // text output alone cannot distinguish embeddings from chat.
+                Self::Music | Self::Decision | Self::Embedding => false,
             }
     }
 
@@ -224,6 +231,10 @@ impl Category {
                 Self::Image => part.eq_ignore_ascii_case("image"),
                 Self::Video => part.eq_ignore_ascii_case("video"),
                 Self::Music | Self::Tts => part.eq_ignore_ascii_case("audio"),
+                // Listings without an embedding modality describe vectors as text.
+                Self::Embedding => ["text", "embedding", "embeddings", "vector"]
+                    .iter()
+                    .any(|name| part.eq_ignore_ascii_case(name)),
                 Self::Decision => false,
             })
         })

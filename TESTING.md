@@ -121,7 +121,9 @@ cargo test --locked -- --list
 | `tests/systemone.rs` | Dashboard evaluation results/traces and shared strategy state, CSRF/origin/auth/scope/validation, shared traffic admission, Native evaluation passthrough, model discovery/direct routing, endpoint protocol isolation, authenticated/scoped boundary, retryable versus permanent failures, invalid success fallback, custom-provider transfer |
 | `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
-| `tests/dashboard_auth.rs` | Optional admin login, cookie isolation/revocation, CSRF/origin protections, login limits |
+| `tests/dashboard_auth.rs` | Default stored-password login required even from loopback, first-run setup code/CSRF/origin/throttling, Argon2id storage, restart persistence, password change revoking sessions, reset reopening setup, environment password, explicit disabled mode, cookie isolation/revocation, login limits |
+| `tests/master_key.rs`, `src/db/master_key.rs` tests | Wrong master key refused at startup, rotation re-encrypting provider and reveal envelopes atomically, refusing undecryptable rows or an unchanged key, generated API keys still authenticating after one and two rotations |
+| `src/db/dashboard_admin.rs` tests | Single stored hash row: create once, replace, reject non-Argon2id values, reset |
 | `tests/request_history.rs`, `tests/history_dashboard.rs` | Off/Basic/Extended, opt-in bounded body captures, JSON/SSE byte preservation, mode snapshot, partial/cancelled capture, escaping/no-store, metadata recording, fallback attempts, usage, streaming lifecycle, retention, escaping, protected clear |
 | `tests/usage_dashboard.rs` | Overview summary/leaderboard, database connectivity/failure rendering, success/failure counts, memory parsing, cache and cost usage, streaming metrics, retained-window behavior and clearing statistics |
 | `tests/settings.rs`, `scripts/tests/theme.cjs` | Settings navigation/sections, sanitized status, login/CSRF/origin, retention bounds and persistence, history write buffer sizes, immediate/cascading pruning, confirmed clear, browser-local theme/system selection |
@@ -129,7 +131,8 @@ cargo test --locked -- --list
 | `tests/api_key_limits.rs`, `src/key_limits.rs` tests | Per-key quotas, atomic concurrent admission, exempt model listing/environment key, test-chat sharing, validation/CSRF, active policy edits, stream completion/error/drop and pre-commit cancellation |
 | `tests/scoped_api_keys.rs` | Exact permissions, filtered model listing, expiry, closed gateway after expiry, policy edits/rollback, secret regeneration, test-chat enforcement, restart persistence |
 | `tests/combo_affinity.rs`, `src/routing/affinity.rs` tests | Per-combo Off/Basic/Smart/Sticky, header/body session IDs, exact prompt continuity/separation, caller isolation, clock-controlled expiry/capacity, fallback/rebinding, disabled/edited targets, successful/interrupted/dropped streams, dropdown validation/CSRF, duplication and backward-compatible transfer |
-| `tests/combo_categories.rs`, `scripts/tests/test-chat.cjs` | All seven categories, forms/list/Test filtering and empty states, wrong-mode rejection before quotas/rotation, protocol/modality checks, positive-evidence picker filtering, exact provider-scoped catalog IDs (including custom collisions and excluded Sora/name prefixes), endpoint aliases/unsupported endpoints, changed metadata, import rollback, vision input vs image output, declarations, transactional edits, concurrent conflicts, duplication and credential-free transfer |
+| `tests/responses_embeddings.rs` | `/v1/responses` and `/v1/embeddings`: category enforcement both ways, protocol eligibility (Anthropic skipped, xAI accepted for Responses, OpenAI-only embedding steps, catalog chat models refused), ordered fallback on retryable statuses and invalid/error success bodies, raw SSE passthrough ending on `response.completed`, empty pre-commit streams falling back, truncated committed streams ending interrupted without fallback, direct IDs, unknown-field preservation, recorded usage, boundary validation |
+| `tests/combo_categories.rs`, `scripts/tests/test-chat.cjs` | All eight categories, forms/list/Test filtering and empty states, wrong-mode rejection before quotas/rotation, protocol/modality checks, positive-evidence picker filtering, exact provider-scoped catalog IDs (including custom collisions and excluded Sora/name prefixes), endpoint aliases/unsupported endpoints, changed metadata, import rollback, vision input vs image output, declarations, transactional edits, concurrent conflicts, duplication and credential-free transfer |
 | `tests/combo_steps.rs` | In-place target edits, stable IDs/order/strategy, invalid targets, cross-combo isolation, CSRF/origin, fragment forms/escaping and local mock routing |
 | `tests/health.rs` | Public liveness/readiness, HEAD, sanitized DB failure, bounded pool-acquisition timeout |
 | `src/db/provider_slugs.rs` tests | Readable unique slugs, reserved names, transactional conflicts/concurrency, stable legacy initialization |
@@ -255,7 +258,13 @@ example because the history writer's bounded queue was full;
 responses are unaffected, but history and usage totals are then incomplete, and
 the summary names the first level where that happened. `--upstream-error-rate` makes the primary
 return 503s to exercise combo fallback; `--logging off|basic|extended` compares
-history modes. Gateway logs, the database, and the report stay in the run
+history modes, and `--history-buffer 1|2|4|8` sets the Settings write-buffer
+multiple before the ramp. On the 4-core development host (2026-10-20, Extended
+logging, two runs each in mirrored order), 800 users (~1,640 req/s) dropped
+history writes in 3 of 4 runs at 1×/2× and in none at 4×/8×; at 1,600 users
+(~2,750 req/s) every size still dropped in at least one run, and 8× raised
+peak gateway RSS from about 270 MiB to 550 MiB. Drops track host disk/CPU load,
+so repeat comparisons rather than trusting one run. Gateway logs, the database, and the report stay in the run
 directory for inspection.
 
 The load generator, mock, and gateway share one machine; the summary prints the
@@ -404,7 +413,7 @@ existing installation's database.
    or its native HTTP commands and `$env:ROUTER_API_KEY` for environment access.
 
 6. If a gateway key is configured, verify missing/wrong keys receive `401` on
-both API endpoints. Generate an unrestricted API key and confirm it can call every combo, is shown only once, and is absent from the list and stored plaintext. Revoking the last generated key reopens the API when ROUTER_API_KEY is unset. With no dashboard password, pages remain open. With `ROUTER_DASHBOARD_PASSWORD` set, check login, wrong password, logout/replay, restart revocation, and that gateway bearer keys do not grant dashboard access. Set Secure cookies only when testing through HTTPS.
+both API endpoints. Generate an unrestricted API key and confirm it can call every combo, is shown only once, and is absent from the list and stored plaintext. Revoking the last generated key reopens the API when ROUTER_API_KEY is unset. With a fresh database, confirm every dashboard page (also from 127.0.0.1) redirects to `/setup`, the startup log shows the setup code, a wrong code is rejected, and setup logs you in. Restart and confirm login is required and the stored password works; change it in Settings and confirm other sessions are signed out. Stop the server, run `sparkrouter reset-dashboard-password`, and confirm the next start offers setup again. With `ROUTER_DASHBOARD_PASSWORD` set, check login, wrong password, logout/replay, restart revocation, and that gateway bearer keys do not grant dashboard access. With `ROUTER_DASHBOARD_AUTH=disabled`, pages are open and the log warns. For rotation, stop the server, run `rotate-master-key` with a new key, confirm the old key no longer starts, the new key does, provider tests still authenticate upstream, and generated API keys still work. Set Secure cookies only when testing through HTTPS.
    Create a selected-model key with an expiry. Check its filtered `/v1/models`,
    allowed JSON/streaming/test-chat calls and disallowed 403 responses without
    upstream attempts. Edit scopes/expiry without changing its secret. Expire a

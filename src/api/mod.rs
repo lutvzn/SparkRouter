@@ -16,6 +16,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chat/completions", post(chat::complete))
         .route("/systemone", post(chat::systemone))
+        .route("/responses", post(chat::responses))
+        .route("/embeddings", post(chat::embeddings))
         .route("/models", get(models::list))
         .merge(media::router())
 }

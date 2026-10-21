@@ -52,6 +52,8 @@ impl AppState {
             .build()
             .map_err(|_| AppError::HttpClient)?;
         let db = db::connect(&config.database_url).await?;
+        let mut crypto = config.crypto;
+        db::master_key::load(&db, &mut crypto).await?;
         // A previous process cannot still own a committed stream.
         sqlx::query(
             "UPDATE request_history SET outcome = 'interrupted' WHERE outcome = 'streaming'",
@@ -62,25 +64,33 @@ impl AppState {
             db::connect_history_writer(&config.database_url, &db).await?,
         );
         history.set_buffer(db::settings::history_buffer(&db).await?);
+        let dashboard_auth = crate::web::auth::DashboardAuth::from_config(
+            &db,
+            config.dashboard_login,
+            config.dashboard_secure_cookie,
+        )
+        .await?;
         Ok(Self {
             started_at: std::time::Instant::now(),
             history,
             db,
             config: Arc::default(),
             client,
-            crypto: Arc::new(config.crypto),
+            crypto: Arc::new(crypto),
             api_key: config.api_key.map(Arc::new),
             csrf_token: Arc::new(uuid::Uuid::new_v4().to_string()),
-            dashboard_auth: config.dashboard_password.map(|password| {
-                Arc::new(crate::web::auth::DashboardAuth::new(
-                    password,
-                    config.dashboard_secure_cookie,
-                ))
-            }),
+            dashboard_auth,
             key_limits: Arc::default(),
             round_robin: Arc::default(),
             affinity: Arc::default(),
         })
+    }
+
+    /// The one-time code for first-run dashboard setup, while no password exists.
+    pub fn dashboard_setup_code(&self) -> Option<String> {
+        self.dashboard_auth
+            .as_ref()
+            .and_then(|auth| auth.setup_code())
     }
 
     /// Wait until request history queued so far is committed or dropped.

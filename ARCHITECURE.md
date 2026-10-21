@@ -55,9 +55,11 @@ binary, and API `owned_by` value are separate identifiers.
 
 ## Combo category policy
 
-Combos persist one category: text, decision, image, video, music, tts, or stt.
-RequestContext maps the selected endpoint to its category (image edits share
-image; translation shares stt). API/dashboard handlers reject category mismatch
+Combos persist one category: text, decision, image, video, music, tts, stt, or
+embedding. RequestContext maps the selected endpoint to its category (image edits
+share image; translation shares stt; Responses shares text). It also limits
+eligible protocols per endpoint: Responses accepts OpenAI and xAI connections,
+embeddings only OpenAI-protocol connections. API/dashboard handlers reject category mismatch
 before key admission; routing repeats the check and revalidates all step
 classifications before affinity/rotation or any upstream attempt. A metadata or
 protocol change cannot silently turn an existing chain into a mixed-category
@@ -133,6 +135,9 @@ upstream error bodies are retained.
 
 1. Initialize `tracing-subscriber`, respecting `RUST_LOG`.
 2. Read environment configuration and validate the master key and bind address.
+   After migrations, verify the key against `master_key_material` and load the
+   fingerprint key; load the stored dashboard password hash, or generate and log
+   a first-run setup code when there is none.
 3. Construct one pooled Reqwest client; disable redirects.
 4. Open SQLite with foreign keys, WAL, a five-second busy timeout, and embedded
    migrations. File-backed databases use at most five connections; in-memory
@@ -211,6 +216,8 @@ an upstream cache hit.
 | `dashboard_settings` | Singleton retention (1–10,000), logging mode (off/basic/extended, default basic), and history write buffer multiple (1/2/4/8, default 1) |
 | `request_payloads` | Opt-in bounded sensitive gateway request body and truncation flag; cascade with history |
 | `request_payload_responses` | The matching response body, truncation/completion flags, in its own row so the later capture never rewrites the request body; cascade with the request capture |
+| `dashboard_admin` | Singleton Argon2id PHC string of the stored dashboard password and its update time; absent until first-run setup |
+| `master_key_material` | Envelopes sealed with the master key: `check` (startup key verification) and, after a rotation, `fingerprint` (HMAC key for fingerprints) |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
 reference it. An index supports provider-reference lookups. There is no models
@@ -265,6 +272,8 @@ injected into generation requests or forwarded response bytes.
 The public router is mounted at `/v1` separately from the dashboard:
 
 - `POST /v1/chat/completions`
+- `POST /v1/responses` (OpenAI Responses passthrough, JSON or SSE)
+- `POST /v1/embeddings` (non-streaming)
 - `POST /v1/systemone` (native, non-streaming evaluations)
 - `GET /v1/models`
 - `POST /v1/images/generations`, `/v1/images/edits`
@@ -480,7 +489,7 @@ longer while data arrives. The individual read timeout still applies.
 
 ## Dashboard and trust boundaries
 
-The Test page offers Chat, SystemOne, and all seven media endpoint modes. `POST /test/systemone` uses the
+The Test page offers Chat, SystemOne, and all seven media endpoint modes. Responses and embeddings are API-only, so Embedding combos are not listed there. `POST /test/systemone` uses the
 same dashboard CSRF/origin checks, gateway authentication/scopes, traffic
 admission, history/capture, and diagnostic wrapper as Test chat. It validates
 native state/questions, removes `_csrf`, rejects streaming, and routes only to
@@ -601,20 +610,28 @@ also reject cross-site fetch metadata and mismatched supplied Origin/Host values
 `Referrer-Policy: same-origin` preserves the browser's Origin on native form
 POSTs while withholding referrers from external destinations. `no-referrer`
 would turn those form origins into `null`, which the origin check rejects.
-These protections are independent of the optional dashboard login. **Dashboard access permits
+These protections are independent of the dashboard login. **Dashboard access permits
 changing credentials and making outbound connections, including to local hosts.**
-`ROUTER_DASHBOARD_PASSWORD` enables dashboard-specific middleware and a CSRF/origin-
-protected login form. The password remains in process environment/state, never
-SQLite. Domain-separated master-key HMAC fingerprints are compared in constant
-time. Random 256-bit session cookies are HttpOnly, SameSite=Strict, optionally
+Login is required by default regardless of the peer address; only
+`ROUTER_DASHBOARD_AUTH=disabled` removes the middleware. The password is either an
+Argon2id PHC string in `dashboard_admin` (default) or `ROUTER_DASHBOARD_PASSWORD`,
+which stays in process environment/state, never SQLite. With no stored password,
+the middleware sends every page to `/setup`, which requires an 80-bit one-time code
+generated at startup and logged once; the code proves control of the process and is
+discarded when setup stores a password (an `INSERT` on the single-row table, so a
+concurrent setup cannot overwrite it). Argon2 runs on blocking threads, at most two
+at a time. Environment passwords are compared as domain-separated HMAC fingerprints
+in constant time. A password change replaces the hash and clears every session but
+the changing browser's. `sparkrouter reset-dashboard-password` deletes the row
+offline; the running process reads the hash only at startup. Random 256-bit session cookies are HttpOnly, SameSite=Strict, optionally
 Secure; a bounded process-local session map enforces eight-hour expiry and logout
 revocation. Restart invalidates all sessions. Bounded per-socket-peer accounting
-permits ten failed logins per minute; a successful login clears that peer's
-count. When 1,024 peers are tracked, the oldest unthrottled peer is evicted;
+permits ten failed login, setup-code, or current-password attempts per minute;
+each attempt is counted before its (slow) check so concurrent guesses cannot exceed
+the limit, and a successful one clears that peer's count. When 1,024 peers are tracked, the oldest unthrottled peer is evicted;
 only if every tracked peer is throttled do new peers share one overflow bucket.
 Forwarding headers are deliberately ignored.
-Reverse proxies should apply their own per-client limits. Without
-the variable, the dashboard remains open. Gateway API authentication does not
+Reverse proxies should apply their own per-client limits. Gateway API authentication does not
 cover the dashboard, and dashboard sessions never authorize `/v1/*` or test chat.
 TLS is terminated outside the application.
 
@@ -655,8 +672,20 @@ temporary buffers use `zeroize`. An empty blob is the deliberate sentinel for a
 provider without authentication. A malformed nonempty blob fails closed.
 
 The dashboard never decrypts keys for display. Blank edits keep existing bytes
-unchanged. Key rotation/recovery tooling is not implemented; keep the original
-master key securely available across restarts and backups.
+unchanged.
+
+`master_key_material` holds envelopes sealed with the master key. `check` is a
+constant verified at startup: a mismatched key stops startup instead of failing
+per request. Databases created before it are verified once against their stored
+credentials (at least one must decrypt) before the check is recorded. HMAC
+fingerprints (generated API keys, environment dashboard password, affinity) use a
+separate fingerprint key, which is the master key until the first rotation.
+`sparkrouter rotate-master-key` runs offline in one `BEGIN IMMEDIATE` transaction:
+it verifies the current key, re-encrypts every provider credential and unrevealed
+API-key envelope with the same associated data, seals the current fingerprint key
+as `fingerprint` and a new `check` with the new key, and aborts without changes if
+any envelope fails to decrypt. Stored API-key fingerprints therefore stay valid.
+Rotation does not rewrite backups or exports; keep old keys for old backups.
 
 Request middleware generates/propagates `x-request-id` and creates tracing spans.
 Routing records combo, provider ID, model, status, latency, and fallback events.

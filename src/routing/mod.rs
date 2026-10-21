@@ -123,7 +123,31 @@ async fn attempt(
             )
             .await
         } else {
-            providers::call(&state.client, &state.crypto, provider, model, body).await
+            match context.endpoint {
+                affinity::Endpoint::Responses => {
+                    providers::openai::responses(
+                        &state.client,
+                        &state.crypto,
+                        provider,
+                        model,
+                        body,
+                    )
+                    .await
+                }
+                affinity::Endpoint::Embeddings => {
+                    providers::openai::embeddings(
+                        &state.client,
+                        &state.crypto,
+                        provider,
+                        model,
+                        body,
+                    )
+                    .await
+                }
+                affinity::Endpoint::Chat | affinity::Endpoint::SystemOne => {
+                    providers::call(&state.client, &state.crypto, provider, model, body).await
+                }
+            }
         }
     })
     .await
@@ -230,7 +254,7 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([7; 32]))).unwrap(),
             api_key: None,
-            dashboard_password: None,
+            dashboard_login: crate::config::DashboardLogin::Disabled,
             dashboard_secure_cookie: false,
         })
         .await
@@ -289,7 +313,7 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode([7; 32]))).unwrap(),
             api_key: None,
-            dashboard_password: None,
+            dashboard_login: crate::config::DashboardLogin::Disabled,
             dashboard_secure_cookie: false,
         })
         .await

@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 aes-gcm = "0.10"
+argon2 = { version = "0.6", features = ["zeroize"] }
 askama = "0.14"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["form", "json", "http1", "tokio", "multipart"] }
@@ -45,3 +46,10 @@ tower = { version = "0.5", features = ["util"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Argon2 is far slower unoptimized; keep dashboard logins fast in debug builds and tests.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

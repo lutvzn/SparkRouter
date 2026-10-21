@@ -211,7 +211,7 @@ async fn execute(
     }
     let context = routing::affinity::RequestContext::new(access.affinity_scope(&state), &headers);
     let context = if systemone {
-        context.for_systemone()
+        context.for_endpoint(crate::routing::affinity::Endpoint::SystemOne)
     } else {
         context
     };

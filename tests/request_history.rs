@@ -455,7 +455,7 @@ fn test_config(database_url: &str) -> Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         crypto: Crypto::from_base64(&SecretString::from(STANDARD.encode(MASTER_KEY))).unwrap(),
         api_key: None,
-        dashboard_password: None,
+        dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
     }
 }
