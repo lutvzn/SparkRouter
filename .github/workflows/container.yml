@@ -81,7 +81,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: x86_64-unknown-linux-musl
+          name: bin-x86_64-unknown-linux-musl
           path: sparkrouter-*.tar.gz
 
   binaries:
@@ -138,7 +138,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: bin-${{ matrix.target }}
           path: |
             sparkrouter-*.tar.gz
             sparkrouter-*.zip
@@ -152,6 +152,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: bin-*
           merge-multiple: true
 
       - name: Create GitHub release
