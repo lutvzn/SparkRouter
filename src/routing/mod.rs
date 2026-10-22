@@ -102,11 +102,9 @@ async fn attempt(
     context: &affinity::RequestContext,
     deadline: Instant,
     trace: AttemptTrace,
-    attempts: &mut Option<&mut Vec<AttemptTrace>>,
+    attempts: &mut Vec<AttemptTrace>,
 ) -> Result<Response, AttemptError> {
-    if let Some(attempts) = attempts.as_deref_mut() {
-        attempts.push(trace);
-    }
+    attempts.push(trace);
     let own_limit = Instant::now() + Budget::for_context(context).attempt;
     // Only a chain-level deadline (the cap) can end an attempt early.
     let capped = deadline < own_limit;
@@ -173,7 +171,7 @@ async fn attempt(
             AttemptError::Retryable
         })
     });
-    if let Some(trace) = attempts.as_deref_mut().and_then(|items| items.last_mut()) {
+    if let Some(trace) = attempts.last_mut() {
         if deadline_exceeded {
             trace.reason = "Gateway pre-commit deadline exceeded".into();
             trace.finish("timed_out");
@@ -289,7 +287,6 @@ mod tests {
         });
         let context = affinity::RequestContext::default();
         let mut traces = Vec::new();
-        let mut attempts = Some(&mut traces);
         let trace = AttemptTrace::new(
             provider.id.clone(),
             provider.name.clone(),
@@ -305,7 +302,7 @@ mod tests {
             &context,
             Instant::now() + Duration::from_millis(200),
             trace,
-            &mut attempts,
+            &mut traces,
         )
         .await;
         accept.abort();

@@ -336,6 +336,11 @@ Use a **disposable database** and a saved test master key. Start the release
 executable following [BUILD.md](BUILD.md); never point an exploratory test at an
 existing installation's database.
 
+`scripts/tests/test-api.ps1` is a quick PowerShell check against a running
+gateway: it lists `/v1/models` and sends one non-streaming chat completion
+(`-BaseUrl`, `-Model`, `-Prompt`, `-ApiKey`, default `$env:ROUTER_API_KEY`).
+The chat call is billable when the model routes to a real provider.
+
 1. Open `/providers`; verify navigation, empty states, local CSS, and HTMX load.
     Verify Providers/Combos links are in the left sidebar, not the top toolbar;
     check navigation and the compact layout on narrow screens.

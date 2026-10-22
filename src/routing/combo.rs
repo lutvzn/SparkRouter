@@ -52,18 +52,6 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
     )
 }
 
-pub async fn route(state: &AppState, name: &str, body: &Value) -> Result<Response, AppError> {
-    route_inner(
-        state,
-        name,
-        body,
-        &super::affinity::RequestContext::default(),
-        tokio::time::Instant::now(),
-        None,
-    )
-    .await
-}
-
 /// Request-local diagnostics for the dashboard; never contains credentials,
 /// endpoint URLs, request content, or upstream error bodies.
 #[derive(serde::Serialize)]
@@ -128,17 +116,6 @@ pub(crate) async fn route_with_trace(
     context: &super::affinity::RequestContext,
     started: tokio::time::Instant,
     attempts: &mut Vec<AttemptTrace>,
-) -> Result<Response, AppError> {
-    route_inner(state, name, body, context, started, Some(attempts)).await
-}
-
-async fn route_inner(
-    state: &AppState,
-    name: &str,
-    body: &Value,
-    context: &super::affinity::RequestContext,
-    started: tokio::time::Instant,
-    mut attempts: Option<&mut Vec<AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let routing = state
         .config
@@ -253,7 +230,7 @@ async fn route_inner(
             context,
             deadline,
             trace,
-            &mut attempts,
+            attempts,
         )
         .await;
         if cooldown {

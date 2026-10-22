@@ -800,8 +800,10 @@ lone write commits at once. The queue is FIFO and each transaction writes
 inserts before terminal outcomes and captures, so a stream is never left
 recorded as streaming after its outcome was queued. The queue is bounded
 (8192 writes, 32 MiB of bodies, times the 1/2/4/8 multiple saved in Settings
-and applied to the running writer) and full queues drop writes rather than
-block the response. A constraint violation retries that batch one write per
+and applied to the running writer) and full queues drop history writes rather
+than block the response. Budget usage and stored-response mappings are small,
+one per request, and always queued, so a stalled disk delays them but cannot
+drop them. A constraint violation retries that batch one write per
 transaction; captures run in a savepoint so their failure keeps the metadata.
 Started transactions are never cancelled. Recording failures are logged only as
 fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.

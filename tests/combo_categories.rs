@@ -301,9 +301,18 @@ async fn explicit_endpoints_classify_all_modes_and_reject_unsupported_or_changed
                 .is_err()
         );
         if category == Category::Text {
-            let result = sparkrouter::routing::combo::route(&state, &combo.name, &json!({})).await;
-            assert!(
-                result.is_err(),
+            let model = format!("combo/{}", combo.name);
+            let response = call(
+                &state,
+                "/v1/chat/completions",
+                json!({"model": model, "messages": []}),
+                None,
+            )
+            .await;
+            // An attempt on the unreachable upstream would be 502 instead.
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
                 "changed endpoint metadata must fail before an upstream attempt"
             );
         }

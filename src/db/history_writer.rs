@@ -31,8 +31,8 @@ use super::{
 };
 
 /// Writes waiting for the writer at the default buffer size, bounding memory
-/// and how stale history can get behind a stalled disk. Writes beyond it are
-/// dropped. Settings can raise it, with [`PAYLOAD_BUDGET`], by a whole multiple.
+/// and how stale history can get behind a stalled disk. History writes beyond
+/// it are dropped; see [`Op::capped`]. Settings can raise it, with [`PAYLOAD_BUDGET`], by a whole multiple.
 const QUEUE_CAPACITY: usize = 8192;
 
 /// Most writes committed by one transaction.
@@ -64,6 +64,16 @@ enum Op {
     RememberResponse(RememberedResponse),
     ForgetResponse(String),
     Flush(oneshot::Sender<()>),
+}
+
+impl Op {
+    /// History and captures are best-effort and count against the queue
+    /// limit. Budget usage and stored-response links are small, one per
+    /// request, and must survive a stalled disk, so like flushes they are
+    /// always queued.
+    fn capped(&self) -> bool {
+        matches!(self, Op::Insert(..) | Op::Finish(_) | Op::FinishPayload(..))
+    }
 }
 
 /// The connection that created a stored Responses API response.
@@ -222,13 +232,16 @@ impl HistoryWriter {
 
     /// [`Self::enqueue`], handing a dropped `op` back.
     fn try_enqueue(&self, op: Op) -> Result<(), Op> {
+        let capped = op.capped();
         let limit = QUEUE_CAPACITY * self.scale.load(Ordering::Relaxed);
-        if self.queued.fetch_add(1, Ordering::Relaxed) >= limit {
+        if capped && self.queued.fetch_add(1, Ordering::Relaxed) >= limit {
             self.queued.fetch_sub(1, Ordering::Relaxed);
             return Err(op);
         }
         self.queue.send(op).map_err(|error| {
-            self.queued.fetch_sub(1, Ordering::Relaxed);
+            if capped {
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+            }
             error.0
         })
     }
@@ -264,7 +277,8 @@ async fn run(
             .filter(|op| !matches!(op, Op::Flush(_)))
             .collect();
         // Like a bounded channel, taking writes frees their room in the queue.
-        queued.fetch_sub(writes.len(), Ordering::Relaxed);
+        let capped = writes.iter().filter(|op| op.capped()).count();
+        queued.fetch_sub(capped, Ordering::Relaxed);
         match commit(&pool, &writes).await {
             Ok(()) => {}
             // A row the database rejects must not discard the rest of the
@@ -569,6 +583,61 @@ mod tests {
             history.insert(request("later", false), None),
             "capacity returns"
         );
+    }
+
+    #[tokio::test]
+    async fn budget_usage_and_stored_responses_survive_a_full_queue() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let crypto = crate::crypto::Crypto::from_base64(&secrecy::SecretString::from(
+            STANDARD.encode([7; 32]),
+        ))
+        .unwrap();
+        let key = crate::db::api_keys::create(&pool, &crypto, "client")
+            .await
+            .unwrap();
+        crate::db::providers::save(
+            &pool,
+            &crate::db::providers::Provider {
+                id: "provider".into(),
+                name: "Provider".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                protocol: crate::providers::Protocol::OpenAi,
+                encrypted_api_key: vec![],
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        let history = HistoryWriter::start(pool.clone());
+        let connection = pool.acquire().await.unwrap();
+        let mut queued = 0;
+        while history.insert(request(&format!("req-{queued}"), false), None) {
+            queued += 1;
+            assert!(queued <= QUEUE_CAPACITY + MAX_BATCH, "queue is unbounded");
+        }
+        history.spend(key.id.clone(), "2026-10-21".into(), 40, 0.25);
+        history.remember_response(
+            "resp_1".into(),
+            "provider".into(),
+            "scope".into(),
+            "combo/coding".into(),
+        );
+        drop(connection);
+        history.flush().await;
+        assert_eq!(
+            crate::db::api_keys::spent(&pool, &key.id, "2026-10-21")
+                .await
+                .unwrap(),
+            (40, 0.25)
+        );
+        assert!(
+            crate::db::stored_responses::get(&pool, "resp_1", "scope")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(history.queued.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

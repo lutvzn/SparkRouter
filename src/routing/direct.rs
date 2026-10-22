@@ -11,18 +11,6 @@ use serde_json::Value;
 
 const MAX_MODEL_CHARS: usize = crate::db::provider_slugs::MAX_PUBLIC_MODEL_CHARS;
 
-pub async fn route(state: &AppState, model: &str, body: &Value) -> Result<Response, AppError> {
-    route_inner(
-        state,
-        model,
-        body,
-        &super::affinity::RequestContext::default(),
-        tokio::time::Instant::now(),
-        None,
-    )
-    .await
-}
-
 pub(crate) async fn route_with_trace(
     state: &AppState,
     model: &str,
@@ -30,17 +18,6 @@ pub(crate) async fn route_with_trace(
     context: &super::affinity::RequestContext,
     started: tokio::time::Instant,
     attempts: &mut Vec<super::combo::AttemptTrace>,
-) -> Result<Response, AppError> {
-    route_inner(state, model, body, context, started, Some(attempts)).await
-}
-
-async fn route_inner(
-    state: &AppState,
-    model: &str,
-    body: &Value,
-    context: &super::affinity::RequestContext,
-    started: tokio::time::Instant,
-    mut attempts: Option<&mut Vec<super::combo::AttemptTrace>>,
 ) -> Result<Response, AppError> {
     let public_model = validate_model(model)?;
     let (slug, upstream_model) = public_model.split_once('/').ok_or_else(|| {
@@ -122,14 +99,7 @@ async fn route_inner(
             name: group_name.clone(),
         });
         let attempt = super::attempt(
-            state,
-            provider,
-            &model,
-            body,
-            context,
-            deadline,
-            trace,
-            &mut attempts,
+            state, provider, &model, body, context, deadline, trace, attempts,
         )
         .await;
         if cooldown {
