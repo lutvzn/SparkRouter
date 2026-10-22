@@ -915,8 +915,8 @@ on restart and while no token exists.
 A prebuilt image is published to the GitHub Container Registry by GitHub Actions ([`.github/workflows/container.yml`](.github/workflows/container.yml)):
 
 ```
-ghcr.io/lutvzn/sparkrouter:0.1.0           # release, from git tag v0.1.0
-ghcr.io/lutvzn/sparkrouter:0.1             # newest 0.1.x release (fixes only)
+ghcr.io/lutvzn/sparkrouter:0.2.0           # release, from git tag v0.2.0
+ghcr.io/lutvzn/sparkrouter:0.2             # newest 0.2.x release (fixes only)
 ghcr.io/lutvzn/sparkrouter:latest          # newest release
 ```
 

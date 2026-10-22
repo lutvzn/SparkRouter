@@ -1,6 +1,6 @@
 [package]
 name = "sparkrouter"
-version = "0.2.0-rc.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A small, self-hosted LLM gateway with ordered fallback combos"
