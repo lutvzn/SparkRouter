@@ -1,6 +1,6 @@
 # SparkRouter
 
-A small self-hosted AI API gateway: one Rust executable, SQLite, and a server-rendered dashboard. Add providers, arrange provider/model pairs into ordered **combos**, and call them using Chat Completions, SystemOne, or image/video/music/speech APIs.
+A self-hosted, all-in-one AI router for agents: one endpoint and one set of gateway keys for text, SystemOne decisions, embeddings, image, video, music, and speech models. It is one Rust executable with SQLite and a server-rendered dashboard. Add providers, arrange provider/model pairs into ordered **combos** with fallback, and call them through Chat Completions, Responses, Anthropic Messages, SystemOne, Embeddings, or the image/video/music/speech APIs.
 
 ## Documentation
 
@@ -77,10 +77,11 @@ and cache-awareness mode.
 ### Category-specific combos
 
 Each combo has one category: **Text**, **Decision / SystemOne**, **Image**,
-**Video**, **Music**, **TTS**, or **STT**. The Combos page has a category filter;
+**Video**, **Music**, **TTS**, **STT**, or **Embedding**. The Combos page has a category filter;
 creation/editing shows the category alongside the routing strategy. `/test`
 only offers combos matching its selected mode and disables sending when none
 exist. Image edits share Image combos; audio translation shares STT combos.
+Embedding combos are API-only and not offered on `/test`.
 
 The backend rejects wrong-mode combo requests with `400` before quota admission
 or strategy rotation. Step creation/editing validates protocol compatibility,
@@ -531,9 +532,9 @@ upstream EOF before that ends the body as interrupted. Usage from the final
 response is recorded in history. Stateful features such as
 `previous_response_id`, `conversation`, and stored responses live at the upstream
 that created them, so a fallback to a different provider usually fails for those
-requests; use combo session affinity to keep a conversation on one target. Only
-`POST /v1/responses` is routed: retrieving, cancelling, or deleting a stored
-response by ID has no model to route by and is not proxied.
+requests; use combo session affinity to keep a conversation on one target, and
+see [Stored responses](#stored-responses) for retrieving, cancelling, or
+deleting a response by ID.
 
 ```sh
 curl http://127.0.0.1:14673/v1/responses \
@@ -746,6 +747,7 @@ no prompts, and resets on restart.
 - **Random** chooses a uniformly random enabled starting step for each request. Repeated selections are normal; it does not guarantee equal traffic counts.
 - Round robin and Random fall back cyclically through the remaining enabled steps in configured order. Each step is attempted at most once per request. Disabled providers never consume a turn. Permanent errors stop all strategies; streaming cannot switch after commitment.
 - Connect/read/request failures and HTTP **401, 402, 404, 408, 429, 500, 502, 503, 504, 529** try the next step. The status policy lives in `src/routing/combo.rs`. Upstream authentication, billing, model-not-found, and Anthropic overload are properties of that target, so another connection or combo step is still tried. Anthropic JSON and pre-commit SSE error payloads use the same retry policy.
+- On `/v1/responses` and `/v1/embeddings` only, **405** and **501** also try the next step: the target lacks that endpoint.
 - Other HTTP failures, including **400, 403, 422**, stop the chain. Nothing is retried on the same target, and nothing runs in the background.
 - With the opt-in [failing-target cooldown](#failing-target-cooldown), targets that just failed move to the end of the order; they are still tried once.
 - Empty combos, entirely disabled combos, or exhausted chains return a sanitized OpenAI-shaped `502` error. Unknown combo names return `404`.
@@ -798,7 +800,7 @@ clear, transfer and status work without it.
 
 ### Request history and configuration transfer
 
-**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. **Basic** (default) stores metadata only. **Off** records no new routed history. **Extended**, explicitly confirmed in Settings, also stores sensitive chat/SystemOne request/response body captures. Media requests always remain metadata-only, including binary audio completion/interruption tracking; uploads, prompts, output bodies, and signed media URLs are not captured. Retention defaults to the newest 10,000 requests (a lower cap can be selected in Settings), with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; inserts do not delay response commitment and finalization is bounded. History has its own single SQLite writer connection, separate from the pool that serves authentication, routing, and the dashboard, so heavy traffic cannot starve those reads. Requests queue history writes in memory, and one writer task commits everything queued since its last commit in a single transaction. The queue holds at most 8,192 writes (and 32 MiB of Extended bodies) by default; Settings can raise both to 2×, 4×, or 8× without a restart, which only uses more memory while the disk is stalled. Beyond that a history write is skipped with a `request history write unavailable` warning (or `request history finalization unavailable` / `request payload write unavailable`); budget usage and stored-response mappings are never skipped for a full queue, and a failed commit retries them with the next batch. A started transaction always completes. Shutdown waits up to 10 seconds for queued history to commit. Reading the logging preference waits at most 200 ms for a database connection (failure disables recording for that request); database write failures do not fail generation. The history writer commits with SQLite `synchronous = NORMAL`: in WAL mode this cannot corrupt the database, but the newest history rows can be lost on power failure or OS crash. Providers, keys, combos, and settings keep full synchronous commits. Streaming and Extended body finalization are queued too, so the end of a response never waits on SQLite; the queue is ordered, so a fast completion is not left recorded as still streaming. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
+**History** (`/history`) shows routed API and test-chat requests, outcomes, ordered attempts, connection/model names, latency, and token counts when upstream usage is available. Authentication, permission, and boundary-validation rejections are not recorded. **Basic** (default) stores metadata only. **Off** records no new routed history. **Extended**, explicitly confirmed in Settings, also stores sensitive request/response body captures for chat, Responses, Messages, embeddings, and SystemOne. Media requests always remain metadata-only, including binary audio completion/interruption tracking; uploads, prompts, output bodies, and signed media URLs are not captured. Retention defaults to the newest 10,000 requests (a lower cap can be selected in Settings), with pagination, aggregate statistics, and a CSRF-protected clear action. Streaming history distinguishes completion, interruption, and cancellation; a successful HTTP status alone is not a completed generation. Streaming token counts require upstream usage events (for OpenAI-compatible servers, request `stream_options: {"include_usage": true}` if supported). Unknown usage remains unknown, not zero. Recording is best-effort; inserts do not delay response commitment and finalization is bounded. History has its own single SQLite writer connection, separate from the pool that serves authentication, routing, and the dashboard, so heavy traffic cannot starve those reads. Requests queue history writes in memory, and one writer task commits everything queued since its last commit in a single transaction. The queue holds at most 8,192 writes (and 32 MiB of Extended bodies) by default; Settings can raise both to 2×, 4×, or 8× without a restart, which only uses more memory while the disk is stalled. Beyond that a history write is skipped with a `request history write unavailable` warning (or `request history finalization unavailable` / `request payload write unavailable`); budget usage and stored-response mappings are never skipped for a full queue, and a failed commit retries them with the next batch. A started transaction always completes. Shutdown waits up to 10 seconds for queued history to commit. Reading the logging preference waits at most 200 ms for a database connection (failure disables recording for that request); database write failures do not fail generation. The history writer commits with SQLite `synchronous = NORMAL`: in WAL mode this cannot corrupt the database, but the newest history rows can be lost on power failure or OS crash. Providers, keys, combos, and settings keep full synchronous commits. Streaming and Extended body finalization are queued too, so the end of a response never waits on SQLite; the queue is ordered, so a fast completion is not left recorded as still streaming. An interrupted process may lose final metadata; unfinished streams are marked interrupted on restart.
 
 Extended is a development tool, not an HTTP wire logger: it captures the validated
 gateway request JSON (public model ID, after removing Test chat CSRF) and final
@@ -942,14 +944,14 @@ On first start, read the dashboard setup code from the container log (`docker lo
 #### 2a. Docker
 
 ```sh
-docker pull ghcr.io/lutvzn/sparkrouter:0.1.0
+docker pull ghcr.io/lutvzn/sparkrouter:0.2.0
 docker volume create sparkrouter-data
 docker run -d --name sparkrouter --restart unless-stopped \
   -p 127.0.0.1:14673:14673 \
   -v sparkrouter-data:/data \
   --env-file ~/.config/sparkrouter/sparkrouter.env \
   --stop-timeout 30 \
-  ghcr.io/lutvzn/sparkrouter:0.1.0
+  ghcr.io/lutvzn/sparkrouter:0.2.0
 ```
 
 Or with Docker Compose (`compose.yaml`):
@@ -957,7 +959,7 @@ Or with Docker Compose (`compose.yaml`):
 ```yaml
 services:
   sparkrouter:
-    image: ghcr.io/lutvzn/sparkrouter:0.1.0
+    image: ghcr.io/lutvzn/sparkrouter:0.2.0
     restart: unless-stopped
     ports:
       - "127.0.0.1:14673:14673"
@@ -976,24 +978,24 @@ Place `sparkrouter.env` (from step 1) next to `compose.yaml`, then run `docker c
 Rootless Podman works without changes:
 
 ```sh
-podman pull ghcr.io/lutvzn/sparkrouter:0.1.0
+podman pull ghcr.io/lutvzn/sparkrouter:0.2.0
 podman volume create sparkrouter-data
 podman run -d --name sparkrouter \
   -p 127.0.0.1:14673:14673 \
   -v sparkrouter-data:/data \
   --env-file ~/.config/sparkrouter/sparkrouter.env \
   --stop-timeout 30 \
-  ghcr.io/lutvzn/sparkrouter:0.1.0
+  ghcr.io/lutvzn/sparkrouter:0.2.0
 ```
 
 To run it as a service that starts at boot, use a Quadlet unit at `~/.config/containers/systemd/sparkrouter.container`:
 
 ```ini
 [Unit]
-Description=SparkRouter LLM gateway
+Description=SparkRouter AI router
 
 [Container]
-Image=ghcr.io/lutvzn/sparkrouter:0.1.0
+Image=ghcr.io/lutvzn/sparkrouter:0.2.0
 ContainerName=sparkrouter
 PublishPort=127.0.0.1:14673:14673
 Volume=sparkrouter-data:/data
@@ -1058,8 +1060,8 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 
 Tests use local mock HTTP servers and temporary SQLite databases; no real upstream keys are needed. Migrations and frontend assets are embedded at build time; no build-time database or frontend toolchain is required.
 
-## MVP boundaries
+## Scope
 
-`/v1/chat/completions`, `/v1/responses` (plus [stored-response calls](#stored-responses)), `/v1/messages`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each, with the last successful one first during the Settings affinity timeout. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. The opt-in cooldown only reorders targets that just failed. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform beyond the `/metrics` endpoint, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+`/v1/chat/completions`, `/v1/responses` (plus [stored-response calls](#stored-responses)), `/v1/messages`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via a `<provider-slug>/<upstream-model-id>` direct ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each, with the last successful one first during the Settings affinity timeout. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. The opt-in cooldown only reorders targets that just failed. No native Gemini protocol (OpenAI-compatible Gemini endpoints work), OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform beyond the `/metrics` endpoint, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
 Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools (including `strict`), and text/tool streaming. `reasoning_effort` becomes adaptive thinking at that effort (`output_config.effort`; `minimal` maps to `low`, `none` sends nothing), which needs Claude 4.6 or later; while the adapter turns thinking on it drops `temperature`, `top_p`, and `top_k`, and it leaves thinking off when `tool_choice` forces a tool. `response_format` `json_schema` becomes `output_config.format`; `json_object` has no schema to send and is rejected. A client's own `thinking` or `output_config` extension is kept, and setting the same option both ways is rejected. Thinking comes back as `reasoning_content` text and, with signatures, as `thinking_blocks` on the assistant message (in streams, `reasoning_content` deltas and one `thinking_blocks` delta per finished block); send `thinking_blocks` back unchanged on that assistant message so tool-use turns can continue. Multiple choices, developer/named messages, legacy functions, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; `cache_control` on parts, messages, and tools is kept; unknown extension fields pass through. Server-tool and other auxiliary content blocks (and citation metadata) are not exposed as answer text. Use `/v1/messages` for full Anthropic features without translation. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.

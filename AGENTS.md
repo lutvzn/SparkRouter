@@ -2,18 +2,25 @@
 
 ## Mission and scope
 
-SparkRouter is a deliberately small, self-hosted LLM gateway: one Rust package,
-one executable, SQLite, and a server-rendered dashboard. A combo is an ordered
-list of provider/model targets with Priority (default), Round robin, or Random
-selection of the starting step; retryable failures use ordered fallback.
+SparkRouter is a self-hosted, all-in-one AI router for agents: one endpoint
+and one set of gateway keys in front of every model an agent uses, whether text
+(Chat Completions, Responses, Anthropic Messages), SystemOne decisions,
+embeddings, image, video, music, text-to-speech, or speech-to-text. It stays one
+Rust package, one executable, SQLite, and a server-rendered dashboard. A combo
+is an ordered list of provider/model targets of one category with Priority
+(default), Round robin, or Random selection of the starting step; retryable
+failures use ordered fallback.
 
-Implement the requested change, not OmniRoute's wider feature set. Do not add a
-frontend service, Node.js runtime, SPA framework, external database, queues,
-caches, background workers, or routing optimization without an explicit request.
+Widen the modalities, protocols, and providers agents can reach; do not widen
+the infrastructure. OmniRoute is a reference for provider coverage, not a
+feature list to copy. Do not add a frontend service, Node.js runtime, SPA
+framework, external database, queues, caches or background workers beyond the
+existing configuration cache and history writer, or routing optimization
+without an explicit request.
 
 Read these documents before substantial changes:
 
-- [README.md](README.md): user setup, API behavior, and MVP boundaries.
+- [README.md](README.md): user setup, API behavior, and scope.
 - [BUILD.md](BUILD.md): prerequisites, building, and deployment.
 - [ARCHITECURE.md](ARCHITECURE.md): module boundaries and runtime invariants.
 - [TESTING.md](TESTING.md): validation commands and regression coverage.
@@ -62,7 +69,8 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   connection may reorder that sequence.
   Permanent client/upstream request
   errors stop the chain; retry classification belongs in the routing helper.
-  Target-specific 401, 402, 404, and 529 are retryable. 400, 403, and 422 are not.
+  Target-specific 401, 402, 404, and 529 are retryable (405 and 501 too, on
+  Responses and embeddings only). 400, 403, and 422 are not.
   `combo/<name>` is always a combo. Direct public IDs are
   `<provider-slug>/<upstream-model-id>`; strip only the first prefix and preserve
   the complete upstream suffix. Try enabled connections within that provider

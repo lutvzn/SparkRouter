@@ -40,8 +40,8 @@ and recorded round-robin/affinity/fallback snapshots, HTTP 429 reasons, privacy,
 and cascading clear. `cargo test --locked --lib db::model_categories` covers
 all provenance sources, exact provider scoping, precedence and conflicts.
 
-`cargo test --locked --lib web::providers` also checks icons for all seven model
-categories, unclassified/review states, accessible labels, placement before Copy,
+`cargo test --locked --lib web::providers` also checks icons for the seven
+non-Embedding model categories (Embedding models show the unclassified icon), unclassified/review states, accessible labels, placement before Copy,
 and classification reasons appearing only inside the model Info popup.
 Conflict-detail coverage names conflicting saved/catalog categories, unsupported
 protocols and contradictory upstream modalities; the dashboard integration test
@@ -119,7 +119,7 @@ cargo test --locked -- --list
 | `tests/gateway.rs` | Mocked combo and direct-model fallback, permanent errors stopping the chain, disabled steps, models with exact cached context/output discovery (configured-first combo step, reorder, disabled/missing details, oldest enabled direct connection, scoped visibility), optional API authentication, JSON passthrough, SSE behavior, Anthropic translation (unit tests in `src/providers/anthropic.rs` also cover `cache_control` breakpoints kept on parts, messages, and tools), provider edits, referrer policy, same-origin creation on a nondefault port, CSRF/origin rejection, restart persistence |
 | `tests/media.rs` | Compatible/native image/video/music/speech, shared connections, multipart replay, native auth, scope/quota checks, binary commitment/lifecycle, metadata-only capture, redirects, path validation, accepted-job no-fallback, fal queue/result URL credential isolation, fresh media protocols/group defaults |
 | `tests/systemone.rs` | Dashboard evaluation results/traces and shared strategy state, CSRF/origin/auth/scope/validation, shared traffic admission, Native evaluation passthrough, model discovery/direct routing, endpoint protocol isolation, authenticated/scoped boundary, retryable versus permanent failures, invalid success fallback, custom-provider transfer |
-| `tests/redirects.rs` | Neither protocol follows redirects or forwards credentials to a redirected server |
+| `tests/redirects.rs` | Adapters do not follow redirects or forwards credentials to a redirected server |
 | `tests/request_errors.rs` | Sanitized OpenAI-shaped errors for invalid JSON, wrong content type, and oversized bodies |
 | `tests/dashboard_auth.rs` | Default stored-password login required even from loopback, first-run setup code/CSRF/origin/throttling, Argon2id storage, restart persistence, password change revoking sessions, reset reopening setup, environment password, explicit disabled mode, cookie isolation/revocation, login limits |
 | `tests/master_key.rs`, `src/db/master_key.rs` tests | Wrong master key refused at startup, rotation re-encrypting provider and reveal envelopes atomically, refusing undecryptable rows or an unchanged key, generated API keys still authenticating after one and two rotations |
@@ -349,7 +349,7 @@ The chat call is billable when the model routes to a real provider.
     Open `/` and verify Overview is the default landing page and login
     destination. Check database status, successful/failed request counts, and process
     RAM (Linux only); reload to refresh. Pending streams must not count as finished,
-    and unavailable history must not appear as zero. Check its five usage cards and top-ten provider ranking using
+    and unavailable history must not appear as zero. Check its four usage cards and top-ten provider ranking using
     disposable mock history; verify dark/light themes and mobile layout.
    Providers and Combos list titles/subtitles should appear in the top bar beside
    the theme toggle, without duplicate headings in the content area.
@@ -448,7 +448,7 @@ both API endpoints. Generate an unrestricted API key and confirm it can call eve
    start per request; repeat selections are valid. For both strategies, verify
    cyclic fallback, permanent-error stopping, and no post-commit streaming retry.
    On each combo's create/edit page, check the separate Off/Basic/Smart/Sticky
-   dropdown (Off by default) and Sticky minutes (1–1440, default 5). Basic should
+   dropdown (Off by default) and Affinity timeout (minutes) (1–1440, default 5). Basic should
    retain a local mock target for the same session-id header; without an ID it
    follows the strategy. Smart should retain the target across growing messages
    with an unchanged initial prompt/tools, and separate changed first prompts.
@@ -484,7 +484,7 @@ For the new dashboard pages, also verify:
   persistence/restart, clear/prune cascading, and dashboard authentication on
   inspection pages. Do not use production prompts or credentials; captures are
   unencrypted and may remain in WAL/backups after clear.
-- Open Settings via the sidebar; verify its active state and five sections in
+- Open Settings via the sidebar; verify its active state and eight sections in
   light/dark themes and at mobile widths. Select System and check OS changes;
   preferences should survive reload in the same browser only. With blocked
   browser storage, check the page-only warning. Reduce retention in a disposable

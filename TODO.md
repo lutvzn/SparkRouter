@@ -48,21 +48,11 @@ Two important distinctions:
   scope, public model ID, and endpoint (no per-session split; oldest-first
   already co-locates sessions). See `tests/direct_affinity.rs`.
 
-Direct routes currently try eligible connections within the provider oldest
-first, subject to cooldown and stored-response continuation preferences. They do
-not use combo session affinity. If A fails and B succeeds, the next ordinary
-request starts at A again rather than remembering B.
-
-Suggested constraints:
-
-- Scope hints by caller namespace, public model ID, endpoint, and session
-  fingerprint.
-- Reuse the bounded, ephemeral approach rather than adding persistent bindings.
-- Never cross provider slugs or bypass refreshed-model eligibility.
-- Preserve once-each fallback, permanent-error handling, cooldown behavior, and
-  streaming commitment guarantees.
-- Keep the feature opt-in: oldest-first is the current direct-routing contract.
-- Add local-mock regression tests and update direct-routing documentation.
+Done. Before this, direct routes always started at the oldest eligible
+connection, so if A failed and B succeeded the next request started at A again.
+The hint is bounded and process-local, never crosses provider slugs or bypasses
+refreshed-model eligibility, and keeps once-each fallback, permanent-error
+handling, cooldown, and streaming commitment guarantees.
 
 ### 2. Optional strict-priority preservation
 
@@ -130,8 +120,8 @@ Design constraints:
   leading system/developer items, tools) for `api.openai.com` connections only
   (2026-10-21). Always on there; no Settings switch.
 
-SparkRouter already preserves client-supplied `prompt_cache_key` and can use it
-as an affinity identity. It does not generate one automatically.
+SparkRouter preserves a client-supplied `prompt_cache_key` and can use it as an
+affinity identity; it generates one only when the client sent none.
 
 Constraints:
 
@@ -160,7 +150,7 @@ Do not introduce a new cache subsystem without a demonstrated need. The existing
 Basic/Smart/Sticky modes, cooldown, marker preservation, and telemetry provide the
 practical baseline.
 
-The largest conceptual gap is shared-prefix placement. The most practical routing
-coverage gap is affinity for direct model IDs. Implement only the extensions
+The largest remaining conceptual gap is shared-prefix placement; direct-route
+affinity, the former coverage gap, is implemented. Implement only the extensions
 supported by actual usage, keeping routing policy explicit and correctness ahead
 of cache locality.

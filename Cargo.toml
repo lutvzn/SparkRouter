@@ -3,7 +3,7 @@ name = "sparkrouter"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A small, self-hosted LLM gateway with ordered fallback combos"
+description = "A self-hosted, all-in-one AI router for agents: text, SystemOne, embeddings, image, video, music, and speech with ordered fallback combos"
 license = "MIT"
 
 [dependencies]

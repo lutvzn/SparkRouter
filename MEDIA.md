@@ -1,8 +1,9 @@
 # Media APIs and OmniRoute audit
 
-SparkRouter supports image, video, music, text-to-speech (TTS), and
-speech-to-text (STT) requests through the same gateway authentication, exact
-public-model scopes, per-key traffic limits, and combo/direct routing as chat.
+As an all-in-one router, SparkRouter serves image, video, music, text-to-speech
+(TTS), and speech-to-text (STT) requests through the same gateway authentication,
+exact public-model scopes, per-key traffic limits, and combo/direct routing as
+text.
 **A provider has one card and one set of connections**, not separate Text,
 Image, Video, Music, or Speech provider entries.
 
@@ -31,9 +32,9 @@ still require a saved model-list snapshot; there are no raw-ID aliases.
 | Together | Text, Image, TTS, STT | Existing provider; compatible image/audio paths (model-dependent) |
 | xAI | Text, Image, Video | Existing provider; compatible image path and native video submit/poll |
 | MiniMax / MiniMax China | Text, Image, Video, Music, TTS, STT | Existing cards/keys; native image/music/TTS/STT and Hailuo video submit/poll |
-| fal.ai | Image, Video, Music | One new provider; native queue submit/poll (or a custom direct endpoint), using `Authorization: Key` |
-| Deepgram | TTS, STT | One new provider; native `speak` / binary `listen`, `Authorization: Token` |
-| ElevenLabs | Music, TTS, STT | One new provider; native music, voice-specific TTS, multipart STT, `xi-api-key` |
+| fal.ai | Image, Video, Music | Dedicated provider; native queue submit/poll (or a custom direct endpoint), using `Authorization: Key` |
+| Deepgram | TTS, STT | Dedicated provider; native `speak` / binary `listen`, `Authorization: Token` |
+| ElevenLabs | Music, TTS, STT | Dedicated provider; native music, voice-specific TTS, multipart STT, `xi-api-key` |
 | Custom OpenAI-compatible | Image, Image edits, Video, Music, TTS, STT, Translation | Compatible paths relative to the configured API base; availability depends on the upstream |
 
 Other existing OpenAI-compatible presets can use these routes **only if their
@@ -49,8 +50,8 @@ access checks; no broad model-name heuristics are used. See
 provider scoping. Capability tags are editable display
 metadata, not routing permissions or proof of account access.
 
-Custom providers can select OpenAI, MiniMax, xAI, fal.ai, Deepgram, or ElevenLabs
-protocols. Existing MiniMax and xAI presets retain their original OpenAI protocol
+For media, custom providers can select OpenAI, MiniMax, xAI, fal.ai, Deepgram, or
+ElevenLabs protocols (Anthropic and SystemOne serve text and decisions only). Existing MiniMax and xAI presets retain their original OpenAI protocol
 and identities; their documented hosts select the native media adapters without
 changing keys, membership, slugs, or combo references. Custom mirrors should
 select the explicit vendor protocol, since arbitrary hosts are not inferred.
@@ -183,7 +184,7 @@ credentials, and web-session integrations. A registry row alone does not prove
 an implementation is callable or currently offered.
 
 In addition to the integrations above, its registries/handlers include these
-families, **not implemented natively in this change**:
+families, **not implemented natively yet**; each is a candidate for a future adapter:
 
 - Image: Stability AI, Black Forest Labs, Google Imagen/Gemini/Vertex, Ideogram,
   Leonardo, Haiper, Segmind, Nvidia NIM, Cloudflare, Alibaba/Qwen, Replicate,

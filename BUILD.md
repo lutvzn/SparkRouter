@@ -85,6 +85,7 @@ See [category policy](README.md#category-specific-combos) for conservative mappi
 | `ROUTER_DASHBOARD_PASSWORD` | Unset | Optional fixed admin password instead of first-run setup; nonblank 16–1024 bytes, preferably randomly generated |
 | `ROUTER_DASHBOARD_AUTH` | `required` | `required` or `disabled`; disable only behind an authenticating reverse proxy |
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` when serving through HTTPS; only `true`/`false` accepted |
+| `ROUTER_METRICS_TOKEN` | Unset | Optional bearer token for `GET /metrics`, alongside one generated in Settings; 16–256 bytes |
 | `RUST_LOG` | `info` | `tracing-subscriber` logging filter |
 
 `.env.example` documents these values. **SparkRouter does not automatically load
@@ -113,7 +114,7 @@ $env:ROUTER_API_KEY = 'replace-with-a-long-random-gateway-key'
 .\target\release\sparkrouter.exe
 ```
 
-Open http://127.0.0.1:14673/providers. For development, `cargo run --locked` uses
+Open http://127.0.0.1:14673/ and complete the first-run setup below. For development, `cargo run --locked` uses
 the same environment configuration. Stop with Ctrl+C; Unix deployments also
 handle SIGTERM for graceful shutdown.
 
@@ -401,16 +402,16 @@ Release when a batch of changes is finished and verified, not after every
 commit. To release:
 
 ```sh
-# Set version = "0.2.0" in Cargo.toml, then:
+# Set version = "0.3.0" in Cargo.toml, then:
 cargo check                           # updates the version in Cargo.lock
 cargo test --locked
-git commit -am "Release v0.2.0"
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin master v0.2.0
+git commit -am "Release v0.3.0"
+git tag -a v0.3.0 -m "v0.3.0"
+git push origin master v0.3.0
 ```
 
 To edit the notes afterwards, open the release on GitHub or run
-`gh release edit v0.2.0 --notes-file notes.md`. Mention new migrations and
+`gh release edit v0.3.0 --notes-file notes.md`. Mention new migrations and
 configuration changes there.
 
 ## Troubleshooting

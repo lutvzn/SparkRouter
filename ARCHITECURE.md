@@ -2,13 +2,16 @@
 
 ## Design goal
 
-SparkRouter keeps configuration management and request routing in one Rust
-application. It is not a reduced copy of every OmniRoute subsystem.
+SparkRouter is an all-in-one AI router for agents: text, SystemOne decision,
+embedding, image, video, music, and speech requests share one endpoint, one key
+system, and one combo/fallback model. Configuration management and request
+routing stay in one Rust application; new capabilities arrive as protocol
+adapters and endpoints, not as new services.
 
 ```text
 Browser ──> Askama dashboard + HTMX ──> SQLite configuration
                                                │
-OpenAI client ──> /v1/* ──> combo or direct model ──> protocol adapter ──> upstream
+Agent / SDK  ──> /v1/* ──> combo or direct model ──> protocol adapter ──> upstream
                                                │
                                       shared Reqwest client
 ```
@@ -55,7 +58,7 @@ bounded process-local state, not saved prompt/completion data.
 | `providers/openai.rs` | OpenAI passthrough and terminal SSE tracking |
 | `providers/anthropic.rs` | Anthropic request, response, and event translation; native `/messages` passthrough |
 | `providers/systemone.rs` | Native evaluation passthrough and SystemOne model-list parsing |
-| `providers/sse.rs` | Private incremental SSE framing shared by both adapters |
+| `providers/sse.rs` | Private incremental SSE framing shared by the streaming adapters |
 
 `APP_NAME` in `src/lib.rs` centralizes the dashboard's display name. The package,
 binary, and API `owned_by` value are separate identifiers.
@@ -222,7 +225,7 @@ An empty prefix generates nothing. Other upstreams never receive it.
 | Table | Important columns and constraints |
 | --- | --- |
 | `providers` | UUID string ID, name, base URL, protocol, encrypted key blob, enabled flag, creation/update timestamps |
-| `combos` | UUID string ID, unique name, strategy (`priority`/`round_robin`/`random`), affinity mode (`off`/`basic`/`smart`/`sticky`), Sticky minutes (1–1440), routing revision, creation/update timestamps |
+| `combos` | UUID string ID, unique name, category, strategy (`priority`/`round_robin`/`random`), affinity mode (`off`/`basic`/`smart`/`sticky`), Sticky minutes (1–1440), routing revision, creation/update timestamps |
 | `combo_steps` | UUID string ID, combo ID, provider ID, position, arbitrary model string; unique `(combo_id, position)` |
 | `custom_provider_groups` | Persistent custom provider ID, display name, base URL, protocol; may have no connections |
 | `provider_group_connections` | Explicit connection/provider-group membership; connection ID remains the existing `providers.id` |
@@ -237,10 +240,17 @@ An empty prefix generates nothing. Other upstreams never receive it.
 | `request_payload_responses` | The matching response body, truncation/completion flags, in its own row so the later capture never rewrites the request body; cascade with the request capture |
 | `dashboard_admin` | Singleton Argon2id PHC string of the stored dashboard password and its update time; absent until first-run setup |
 | `master_key_material` | Envelopes sealed with the master key: `check` (startup key verification) and, after a rotation, `fingerprint` (HMAC key for fingerprints) |
+| `connection_models`, `connection_model_lists`, `connection_refresh_status` | Each connection's last refreshed model list with details, and its refresh status/sanitized error |
+| `model_categories` | Explicit connection/model category declarations |
+| `request_routing` | Selection snapshots for combo attempts; cascade with history |
+| `provider_favorites` | Dashboard-only favorites |
+| `api_key_spend` | Current-period budget usage per key |
+| `stored_responses` | Connection, caller, and public model that created each stored Responses API response |
 
 Combo deletion cascades to steps. Provider deletion is restricted while steps
-reference it. An index supports provider-reference lookups. There is no models
-table or provider-specific vendor metadata.
+reference it. An index supports provider-reference lookups. Model lists are
+per-connection refresh snapshots; there is no global models table or
+provider-specific vendor metadata.
 
 Combo names are case-sensitive, 1–64 ASCII letters/digits or `-`, `_`, `.`.
 Upstream model strings are trimmed, nonempty, and at most 256 characters. Public
@@ -444,8 +454,9 @@ accepted. HTTP/private endpoints are intentionally allowed for self-hosted model
 | Protocol | Generation endpoint | Authentication | Response handling |
 | --- | --- | --- | --- |
 | OpenAI | `{base_url}/chat/completions` | Bearer key when configured | Preserve request extensions and original valid JSON response bytes; raw SSE passthrough |
-| Anthropic | `{base_url}/messages` | `x-api-key` and `anthropic-version: 2023-06-01` | Translate messages, tools, text/image input, usage, finish reasons, and SSE to OpenAI shapes |
-
+| Anthropic | `{base_url}/messages` | `x-api-key` and `anthropic-version: 2023-06-01` | Translate messages, tools, text/image input, usage, finish reasons, and SSE to OpenAI shapes; `/v1/messages` passes through untranslated |
+| xAI, MiniMax | `{base_url}/chat/completions` for text | Bearer key | OpenAI handling for text; native media dialects (see [Media routing](#media-routing)) |
+| fal.ai, Deepgram, ElevenLabs | Media endpoints only | Vendor-specific header | Native media dialects; no chat |
 | SystemOne | `{base_url}/systemone` | Bearer key when configured | Preserve evaluation fields and native valid JSON response bytes; no streaming |
 
 Protocols normally test connectivity with `GET {base_url}/models`. That is not a
@@ -723,6 +734,8 @@ Both return fixed JSON statuses, no-store headers, and no provider requests or
 configuration/errors. Failed readiness is 503; liveness remains 200 while the
 server responds. These are not upstream availability or SQLite writability checks.
 
+### Credential encryption
+
 Configured API keys use AES-256-GCM with a random 96-bit nonce and the provider
 ID as authenticated associated data. The blob is:
 
@@ -766,9 +779,7 @@ HTTP errors are logged through sanitized categories rather than full Reqwest
 errors. Do not enable or introduce credential/header/body dumps in operational logs.
 Explicitly opted-in Extended history stores bounded gateway bodies in SQLite only.
 
-## Extension rules
-
-### Local request history and configuration transfer
+## Local request history and configuration transfer
 
 Logging mode is sampled after authorization/admission, before routing, by
 `history_payload.rs`, waiting at most 200 ms for a connection; read failures
@@ -850,6 +861,8 @@ groups, and combo strategy/step ordering survive transfer. This is not a databas
 backup or master-key rotation mechanism. Combo affinity mode and Sticky minutes
 are optional version 1 fields (older files default to Off/5 minutes), validated
 before writes and preserved on transfer. Runtime hints are never exported.
+
+## Extension rules
 
 - Add protocols in `src/providers/` with explicit request/JSON/SSE translation,
   preserving the existing retry and commitment contracts.
