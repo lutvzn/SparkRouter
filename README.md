@@ -12,7 +12,9 @@ A small self-hosted AI API gateway: one Rust executable, SQLite, and a server-re
 
 ## Run
 
-Install Rust 1.88+ and a C toolchain (SQLx builds bundled SQLite). Build with:
+Prebuilt executables for Linux, macOS, and Windows are attached to each [GitHub release](https://github.com/lutvzn/SparkRouter/releases). Extract one and run it in place of `./target/release/sparkrouter` below, or use the [container image](#container-deployment-docker-and-podman).
+
+To build from source, install Rust 1.88+ and a C toolchain (SQLx builds bundled SQLite). Build with:
 
 ```sh
 cargo build --release --locked
@@ -913,13 +915,12 @@ on restart and while no token exists.
 A prebuilt image is published to the GitHub Container Registry by GitHub Actions ([`.github/workflows/container.yml`](.github/workflows/container.yml)):
 
 ```
-ghcr.io/lutvzn/sparkrouter:latest          # latest master build
-ghcr.io/lutvzn/sparkrouter:sha-<commit>    # a specific master commit
 ghcr.io/lutvzn/sparkrouter:0.1.0           # release, from git tag v0.1.0
-ghcr.io/lutvzn/sparkrouter:0.1             # newest 0.1.x release
+ghcr.io/lutvzn/sparkrouter:0.1             # newest 0.1.x release (fixes only)
+ghcr.io/lutvzn/sparkrouter:latest          # newest release
 ```
 
-Pull requests build the image without publishing it. To publish a release, push a `vX.Y.Z` tag matching the `Cargo.toml` version.
+Images are built only for release tags; `master` commits are not published. See [BUILD.md → Releases](BUILD.md#releases) for versioning and the release steps.
 
 It is a `linux/amd64` image of about 15 MB: a statically linked binary on `distroless/static`, with no shell or package manager, running as UID/GID 10001. Inside the container the server binds `0.0.0.0:14673` and stores its database at `/data/router.db`; mount a volume at `/data` to keep it. Pin a version tag (or digest) for production so upgrades are deliberate.
 

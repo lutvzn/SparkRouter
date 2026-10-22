@@ -1,25 +1,33 @@
-name: Container image
+name: Release
 
+# Only release tags build and publish; ordinary commits cost no Actions minutes.
 on:
   push:
-    branches: [master]
     tags: ["v*.*.*"]
-  pull_request:
-    branches: [master]
-  workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: container-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The binary reports CARGO_PKG_VERSION; a release tag that disagrees would mislabel it.
+      - name: Check tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
   image:
+    needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,22 +42,19 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # master -> latest + sha-<short>; tag v1.2.3 -> 1.2.3 + 1.2.
-      # Adds OCI labels, including source, which links the package to the repo.
+      # v1.2.3 -> 1.2.3, 1.2, and latest (latest and 1.2 are skipped for
+      # prereleases such as v1.3.0-rc.1). Adds OCI labels, including version and source.
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
@@ -57,8 +62,105 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The image's static musl binary runs on any x86_64 Linux; reuse it instead of compiling twice.
+      - name: Package Linux binary
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          dir=sparkrouter-$version-x86_64-unknown-linux-musl
+          mkdir "$dir"
+          docker create --name bin "$IMAGE:$version"
+          docker cp bin:/usr/local/bin/sparkrouter "$dir/"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$dir/"
+          tar czf "$dir.tar.gz" "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-unknown-linux-musl
+          path: sparkrouter-*.tar.gz
+
+  binaries:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, smoke: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, smoke: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, smoke: true }
+          # ring needs clang for Windows ARM; the x64 image has LLVM and the ARM64 MSVC tools.
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, smoke: false }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, smoke: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup target add "$TARGET"
+
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - run: cargo build --release --locked --target "$TARGET"
+
+      # Same guarantee as the Dockerfile: the Linux binary must not need a libc.
+      - name: Check static linking
+        if: runner.os == 'Linux'
+        run: file "target/$TARGET/release/sparkrouter" | grep -Eq 'static-pie linked|statically linked'
+
+      # Cross-compiled targets cannot run on the runner.
+      - name: Smoke test
+        if: matrix.smoke
+        run: |
+          "target/$TARGET/release/sparkrouter" --help
+
+      - name: Package
+        run: |
+          dir=sparkrouter-${GITHUB_REF_NAME#v}-$TARGET
+          mkdir "$dir"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$dir/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/$TARGET/release/sparkrouter.exe" "$dir/"
+            7z a "$dir.zip" "$dir"
+          else
+            cp "target/$TARGET/release/sparkrouter" "$dir/"
+            tar czf "$dir.tar.gz" "$dir"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            sparkrouter-*.tar.gz
+            sparkrouter-*.zip
+
+  release:
+    needs: [image, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          flags=(--verify-tag --generate-notes)
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" -- *

@@ -354,6 +354,65 @@ it on shared system directories. The binary runs as PID 1 and handles SIGTERM,
 so `podman stop` drains gracefully within its default 10-second timeout
 (`podman stop -t 30` allows longer streams to finish).
 
+## Releases
+
+Commits to `master` publish nothing. Pushing a `vX.Y.Z` tag runs
+[`.github/workflows/container.yml`](.github/workflows/container.yml), which fails
+unless the tag matches the `Cargo.toml` version. It then pushes
+`ghcr.io/lutvzn/sparkrouter:X.Y.Z`, `:X.Y`, and `:latest`, and creates a GitHub
+release with generated notes. A prerelease tag (`v0.3.0-rc.1`) publishes only
+`:0.3.0-rc.1` and is marked as a prerelease.
+
+The release also attaches `SHA256SUMS` and these archives, each holding the
+executable, `LICENSE`, and `THIRD_PARTY_NOTICES.md`:
+
+| Archive | Platform |
+| --- | --- |
+| `sparkrouter-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | Linux x86_64. Static, so it has no glibc requirement. It is copied from the image |
+| `sparkrouter-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | Linux ARM64. Also static |
+| `sparkrouter-X.Y.Z-aarch64-apple-darwin.tar.gz` | macOS on Apple silicon |
+| `sparkrouter-X.Y.Z-x86_64-apple-darwin.tar.gz` | macOS on Intel |
+| `sparkrouter-X.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x86_64 |
+| `sparkrouter-X.Y.Z-aarch64-pc-windows-msvc.zip` | Windows ARM64 |
+
+The container image is `linux/amd64` only. On ARM64 Linux, use the binary.
+
+The binaries are not code-signed. On macOS, run
+`xattr -d com.apple.quarantine sparkrouter` after extracting. On Windows,
+SmartScreen asks for confirmation the first time it runs. Each build embeds the
+models.dev categories that were current when it was built (see
+[Build-time models.dev categories](#build-time-modelsdev-categories)).
+
+Version numbers (while below 1.0, the minor number acts as the major one):
+
+| Bump | When |
+| --- | --- |
+| Patch `0.2.1` | Fixes only: no new migration, environment variable, or endpoint |
+| Minor `0.3.0` | Features, any new migration, or any configuration or API change |
+| Major `1.0.0` | Feature complete and running in production. After that, a major bump is only for a change that breaks existing configuration or clients |
+
+Since only minor bumps bring migrations, following `:X.Y` (for example Quadlet
+`AutoUpdate=registry` on `Image=ghcr.io/lutvzn/sparkrouter:0.2`) picks up fixes
+without upgrading the database schema. SQLx migrations run forward only: an
+older image does not start against a database that a newer release migrated, so
+back up `/data` before you change the minor version.
+
+Release when a batch of changes is finished and verified, not after every
+commit. To release:
+
+```sh
+# Set version = "0.2.0" in Cargo.toml, then:
+cargo check                           # updates the version in Cargo.lock
+cargo test --locked
+git commit -am "Release v0.2.0"
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin master v0.2.0
+```
+
+To edit the notes afterwards, open the release on GitHub or run
+`gh release edit v0.2.0 --notes-file notes.md`. Mention new migrations and
+configuration changes there.
+
 ## Troubleshooting
 
 - **Linker/C compiler missing:** install the native toolchain described above.
