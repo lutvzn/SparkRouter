@@ -77,7 +77,7 @@ pub async fn messages(
     // `headers` replaces the default `anthropic-version`.
     let response = request(client, crypto, provider, reqwest::Method::POST, "messages")?
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(super::model_body(body, model)?)
+        .body(super::model_body(body, model, None)?)
         .headers(headers.clone())
         .send()
         .await

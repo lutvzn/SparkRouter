@@ -139,6 +139,15 @@
     <button class="btn primary" type="submit">Save cooldown</button>
   </form>
   {% endif %}
+  {% if direct_affinity.is_empty() %}<p class="test fail" role="status">Direct-route affinity unavailable. Reload to try again.</p>{% else %}
+  <form method="post" action="/settings/direct-affinity">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <label for="direct-affinity">Direct-route affinity (minutes)</label>
+    <input id="direct-affinity" name="direct_affinity_minutes" type="number" min="0" max="1440" step="1" required value="{{ direct_affinity }}" aria-describedby="direct-affinity-hint">
+    <p class="hint" id="direct-affinity-hint">For <code>&lt;provider-slug&gt;/&lt;model&gt;</code> IDs served by several connections: after a connection succeeds, that caller’s requests for the same model and endpoint try it first for this long, renewed by each success. A retryable failure clears it, and the other connections are still tried once each. 0 turns it off, so every request starts at the oldest connection. Default 5; process-local, reset on restart.</p>
+    <button class="btn primary" type="submit">Save affinity</button>
+  </form>
+  {% endif %}
 </section>
 <section class="settings-card configuration-transfer" aria-labelledby="backup-heading">
   <h2 id="backup-heading">Backup &amp; restore</h2>

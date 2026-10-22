@@ -243,21 +243,13 @@ pub(crate) async fn route_with_trace(
                 // The response body now exclusively owns this attempt. Stream errors
                 // MUST terminate that body; they cannot re-enter this fallback loop.
                 if let Some(binding) = binding {
-                    let target = super::affinity::Target::from_step(&step);
-                    if body.get("stream").and_then(Value::as_bool) == Some(true)
-                        || response
-                            .extensions()
-                            .get::<crate::providers::media::BinaryStream>()
-                            .is_some()
-                    {
-                        return Ok(super::affinity::on_complete(
-                            response,
-                            state.affinity.clone(),
-                            binding,
-                            target,
-                        ));
-                    }
-                    state.affinity.remember(binding, target);
+                    return Ok(super::affinity::remember_on_success(
+                        &state.affinity,
+                        binding,
+                        super::affinity::Target::from_step(&step),
+                        body,
+                        response,
+                    ));
                 }
                 return Ok(response);
             }

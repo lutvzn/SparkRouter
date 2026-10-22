@@ -18,6 +18,8 @@ struct SettingsPage {
     history_buffer: String,
     /// `on`, `off`, or empty when unavailable.
     target_cooldown: String,
+    /// Minutes, or empty when unavailable.
+    direct_affinity: String,
     /// Whether a dashboard metrics token exists, or empty when unavailable.
     metrics_token: String,
     metrics_environment: bool,
@@ -110,6 +112,10 @@ async fn render_with_token(
         .await
         .map(|on| if on { "on" } else { "off" }.to_owned())
         .unwrap_or_default();
+    let direct_affinity = within(db::settings::direct_affinity_minutes(&state.db))
+        .await
+        .map(|minutes| minutes.to_string())
+        .unwrap_or_default();
     let metrics_token = within(db::settings::metrics_token_hash(&state.db))
         .await
         .map(|hash| if hash.is_some() { "set" } else { "none" }.to_owned())
@@ -122,6 +128,7 @@ async fn render_with_token(
         logging_mode,
         history_buffer,
         target_cooldown,
+        direct_affinity,
         metrics_token,
         metrics_environment: state.metrics_token.is_some(),
         new_metrics_token,
@@ -131,6 +138,9 @@ async fn render_with_token(
             Some("logging") => "Request logging mode saved. Existing history is unchanged.",
             Some("buffer") => "History write buffer saved. It applies immediately.",
             Some("cooldown") => "Target cooldown saved. It applies to new requests.",
+            Some("direct-affinity") => {
+                "Direct-route affinity saved. Earlier hints no longer apply."
+            }
             Some("metrics-generated") => {
                 "Metrics token generated. Copy it now; it is not shown again."
             }
@@ -263,6 +273,24 @@ pub(crate) async fn save_cooldown(
     };
     db::settings::set_target_cooldown(&state.db, enabled).await?;
     Ok(see_other("/settings?result=cooldown"))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DirectAffinityForm {
+    _csrf: String,
+    direct_affinity_minutes: String,
+}
+
+pub(crate) async fn save_direct_affinity(
+    State(state): State<AppState>,
+    Form(form): Form<DirectAffinityForm>,
+) -> Result<Response, AppError> {
+    check_csrf(&state, &form._csrf)?;
+    let minutes = form.direct_affinity_minutes.trim().parse().map_err(|_| {
+        AppError::InvalidRequest("direct-route affinity must be between 0 and 1,440 minutes".into())
+    })?;
+    db::settings::set_direct_affinity_minutes(&state.db, minutes).await?;
+    Ok(see_other("/settings?result=direct-affinity"))
 }
 
 #[derive(Deserialize)]

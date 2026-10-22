@@ -134,6 +134,10 @@ impl Crypto {
         self.fingerprint_bytes(b"sparkrouter.routing-affinity.v1\0", value)
     }
 
+    pub(crate) fn prompt_cache_fingerprint(&self, value: &[u8]) -> Result<String, AppError> {
+        self.fingerprint_bytes(b"sparkrouter.prompt-cache-key.v1\0", value)
+    }
+
     fn fingerprint(&self, domain: &[u8], secret: &str) -> Result<String, AppError> {
         self.fingerprint_bytes(domain, secret.as_bytes())
     }

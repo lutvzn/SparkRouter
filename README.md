@@ -237,6 +237,21 @@ request that continues with `previous_response_id` sends only the new turn, so
 its fingerprint changes every turn; send a session ID, `prompt_cache_key`, or
 `conversation` for those.
 
+When a chat or Responses request is sent to a connection whose base URL is
+OpenAI's own API (`api.openai.com`, OpenAI protocol) and the request has no
+`prompt_cache_key`, the gateway adds one: `sparkrouter-` followed by a keyed
+HMAC of the caller (generated gateway-key ID and endpoint) and the request's
+shared prefix: chat's leading system/developer messages, or Responses
+`instructions` and leading system/developer `input` items, plus `tools`. User
+messages are not part of it, so every conversation of one agent gets the same key
+and different agents or callers do not. Requests with no instructions and no tools
+get none. A client-supplied key, including `null`, is never replaced. Other
+OpenAI-compatible endpoints (OpenRouter, xAI, local servers, proxies) never get a
+generated key, because some reject unknown fields; fallback to them sends the
+request without it. The key only influences OpenAI's cache placement and does not
+prove a cache hit. It is generated per attempt and is not used for gateway routing
+or stored in History.
+
 Cache-awareness only places requests; the provider decides what it caches. When
 chat requests are translated for **Anthropic**-protocol connections, `cache_control`
 breakpoints are kept so that prompt caching works there: on a content part, on a
@@ -704,6 +719,24 @@ advances once per request, and affinity hits on a cooling target are moved last
 too. History's attempts disclosure notes how many cooling targets were moved.
 State is process-local and resets on restart.
 
+### Direct-route affinity
+
+**Settings → Routing → Direct-route affinity** applies to direct IDs
+(`<provider-slug>/<upstream-model-id>`) that more than one connection serves. It
+is **5 minutes** by default; `0` turns it off (whole minutes, up to 1440). After
+a connection succeeds, the same caller's requests for that public model ID and
+endpoint try that connection first, then the others oldest first. Each success
+renews the timeout; a retryable failure of the remembered connection clears it,
+so whichever connection succeeds next is remembered instead. Hints are scoped like
+combo hints (generated gateway-key ID, endpoint, media kind) and are one per
+caller and model rather than per session: without affinity every session already
+starts at the same oldest connection. Only connections already eligible for that
+slug and model are reordered, each still tried once; permanent errors stop, and
+streams remember the connection only when they finish successfully. Cooldown and
+a Responses `previous_response_id` connection apply after the hint. Changing the
+timeout starts fresh. History shows the hit or miss. State is process-local, holds
+no prompts, and resets on restart.
+
 ### Routing behavior
 
 - **Priority** (default) starts at the first enabled step, then follows configured order on retryable failures.
@@ -714,7 +747,7 @@ State is process-local and resets on restart.
 - Other HTTP failures, including **400, 403, 422**, stop the chain. Nothing is retried on the same target, and nothing runs in the background.
 - With the opt-in [failing-target cooldown](#failing-target-cooldown), targets that just failed move to the end of the order; they are still tried once.
 - Empty combos, entirely disabled combos, or exhausted chains return a sanitized OpenAI-shaped `502` error. Unknown combo names return `404`.
-- Direct IDs use `<provider-slug>/<upstream-model-id>`. Only connections within that provider whose last **Refresh models** listed the upstream ID are tried, oldest first. Retryable failures never cross to another provider slug; permanent errors stop. Unknown public IDs return `404`; wholly disabled or exhausted targets return `502`. Never-refreshed connections are not direct targets. The prefix is stripped once, preserving slashes inside the upstream ID. `combo/<name>` always selects a combo; an upstream ID starting with `combo/` can be called as `<provider-slug>/combo/...`. `/v1/models` lists distinct qualified IDs from enabled connections. Combo step IDs remain arbitrary upstream strings of up to 256 characters.
+- Direct IDs use `<provider-slug>/<upstream-model-id>`. Only connections within that provider whose last **Refresh models** listed the upstream ID are tried, oldest first, except that the [direct-route affinity](#direct-route-affinity) connection goes first while it lasts. Retryable failures never cross to another provider slug; permanent errors stop. Unknown public IDs return `404`; wholly disabled or exhausted targets return `502`. Never-refreshed connections are not direct targets. The prefix is stripped once, preserving slashes inside the upstream ID. `combo/<name>` always selects a combo; an upstream ID starting with `combo/` can be called as `<provider-slug>/combo/...`. `/v1/models` lists distinct qualified IDs from enabled connections. Combo step IDs remain arbitrary upstream strings of up to 256 characters.
 - OpenAI requests remain `serde_json::Value`; only the model is replaced for each target. Unknown fields are preserved by the OpenAI adapter. Non-streaming success responses must contain a `choices` array and no non-null `error`; invalid envelopes are retryable before commitment. Valid response bytes and unknown fields remain unchanged.
 - **Failover is possible only before a streaming response is committed.** The adapter obtains initial upstream data before returning the response. After that, the selected upstream owns the request. A mid-stream failure terminates the HTTP body with an error; it never switches to another provider or restarts generated text. Clients must handle incomplete streams.
 - One shared pooled HTTP client uses a 10-second connect timeout, 120-second idle read timeout, and 90-second idle pool lifetime. Each attempt has 120 seconds to prepare its response. The pre-commit fallback ceiling is 120 seconds per eligible target plus 60 seconds (180 seconds for one target), capped at 10 minutes, so a hanging target does not silently skip the rest of a chain; media uses 600 seconds per target plus 10, capped at 30 minutes. Targets left when the cap is reached are skipped. Committed streams can run longer while data continues to arrive. Redirects are rejected to protect credentials.
@@ -746,7 +779,7 @@ request-history retention (1–10,000 records, default 10,000), a confirmed clea
 history action, configuration export/import with inline preview, a dashboard
 password change form (stored passwords only; it requires the current password and
 signs out other sessions), the [failing-target cooldown](#failing-target-cooldown)
-switch, the [Prometheus metrics](#prometheus-metrics) token, and read-only
+switch, the [direct-route affinity](#direct-route-affinity) timeout, the [Prometheus metrics](#prometheus-metrics) token, and read-only
 authentication and system status (version, uptime, database read connectivity, Linux resident
 RAM). Refresh the page to update status. Retention persists in SQLite; lowering
 it immediately and irreversibly prunes older requests and attempts and updates
@@ -1026,6 +1059,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-`/v1/chat/completions`, `/v1/responses` (plus [stored-response calls](#stored-responses)), `/v1/messages`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. The opt-in cooldown only reorders targets that just failed. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform beyond the `/metrics` endpoint, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+`/v1/chat/completions`, `/v1/responses` (plus [stored-response calls](#stored-responses)), `/v1/messages`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each, with the last successful one first during the Settings affinity timeout. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. The opt-in cooldown only reorders targets that just failed. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform beyond the `/metrics` endpoint, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
 Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools (including `strict`), and text/tool streaming. `reasoning_effort` becomes adaptive thinking at that effort (`output_config.effort`; `minimal` maps to `low`, `none` sends nothing), which needs Claude 4.6 or later; while the adapter turns thinking on it drops `temperature`, `top_p`, and `top_k`, and it leaves thinking off when `tool_choice` forces a tool. `response_format` `json_schema` becomes `output_config.format`; `json_object` has no schema to send and is rejected. A client's own `thinking` or `output_config` extension is kept, and setting the same option both ways is rejected. Thinking comes back as `reasoning_content` text and, with signatures, as `thinking_blocks` on the assistant message (in streams, `reasoning_content` deltas and one `thinking_blocks` delta per finished block); send `thinking_blocks` back unchanged on that assistant message so tool-use turns can continue. Multiple choices, developer/named messages, legacy functions, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; `cache_control` on parts, messages, and tools is kept; unknown extension fields pass through. Server-tool and other auxiliary content blocks (and citation metadata) are not exposed as answer text. Use `/v1/messages` for full Anthropic features without translation. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.

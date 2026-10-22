@@ -89,6 +89,31 @@ pub async fn set_target_cooldown(pool: &SqlitePool, enabled: bool) -> Result<(),
     Ok(())
 }
 
+/// Longest direct-route affinity Settings accepts, matching combo timeouts.
+pub const MAX_DIRECT_AFFINITY_MINUTES: u32 = 1440;
+
+/// Minutes a direct model ID keeps its last successful connection; 0 is off.
+pub async fn direct_affinity_minutes(pool: &SqlitePool) -> Result<u32, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT direct_affinity_minutes FROM dashboard_settings WHERE id = 1")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+pub async fn set_direct_affinity_minutes(pool: &SqlitePool, minutes: u32) -> Result<(), AppError> {
+    if minutes > MAX_DIRECT_AFFINITY_MINUTES {
+        return Err(AppError::InvalidRequest(
+            "direct-route affinity must be between 0 and 1,440 minutes".into(),
+        ));
+    }
+    sqlx::query("UPDATE dashboard_settings SET direct_affinity_minutes = ? WHERE id = 1")
+        .bind(minutes)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// The SHA-256 (hex) of the dashboard-generated metrics token, if any.
 pub async fn metrics_token_hash(pool: &SqlitePool) -> Result<Option<String>, AppError> {
     Ok(

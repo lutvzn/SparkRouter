@@ -209,6 +209,14 @@ body fields are documented in the README. Smart requires a first user message
 and is a conservative placement hint, not conversation identity or evidence of
 an upstream cache hit.
 
+`affinity::prompt_cache_key` is separate from routing identity. Per attempt, and
+only for an OpenAI-protocol connection whose base URL host is `api.openai.com`,
+a chat or Responses body without `prompt_cache_key` is serialized with a
+generated one appended (`providers::model_body`, no request clone). The key is an
+HMAC (its own crypto domain) of the caller scope and the shared prefix: leading
+system/developer items, Responses `instructions`, and tools, never user content.
+An empty prefix generates nothing. Other upstreams never receive it.
+
 ## Persistence model
 
 | Table | Important columns and constraints |
@@ -362,7 +370,8 @@ For chat requests:
    Any other ID is a direct model.
 2. Combo requests load the combo and its ordered, validated step configuration
     in a batched read transaction. Direct requests split off the first provider slug and load only its
-    connections whose list contains the remaining upstream ID, oldest first.
+    connections whose list contains the remaining upstream ID, oldest first
+    (the Settings direct-route affinity hint, when one exists, moves to the front).
     Custom membership overrides endpoint/preset matching. A missing list is not
     a direct target. Unassigned non-preset rows get reserved connection namespaces.
 3. Priority uses configured order. Round robin and Random snapshot enabled steps
@@ -390,8 +399,10 @@ OpenAI-compatible servers often implement just chat completions, so those
 statuses mean the target lacks the endpoint rather than that the request is bad.
 There are no repeated attempts on one target, hedged requests, or adaptive routing.
 
-The order a request tries its targets is built in this sequence: strategy start,
-then the affinity hint, then (when enabled in Settings) the cooldown, which
+The order a request tries its targets is built in this sequence: strategy start
+(oldest first for direct IDs), then the affinity hint (per combo, or the Settings
+direct-route affinity keyed by caller scope, public model ID, and endpoint, with
+the timeout as its revision), then (when enabled in Settings) the cooldown, which
 stable-partitions cooling targets after ready ones, then, for a Responses request
 with `previous_response_id`, the connection that stored that response first.
 Each eligible target is still tried at most once, and cooling targets are never

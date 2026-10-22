@@ -102,6 +102,7 @@ struct Entries {
     generation: u64,
     logging_mode: Option<LoggingMode>,
     cooldown: Option<bool>,
+    direct_affinity: Option<u32>,
     keys_exist: Option<bool>,
     keys: HashMap<String, CachedKey>,
     combos: HashMap<(String, Category), Arc<RoutingSnapshot>>,
@@ -170,6 +171,17 @@ impl ConfigCache {
         let enabled = super::settings::target_cooldown(pool).await?;
         self.store(token, |entries| entries.cooldown = Some(enabled));
         Ok(enabled)
+    }
+
+    /// Minutes direct model IDs keep their last successful connection; 0 is off.
+    pub(crate) async fn direct_affinity(&self, pool: &SqlitePool) -> Result<u32, AppError> {
+        let (token, cached) = self.read(|entries| entries.direct_affinity);
+        if let Some(minutes) = cached {
+            return Ok(minutes);
+        }
+        let minutes = super::settings::direct_affinity_minutes(pool).await?;
+        self.store(token, |entries| entries.direct_affinity = Some(minutes));
+        Ok(minutes)
     }
 
     /// Whether any generated API key exists, expired ones included.

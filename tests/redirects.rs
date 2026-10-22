@@ -91,7 +91,8 @@ async fn redirects_never_forward_any_protocols_credentials() {
                 "model",
                 &json!({
                     "model":"combo/test", "messages":[{"role":"user","content":"hello"}]
-                })
+                }),
+                None
             )
             .await
             .is_err()

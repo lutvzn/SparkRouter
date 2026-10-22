@@ -4,6 +4,8 @@
 //! last refreshed connection lists within that provider. Only the upstream
 //! suffix is sent to enabled connections, oldest first. The retry policy matches
 //! combos: each connection at most once, and a permanent error stops the chain.
+//! While Settings' direct-route affinity is on, the connection that last
+//! succeeded for this caller, endpoint, and model goes first until it expires.
 
 use crate::{app::AppState, error::AppError, providers::AttemptError};
 use axum::response::Response;
@@ -42,28 +44,68 @@ pub(crate) async fn route_with_trace(
         )));
     }
     let cooldown = state.config.cooldown(&state.db).await?;
+    let affinity_minutes = state.config.direct_affinity(&state.db).await?;
+    let binding = super::affinity::direct_binding(&public_model, affinity_minutes, context);
+    let hint = binding
+        .as_ref()
+        .and_then(|binding| state.affinity.preferred(binding));
+    let hinted = hint
+        .as_ref()
+        .map(super::affinity::Target::connection)
+        .filter(|connection| provider_ids.iter().any(|id| id == connection));
     let preferred = context
         .preferred_connection
         .as_ref()
         .filter(|connection| provider_ids.contains(connection));
     let cooling = |id: &String| state.cooldown.is_cooling(id, &model);
+    let mut cooling_deferred = 0;
     // Copy the cached listing only when its order changes.
-    let provider_ids: std::borrow::Cow<[String]> =
-        if preferred.is_some() || (cooldown && provider_ids.iter().any(cooling)) {
-            let mut ids = provider_ids.to_vec();
-            if cooldown {
-                state
-                    .metrics
-                    .deferred(super::cooldown::defer(&mut ids, cooling));
-            }
-            // A continued stored response only exists on the connection that made it.
-            if let Some(preferred) = preferred {
-                super::cooldown::prefer(&mut ids, |id| id == preferred);
-            }
-            ids.into()
+    let ordered: std::borrow::Cow<[String]> = if hinted.is_some()
+        || preferred.is_some()
+        || (cooldown && provider_ids.iter().any(cooling))
+    {
+        let mut ids = provider_ids.to_vec();
+        if let Some(hinted) = hinted {
+            super::cooldown::prefer(&mut ids, |id| id == hinted);
+        }
+        if cooldown {
+            cooling_deferred = super::cooldown::defer(&mut ids, cooling);
+            state.metrics.deferred(cooling_deferred);
+        }
+        // A continued stored response only exists on the connection that made it.
+        if let Some(preferred) = preferred {
+            super::cooldown::prefer(&mut ids, |id| id == preferred);
+        }
+        ids.into()
+    } else {
+        (&*provider_ids).into()
+    };
+    let selection = super::combo::RoutingSelection {
+        strategy: "Oldest connection first".into(),
+        affinity_mode: if binding.is_some() {
+            format!("{affinity_minutes} min")
         } else {
-            (&*provider_ids).into()
-        };
+            "off".into()
+        },
+        affinity: if preferred.is_some() {
+            "Stored response's connection selected"
+        } else if hinted.is_some() {
+            "Hit: last successful connection selected"
+        } else if hint.is_some() {
+            "Last successful connection unavailable; oldest first used"
+        } else if binding.is_some() {
+            "Miss or expired"
+        } else {
+            "Off"
+        }
+        .into(),
+        strategy_position: 1,
+        starting_position: ordered.first().map_or(0, |first| {
+            provider_ids.iter().position(|id| id == first).unwrap_or(0) as i64 + 1
+        }),
+        cooling_deferred: cooling_deferred as i64,
+    };
+    let provider_ids = ordered;
     // Listed connections bound the chain; ineligible ones only add headroom.
     let remaining = provider_ids.len();
     let deadline = super::Budget::for_context(context).deadline(started, remaining);
@@ -94,6 +136,7 @@ pub(crate) async fn route_with_trace(
             index as i64 + 1,
             started,
         );
+        trace.routing = Some(selection.clone());
         trace.provider_snapshot = Some(crate::db::request_history::ProviderSnapshot {
             slug: namespace.clone(),
             name: group_name.clone(),
@@ -115,9 +158,24 @@ pub(crate) async fn route_with_trace(
                     "upstream selected"
                 );
                 // The response body now exclusively owns this attempt.
+                if let Some(binding) = binding {
+                    return Ok(super::affinity::remember_on_success(
+                        &state.affinity,
+                        binding,
+                        super::affinity::Target::for_connection(&provider.id, &model),
+                        body,
+                        response,
+                    ));
+                }
                 return Ok(response);
             }
             Err(AttemptError::Retryable | AttemptError::RetryableStatus(..)) => {
+                if let Some(binding) = &binding {
+                    state.affinity.forget_target(
+                        binding,
+                        &super::affinity::Target::for_connection(&provider.id, &model),
+                    );
+                }
                 tracing::warn!(
                     provider = %provider.id,
                     model = %model,

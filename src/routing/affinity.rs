@@ -190,6 +190,19 @@ impl Target {
     pub(crate) fn matches(&self, step: &ComboStep) -> bool {
         self.step == step.id && self.connection == step.provider_id && self.model == step.model
     }
+
+    /// A direct-route connection; direct models have no combo step.
+    pub(crate) fn for_connection(connection: &str, model: &str) -> Self {
+        Self {
+            step: String::new(),
+            connection: connection.into(),
+            model: model.into(),
+        }
+    }
+
+    pub(crate) fn connection(&self) -> &str {
+        &self.connection
+    }
 }
 
 struct Entry {
@@ -356,6 +369,81 @@ pub(crate) fn binding(
     }))
 }
 
+/// Direct model IDs remember the connection that last succeeded for this
+/// caller, endpoint, and public model; `minutes` 0 is off. Every session shares
+/// one hint because oldest-first already sends them all to the same connection.
+pub(crate) fn direct_binding(
+    public_model: &str,
+    minutes: u32,
+    context: &RequestContext,
+) -> Option<Binding> {
+    (minutes > 0).then(|| Binding {
+        key: Key {
+            // Combo IDs never contain '/', so this cannot collide with a combo.
+            combo: format!("direct/{public_model}"),
+            // A changed timeout starts fresh rather than keeping older hints.
+            revision: i64::from(minutes),
+            scope: context.scope.clone(),
+            identity: "sticky".into(),
+        },
+        ttl: Duration::from_secs(u64::from(minutes) * 60),
+    })
+}
+
+/// The reusable start every conversation of one agent shares: its system or
+/// developer instructions and tools, without any user content.
+fn shared_prefix(endpoint: Endpoint, body: &Value) -> Option<Zeroizing<Vec<u8>>> {
+    fn leading(items: Option<&Value>) -> Vec<&Value> {
+        let items = items
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        items
+            .iter()
+            .take_while(|item| matches!(role(item), Some("system" | "developer")))
+            .collect()
+    }
+    let (instructions, initial) = match endpoint {
+        Endpoint::Responses => (body.get("instructions"), leading(body.get("input"))),
+        Endpoint::Chat => (None, leading(body.get("messages"))),
+        _ => return None,
+    };
+    let instructions = instructions.filter(|value| !matches!(value, Value::Null) && *value != "");
+    let tools = body
+        .get("tools")
+        .filter(|tools| tools.as_array().is_some_and(|tools| !tools.is_empty()));
+    // An empty prefix would give unrelated requests one common key.
+    if instructions.is_none() && initial.is_empty() && tools.is_none() {
+        return None;
+    }
+    serde_json::to_vec(&(instructions, initial, tools))
+        .ok()
+        .map(Zeroizing::new)
+}
+
+/// A `prompt_cache_key` for a request that has none, sent only to upstreams
+/// documented to accept it. Derived from the caller and the shared prefix, so
+/// one agent's conversations share a cache placement while other agents and
+/// callers do not. A client-supplied key, even null, is never replaced.
+pub(crate) fn prompt_cache_key(
+    context: &RequestContext,
+    provider: &crate::db::providers::Provider,
+    crypto: &Crypto,
+    body: &Value,
+) -> Option<String> {
+    if context.media.is_some()
+        || body.get("prompt_cache_key").is_some()
+        || !crate::providers::openai::accepts_prompt_cache_key(provider)
+    {
+        return None;
+    }
+    let prefix = shared_prefix(context.endpoint, body)?;
+    let mut input = Zeroizing::new(context.scope.as_bytes().to_vec());
+    input.push(0);
+    input.extend_from_slice(&prefix);
+    let fingerprint = crypto.prompt_cache_fingerprint(&input).ok()?;
+    Some(format!("sparkrouter-{fingerprint}"))
+}
+
 impl Affinity {
     pub(crate) fn preferred(&self, binding: &Binding) -> Option<Target> {
         self.preferred_at(binding, Instant::now())
@@ -412,6 +500,27 @@ impl Affinity {
             entries.remove(&binding.key);
         }
     }
+}
+
+/// Remember `target` once `response` has succeeded: now, or for a stream once
+/// its body finishes.
+pub(crate) fn remember_on_success(
+    affinity: &std::sync::Arc<Affinity>,
+    binding: Binding,
+    target: Target,
+    body: &Value,
+    response: Response,
+) -> Response {
+    if body.get("stream").and_then(Value::as_bool) == Some(true)
+        || response
+            .extensions()
+            .get::<crate::providers::media::BinaryStream>()
+            .is_some()
+    {
+        return on_complete(response, affinity.clone(), binding, target);
+    }
+    affinity.remember(binding, target);
+    response
 }
 
 /// A stream only establishes affinity when its body finishes successfully.
@@ -683,6 +792,138 @@ mod tests {
             combo.routing_revision = 1;
             assert!(memory.preferred_at(&make(&combo), start).is_some());
         }
+    }
+
+    #[test]
+    fn direct_bindings_are_per_model_scope_and_timeout() {
+        let context = RequestContext::default();
+        assert!(direct_binding("pool/m", 0, &context).is_none());
+        let five = direct_binding("pool/m", 5, &context).unwrap();
+        assert_eq!(five.ttl, Duration::from_secs(300));
+        assert!(direct_binding("pool/m", 5, &context).unwrap().key == five.key);
+        let responses = RequestContext::default().for_endpoint(Endpoint::Responses);
+        for other in [
+            direct_binding("pool/other", 5, &context),
+            direct_binding("pool/m", 6, &context),
+            direct_binding("pool/m", 5, &responses),
+        ] {
+            assert!(other.unwrap().key != five.key);
+        }
+    }
+
+    #[test]
+    fn generated_prompt_cache_keys_follow_the_shared_prefix() {
+        use crate::{db::providers::Provider, providers::Protocol};
+        let crypto = crypto();
+        let openai = Provider {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol: Protocol::OpenAi,
+            encrypted_api_key: vec![],
+            enabled: true,
+        };
+        let context = RequestContext::default();
+        let key = |context: &RequestContext, provider: &Provider, body: &Value| {
+            prompt_cache_key(context, provider, &crypto, body)
+        };
+        let body = json!({"messages":[{"role":"system","content":"agent rules"},{"role":"user","content":"question"}], "tools":[{"type":"function","function":{"name":"a"}}]});
+        let first = key(&context, &openai, &body).unwrap();
+        assert!(first.starts_with("sparkrouter-") && first.len() <= 64);
+        assert!(!first.contains("rules") && !first.contains("question"));
+        // Another conversation of the same agent shares the key.
+        let mut other = body.clone();
+        other["messages"][1]["content"] = json!("different question");
+        assert_eq!(
+            key(&context, &openai, &other).as_deref(),
+            Some(first.as_str())
+        );
+        // A different agent, toolset, or caller does not.
+        let mut changed = body.clone();
+        changed["messages"][0]["content"] = json!("other rules");
+        assert_ne!(
+            key(&context, &openai, &changed).as_deref(),
+            Some(first.as_str())
+        );
+        changed = body.clone();
+        changed["tools"] = json!([]);
+        assert_ne!(
+            key(&context, &openai, &changed).as_deref(),
+            Some(first.as_str())
+        );
+        let caller = RequestContext {
+            scope: "other-key".into(),
+            ..RequestContext::default()
+        };
+        assert_ne!(
+            key(&caller, &openai, &body).as_deref(),
+            Some(first.as_str())
+        );
+        // No usable prefix, a client key (even null), or an unverified upstream
+        // or endpoint: nothing is generated.
+        for body in [
+            json!({"messages":[{"role":"user","content":"question"}]}),
+            json!({"messages":[{"role":"user","content":"q"}], "tools":[]}),
+            json!({"messages":[{"role":"system","content":"r"}], "prompt_cache_key":"client"}),
+            json!({"messages":[{"role":"system","content":"r"}], "prompt_cache_key":null}),
+        ] {
+            assert!(key(&context, &openai, &body).is_none(), "{body}");
+        }
+        for (base_url, protocol) in [
+            ("https://api.openai.com.example/v1", Protocol::OpenAi),
+            ("https://openrouter.ai/api/v1", Protocol::OpenAi),
+            ("https://api.openai.com/v1", Protocol::Xai),
+        ] {
+            let provider = Provider {
+                id: "other".into(),
+                name: "Other".into(),
+                base_url: base_url.into(),
+                protocol,
+                encrypted_api_key: vec![],
+                enabled: true,
+            };
+            assert!(key(&context, &provider, &body).is_none(), "{base_url}");
+        }
+        for context in [
+            RequestContext::default().for_endpoint(Endpoint::Embeddings),
+            RequestContext::default().for_endpoint(Endpoint::SystemOne),
+            RequestContext::default().for_media(crate::providers::media::Kind::Image, None),
+        ] {
+            assert!(key(&context, &openai, &body).is_none());
+        }
+        // Responses use `instructions` and leading developer items.
+        let responses = RequestContext::default().for_endpoint(Endpoint::Responses);
+        let instructed = key(
+            &responses,
+            &openai,
+            &json!({"instructions":"agent rules", "input":"question"}),
+        )
+        .unwrap();
+        assert_eq!(
+            key(
+                &responses,
+                &openai,
+                &json!({"instructions":"agent rules", "input":[{"role":"user","content":"other"}]})
+            )
+            .as_deref(),
+            Some(instructed.as_str())
+        );
+        assert!(
+            key(
+                &responses,
+                &openai,
+                &json!({"input":[{"role":"developer","content":"style"}]})
+            )
+            .is_some()
+        );
+        assert!(
+            key(
+                &responses,
+                &openai,
+                &json!({"instructions":"", "input":"question"})
+            )
+            .is_none()
+        );
     }
 
     #[test]

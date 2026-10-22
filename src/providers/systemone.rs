@@ -20,7 +20,7 @@ pub async fn call(
 ) -> Result<Response, AttemptError> {
     let response = request(client, crypto, provider, reqwest::Method::POST, "systemone")?
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(model_body(body, model)?)
+        .body(model_body(body, model, None)?)
         .send()
         .await
         .map_err(transport_error)?;

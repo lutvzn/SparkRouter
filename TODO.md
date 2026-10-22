@@ -41,8 +41,12 @@ Two important distinctions:
 
 ### 1. Optional direct-route session affinity
 
-- [ ] Assess demand from clients using direct model IDs with multiple connections.
-- [ ] If justified, add opt-in success-based affinity for direct routes.
+- [x] Assess demand from clients using direct model IDs with multiple connections.
+- [x] Add success-based affinity for direct routes (2026-10-21, at the owner's
+  request ahead of migrating from OmniRoute): Settings → Routing →
+  Direct-route affinity, 5 minutes by default, 0 for off. One hint per caller
+  scope, public model ID, and endpoint (no per-session split; oldest-first
+  already co-locates sessions). See `tests/direct_affinity.rs`.
 
 Direct routes currently try eligible connections within the provider oldest
 first, subject to cooldown and stored-response continuation preferences. They do
@@ -120,9 +124,11 @@ Design constraints:
 
 ### 4. Capability-gated automatic `prompt_cache_key`
 
-- [ ] Verify whether a specific supported upstream benefits from generated keys.
-- [ ] If justified, optionally generate a missing key from a stable reusable prefix
-  only for verified upstream capabilities.
+- [ ] Verify against real traffic that generated keys raise OpenAI cache hits
+  (not yet measured; no billable requests were made).
+- [x] Generate a missing key from the caller and the shared prefix (instructions,
+  leading system/developer items, tools) for `api.openai.com` connections only
+  (2026-10-21). Always on there; no Settings switch.
 
 SparkRouter already preserves client-supplied `prompt_cache_key` and can use it
 as an affinity identity. It does not generate one automatically.

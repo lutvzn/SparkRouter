@@ -52,6 +52,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/settings/cooldown", post(settings::save_cooldown))
         .route(
+            "/settings/direct-affinity",
+            post(settings::save_direct_affinity),
+        )
+        .route(
             "/settings/metrics-token",
             post(settings::save_metrics_token),
         )

@@ -107,16 +107,30 @@ pub fn replace_model(body: &Value, model: &str) -> Result<Value, AppError> {
 }
 
 /// [`replace_model`] serialized for the upstream request. The request object
-/// is written with its model swapped rather than deep-cloned first.
-pub(crate) fn model_body(body: &Value, model: &str) -> Result<Vec<u8>, AppError> {
+/// is written with its model swapped rather than deep-cloned first, plus a
+/// generated `prompt_cache_key` when one is given and the request has none.
+pub(crate) fn model_body(
+    body: &Value,
+    model: &str,
+    cache_key: Option<&str>,
+) -> Result<Vec<u8>, AppError> {
     let object = body
         .as_object()
         .ok_or_else(|| AppError::InvalidRequest("Request body must be an object".into()))?;
+    let cache_key = cache_key.filter(|_| !object.contains_key("prompt_cache_key"));
     let encoded = if object.contains_key("model") {
-        serde_json::to_vec(&WithModel { object, model })
+        serde_json::to_vec(&WithModel {
+            object,
+            model,
+            cache_key,
+        })
     } else {
         // The API boundary requires a model; keep the inserted key's position exact.
-        serde_json::to_vec(&replace_model(body, model)?)
+        let mut body = replace_model(body, model)?;
+        if let (Some(key), Some(object)) = (cache_key, body.as_object_mut()) {
+            object.insert("prompt_cache_key".into(), key.into());
+        }
+        serde_json::to_vec(&body)
     };
     encoded.map_err(|_| AppError::Routing)
 }
@@ -124,18 +138,23 @@ pub(crate) fn model_body(body: &Value, model: &str) -> Result<Vec<u8>, AppError>
 struct WithModel<'a> {
     object: &'a serde_json::Map<String, Value>,
     model: &'a str,
+    cache_key: Option<&'a str>,
 }
 
 impl serde::Serialize for WithModel<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.object.len()))?;
+        let extra = usize::from(self.cache_key.is_some());
+        let mut map = serializer.serialize_map(Some(self.object.len() + extra))?;
         for (key, value) in self.object {
             if key == "model" {
                 map.serialize_entry(key, self.model)?;
             } else {
                 map.serialize_entry(key, value)?;
             }
+        }
+        if let Some(cache_key) = self.cache_key {
+            map.serialize_entry("prompt_cache_key", cache_key)?;
         }
         map.end()
     }
@@ -172,10 +191,11 @@ pub async fn call(
     provider: &Provider,
     model: &str,
     body: &Value,
+    cache_key: Option<&str>,
 ) -> Result<Response, AttemptError> {
     match provider.protocol {
         Protocol::OpenAi | Protocol::MiniMax | Protocol::Xai => {
-            openai::call(client, crypto, provider, model, body).await
+            openai::call(client, crypto, provider, model, body, cache_key).await
         }
         Protocol::Anthropic => anthropic::call(client, crypto, provider, model, body).await,
         Protocol::SystemOne => systemone::call(client, crypto, provider, model, body).await,
@@ -1017,12 +1037,25 @@ mod tests {
         let original = json!({"a":1, "model":"combo", "messages":[{"role":"user","content":"hi"}], "z":{"model":"nested"}});
         for body in [original.clone(), json!({"messages":[]}), json!({"zz":1})] {
             assert_eq!(
-                model_body(&body, "real/model").unwrap(),
+                model_body(&body, "real/model", None).unwrap(),
                 serde_json::to_vec(&replace_model(&body, "real/model").unwrap()).unwrap()
+            );
+            // A generated cache key is added once; upstreams ignore key order.
+            let mut keyed = replace_model(&body, "real/model").unwrap();
+            keyed["prompt_cache_key"] = json!("k");
+            let sent = model_body(&body, "real/model", Some("k")).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&sent).unwrap(), keyed);
+        }
+        // A client's key, even null, is never replaced.
+        for key in [json!("client"), Value::Null] {
+            let body = json!({"model":"combo", "prompt_cache_key": key});
+            assert_eq!(
+                model_body(&body, "m", Some("k")).unwrap(),
+                model_body(&body, "m", None).unwrap()
             );
         }
         assert_eq!(original["model"], "combo");
-        assert!(model_body(&json!([]), "model").is_err());
+        assert!(model_body(&json!([]), "model", None).is_err());
     }
 
     #[tokio::test]

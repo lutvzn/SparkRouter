@@ -66,7 +66,8 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   `combo/<name>` is always a combo. Direct public IDs are
   `<provider-slug>/<upstream-model-id>`; strip only the first prefix and preserve
   the complete upstream suffix. Try enabled connections within that provider
-  whose last refresh listed it, oldest first, with once-each fallback. Never
+  whose last refresh listed it, oldest first (the Settings direct-route affinity
+  hint first), with once-each fallback. Never
   cross provider slugs or treat raw IDs as aliases. Combo steps retain upstream
   IDs unchanged. A missing model list never blocks a combo step. Each combo has
   one enforced category (Text, Decision, Image, Video, Music, TTS, STT,
@@ -76,6 +77,8 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   explicitly declares its category, constrained by known modalities, endpoint
   metadata, protocol support, and the exact provider-scoped documented model
   catalog. Do not replace that catalog with name-prefix/substring guesses.
+- The only field the gateway adds to a request is a generated `prompt_cache_key`,
+  for `api.openai.com` connections only and never over a client-supplied value.
 - **Never fall back after a streaming response has been returned to Axum.**
   Before commitment, adapters may report a retryable failure. After commitment,
   interruptions terminate the body; do not synthesize a successful ending.

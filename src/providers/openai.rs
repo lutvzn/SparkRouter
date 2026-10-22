@@ -13,6 +13,15 @@ use super::{
 };
 use crate::{crypto::Crypto, db::providers::Provider, error::AppError};
 
+/// Whether this connection is OpenAI's own API, which documents
+/// `prompt_cache_key` on chat completions and responses. Compatible servers
+/// may reject unknown fields, so the protocol label alone is not enough.
+pub(crate) fn accepts_prompt_cache_key(provider: &Provider) -> bool {
+    provider.protocol == super::Protocol::OpenAi
+        && reqwest::Url::parse(&provider.base_url)
+            .is_ok_and(|url| url.host_str() == Some("api.openai.com"))
+}
+
 /// POST the request with its model swapped to `endpoint` under the base URL.
 async fn post(
     client: &reqwest::Client,
@@ -21,10 +30,11 @@ async fn post(
     endpoint: &str,
     model: &str,
     body: &Value,
+    cache_key: Option<&str>,
 ) -> Result<reqwest::Response, AttemptError> {
     let response = request(client, crypto, provider, reqwest::Method::POST, endpoint)?
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(model_body(body, model)?)
+        .body(model_body(body, model, cache_key)?)
         .send()
         .await
         .map_err(transport_error)?;
@@ -42,8 +52,9 @@ async fn post_optional(
     endpoint: &str,
     model: &str,
     body: &Value,
+    cache_key: Option<&str>,
 ) -> Result<reqwest::Response, AttemptError> {
-    post(client, crypto, provider, endpoint, model, body)
+    post(client, crypto, provider, endpoint, model, body, cache_key)
         .await
         .map_err(|error| match error {
             AttemptError::Permanent(AppError::Upstream(status))
@@ -72,9 +83,19 @@ pub async fn call(
     provider: &Provider,
     model: &str,
     body: &Value,
+    cache_key: Option<&str>,
 ) -> Result<Response, AttemptError> {
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let response = post(client, crypto, provider, "chat/completions", model, body).await?;
+    let response = post(
+        client,
+        crypto,
+        provider,
+        "chat/completions",
+        model,
+        body,
+        cache_key,
+    )
+    .await?;
     if streaming {
         check_sse(&response)?;
         streaming_response(terminated(upstream_events(response), is_done)).await
@@ -117,9 +138,19 @@ pub async fn responses(
     provider: &Provider,
     model: &str,
     body: &Value,
+    cache_key: Option<&str>,
 ) -> Result<Response, AttemptError> {
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let response = post_optional(client, crypto, provider, "responses", model, body).await?;
+    let response = post_optional(
+        client,
+        crypto,
+        provider,
+        "responses",
+        model,
+        body,
+        cache_key,
+    )
+    .await?;
     if streaming {
         check_sse(&response)?;
         // `response.created` comes first and names the stored response.
@@ -246,7 +277,7 @@ pub async fn embeddings(
     model: &str,
     body: &Value,
 ) -> Result<Response, AttemptError> {
-    let response = post_optional(client, crypto, provider, "embeddings", model, body).await?;
+    let response = post_optional(client, crypto, provider, "embeddings", model, body, None).await?;
     let status = response.status();
     let bytes = read_bounded(response).await?;
     if bytes.trim_ascii_start().first() != Some(&b'{') {

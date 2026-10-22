@@ -109,6 +109,8 @@ async fn attempt(
     // Only a chain-level deadline (the cap) can end an attempt early.
     let capped = deadline < own_limit;
     let mut deadline_exceeded = false;
+    let cache_key = affinity::prompt_cache_key(context, provider, &state.crypto, body);
+    let cache_key = cache_key.as_deref();
     let result = tokio::time::timeout_at(own_limit.min(deadline), async {
         if let Some(kind) = context.media {
             providers::media::call(
@@ -130,6 +132,7 @@ async fn attempt(
                         provider,
                         model,
                         body,
+                        cache_key,
                     )
                     .await
                 }
@@ -155,7 +158,15 @@ async fn attempt(
                     .await
                 }
                 affinity::Endpoint::Chat | affinity::Endpoint::SystemOne => {
-                    providers::call(&state.client, &state.crypto, provider, model, body).await
+                    providers::call(
+                        &state.client,
+                        &state.crypto,
+                        provider,
+                        model,
+                        body,
+                        cache_key,
+                    )
+                    .await
                 }
             }
         }
