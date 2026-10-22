@@ -806,8 +806,8 @@ everything queued since its previous commit in one transaction (multi-row
 statements, Extended captures included, one retention prune; at most 1024
 writes). History IDs are time-ordered UUIDv7 strings, so every index keyed by
 them grows at one edge and prunes from the other; random IDs dirtied a random
-page per index on each insert and prune. There is no timer; a
-lone write commits at once. The queue is FIFO and each transaction writes
+page per index on each insert and prune. There is no `created_at` index:
+insertion (rowid) order is time order. There is no timer; a lone write commits at once. The queue is FIFO and each transaction writes
 inserts before terminal outcomes and captures, so a stream is never left
 recorded as streaming after its outcome was queued. The queue is bounded
 (8192 writes, 32 MiB of bodies, times the 1/2/4/8 multiple saved in Settings
@@ -821,7 +821,7 @@ Started transactions are never cancelled. Recording failures are logged only as
 fixed categories and never fail generation. Startup marks orphaned streaming rows interrupted.
 The `request_history` and `request_attempts` tables contain metadata snapshots
 only, with no foreign keys to live configuration that could block deletion.
-Inserts prune to the configured newest requests (default/maximum 10,000) by deleting only the oldest excess rows, so the cost does not grow with retention; attempts cascade with history
+Inserts prune to the configured newest requests (default/maximum 10,000) by rowid: rows take the next rowid and are deleted only oldest first or all at once, so the cutoff is `max(rowid) - retention` and the cost does not grow with retention; attempts cascade with history
 deletion. A new additive migration stores cache-token and cost fields on request
 history and provider-slug/group-name snapshots on attempts, captured from the
 same SQL configuration snapshot used for each attempt. These identities survive

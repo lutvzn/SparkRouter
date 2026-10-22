@@ -152,8 +152,7 @@ pub async fn set_history_retention(pool: &SqlitePool, limit: i64) -> Result<(), 
         .bind(limit)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM request_history WHERE id IN (SELECT id FROM request_history ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)")
-        .bind(limit).execute(&mut *tx).await?;
+    super::request_history::prune(&mut tx).await?;
     tx.commit().await?;
     Ok(())
 }

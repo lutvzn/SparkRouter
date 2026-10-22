@@ -331,18 +331,15 @@ pub(crate) async fn insert_all(
 
 /// Delete every request beyond the configured retention, oldest first.
 pub(crate) async fn prune(connection: &mut SqliteConnection) -> Result<(), sqlx::Error> {
-    // Keep the newest `history_retention` rows by (created_at, rowid), read
-    // under the same write lock. Deleting the oldest `count - cap` rows is the
-    // same set as skipping the newest `cap`, but walks only the excess instead
-    // of every retained row on each insert; COUNT(*) reads index page counts.
+    // Keep the newest `history_retention` rows by rowid (insertion order),
+    // read under the same write lock. New rows take the next rowid and rows
+    // are only deleted oldest first or all at once, so rowids are contiguous
+    // and the cutoff is arithmetic instead of a COUNT(*) walk on every batch.
+    // A gap could only make it keep fewer rows, never more.
     sqlx::query(
         "DELETE FROM request_history
-         WHERE id IN (
-             SELECT id FROM request_history
-             ORDER BY created_at ASC, rowid ASC
-             LIMIT max(0, (SELECT COUNT(*) FROM request_history)
-                 - (SELECT history_retention FROM dashboard_settings WHERE id = 1))
-         )",
+         WHERE rowid <= (SELECT max(rowid) FROM request_history)
+             - (SELECT history_retention FROM dashboard_settings WHERE id = 1)",
     )
     .execute(connection)
     .await?;
@@ -472,7 +469,7 @@ pub async fn list_page(
         "SELECT id, source, model, streaming, outcome, status, latency_ms,
                 input_tokens, output_tokens, cached_tokens, created_at
          FROM request_history
-         ORDER BY created_at DESC, rowid DESC
+         ORDER BY rowid DESC
          LIMIT ? OFFSET ?",
     )
     .bind(limit)
@@ -507,7 +504,7 @@ pub async fn list_page(
          FROM request_attempts
          WHERE request_id IN (
              SELECT id FROM request_history
-             ORDER BY created_at DESC, rowid DESC
+             ORDER BY rowid DESC
              LIMIT ? OFFSET ?
          )
          ORDER BY ordinal",
@@ -644,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_keeps_exactly_the_newest_rows_by_time_then_rowid() {
+    async fn insert_keeps_exactly_the_newest_rows_in_insertion_order() {
         let pool = crate::db::connect("sqlite::memory:").await.unwrap();
         sqlx::query("UPDATE dashboard_settings SET history_retention = 3 WHERE id = 1")
             .execute(&pool)
@@ -655,7 +652,7 @@ mod tests {
             let row = record("m".into(), "m".into());
             ids.push(row.id.clone());
             save(&pool, &row).await.unwrap();
-            // Identical timestamps fall back to insertion (rowid) order.
+            // Retention follows insertion order, not timestamps.
             sqlx::query("UPDATE request_history SET created_at = '2026-01-01T00:00:00.000Z'")
                 .execute(&pool)
                 .await
