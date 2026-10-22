@@ -216,7 +216,8 @@ async fn execute(
         context
     };
     routing::validate_combo_category(&state, &format!("combo/{name}"), context.category()).await?;
-    let _permit = access.admit(&state)?;
+    let admission = access.admit(&state).await?;
+    let _permit = admission.permit;
     let capture = crate::history_payload::Capture::start(&state, &body).await;
     let mut attempts = Vec::new();
     let model = format!("combo/{name}");
@@ -226,10 +227,14 @@ async fn execute(
         Err(error) => error.into_response(),
     };
     response.extensions_mut().insert(capture);
-    let response = crate::history::record_response(
-        &state, "test", &model, false, started, &attempts, response,
-    )
-    .await;
+    let meter = crate::history::Meter {
+        source: "test",
+        endpoint: context.endpoint.label(),
+        charge: admission.charge,
+    };
+    let response =
+        crate::history::record_response(&state, &model, false, started, &attempts, meter, response)
+            .await;
     let status = response.status();
     // Adapters already buffer non-streaming responses with the same limit.
     let bytes = to_bytes(response.into_body(), 16 * 1024 * 1024)

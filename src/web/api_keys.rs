@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::{CsrfForm, check_csrf, render, see_other};
 use crate::app::AppState;
-use crate::db::api_keys::{Expiry, KeyAccess, KeyLimits};
+use crate::db::api_keys::{BudgetPeriod, Expiry, KeyAccess, KeyBudget, KeyLimits};
 use crate::error::AppError;
 
 #[derive(Template)]
@@ -35,6 +35,12 @@ struct KeyRow {
     concurrency: String,
     active: u32,
     rejected: u64,
+    /// `day`, `month`, or empty without a budget.
+    budget_period: String,
+    token_budget: String,
+    cost_budget: String,
+    /// The budget and this period's usage, ready to display.
+    budget_summary: String,
 }
 
 #[derive(Template)]
@@ -72,6 +78,10 @@ pub(crate) struct PolicyForm {
     expires_days: String,
     requests_per_minute: Option<String>,
     max_concurrent: Option<String>,
+    /// `none`, `day`, or `month`; absent keeps an existing budget.
+    budget_period: Option<String>,
+    token_budget: Option<String>,
+    cost_budget_usd: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,10 +91,55 @@ pub(crate) struct UpdateForm {
     policy: PolicyForm,
 }
 
-fn policy(
-    form: PolicyForm,
-    editing: bool,
-) -> Result<(KeyAccess, Expiry, Option<KeyLimits>), AppError> {
+struct Policy {
+    access: KeyAccess,
+    expiry: Expiry,
+    limits: Option<KeyLimits>,
+    /// `None` keeps the current budget, `Some(None)` removes it.
+    budget: Option<Option<KeyBudget>>,
+}
+
+fn budget(form: &PolicyForm) -> Result<Option<Option<KeyBudget>>, AppError> {
+    let filled = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let tokens = filled(&form.token_budget);
+    let cost = filled(&form.cost_budget_usd);
+    let period = match form.budget_period.as_deref().map(str::trim) {
+        None => return Ok(None),
+        Some("" | "none") if tokens.is_none() && cost.is_none() => return Ok(Some(None)),
+        Some("" | "none") => {
+            return Err(AppError::InvalidRequest(
+                "Choose a daily or monthly period for the budget".into(),
+            ));
+        }
+        Some(period) => BudgetPeriod::parse(period)?,
+    };
+    let invalid = || {
+        AppError::InvalidRequest(
+            "Budgets need a whole number of tokens and a USD amount such as 2.50".into(),
+        )
+    };
+    Ok(Some(Some(
+        KeyBudget {
+            period,
+            tokens: tokens
+                .map(|value| value.parse().map_err(|_| invalid()))
+                .transpose()?,
+            cost_usd: cost
+                .map(|value| value.parse().map_err(|_| invalid()))
+                .transpose()?,
+        }
+        .validate()?,
+    )))
+}
+
+fn policy(form: PolicyForm, editing: bool) -> Result<Policy, AppError> {
+    let budget = budget(&form)?;
     fn number(value: Option<&str>) -> Result<Option<u32>, AppError> {
         match value.map(str::trim).filter(|s| !s.is_empty()) {
             None => Ok(None),
@@ -143,43 +198,82 @@ fn policy(
                 ));
             }
         };
-    Ok((access, expiry, limits))
+    Ok(Policy {
+        access,
+        expiry,
+        limits,
+        budget,
+    })
 }
 
 pub(crate) async fn list(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    let keys = crate::db::api_keys::list(&state.db)
-        .await?
-        .into_iter()
-        .map(|key| {
-            let (restricted, models) = match key.access {
-                KeyAccess::All => (false, String::new()),
-                KeyAccess::Selected(models) => (true, models.join("\n")),
-            };
-            let stats = state.key_limits.snapshot(&key.id);
-            KeyRow {
-                rpm: key
-                    .limits
-                    .requests_per_minute
-                    .map(|n| n.to_string())
-                    .unwrap_or_default(),
-                concurrency: key
-                    .limits
-                    .max_concurrent
-                    .map(|n| n.to_string())
-                    .unwrap_or_default(),
-                active: stats.active,
-                rejected: stats.rejected,
-                id: key.id,
-                name: key.name,
-                prefix: key.prefix,
-                created_at: key.created_at,
-                restricted,
-                models,
-                expired: key.expired,
-                expiry: key.expires_at.unwrap_or_else(|| "Never".into()),
+    let now = crate::app::unix_now();
+    let spending = crate::db::api_keys::spending(&state.db).await?;
+    let mut keys = Vec::new();
+    for key in crate::db::api_keys::list(&state.db).await? {
+        // The form's budget fields, and the budget with this period's usage.
+        let (budget_period, token_budget, cost_budget, budget_summary) = match key.budget {
+            None => Default::default(),
+            Some(budget) => {
+                let (tokens, cost) = spending
+                    .get(&(key.id.clone(), budget.period.label(now)))
+                    .copied()
+                    .unwrap_or_default();
+                let mut limits = Vec::new();
+                if let Some(max) = budget.tokens {
+                    limits.push(format!("{} tokens", super::home::number(max)));
+                }
+                if let Some(max) = budget.cost_usd {
+                    limits.push(super::home::optional_cost(Some(max)));
+                }
+                let summary = format!(
+                    "{} per UTC {} · used this period: {} tokens, {}",
+                    limits.join(" or "),
+                    budget.period.as_str(),
+                    super::home::number(tokens),
+                    super::home::optional_cost(Some(cost)),
+                );
+                let text = |value: Option<String>| value.unwrap_or_default();
+                (
+                    budget.period.as_str().to_owned(),
+                    text(budget.tokens.map(|n| n.to_string())),
+                    text(budget.cost_usd.map(|n| n.to_string())),
+                    summary,
+                )
             }
-        })
-        .collect();
+        };
+        let (restricted, models) = match key.access {
+            KeyAccess::All => (false, String::new()),
+            KeyAccess::Selected(models) => (true, models.join("\n")),
+        };
+        let stats = state.key_limits.snapshot(&key.id);
+        keys.push(KeyRow {
+            budget_period,
+            token_budget,
+            cost_budget,
+            budget_summary,
+            rpm: key
+                .limits
+                .requests_per_minute
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            concurrency: key
+                .limits
+                .max_concurrent
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            active: stats.active,
+            rejected: stats.rejected,
+            id: key.id,
+            name: key.name,
+            prefix: key.prefix,
+            created_at: key.created_at,
+            restricted,
+            models,
+            expired: key.expired,
+            expiry: key.expires_at.unwrap_or_else(|| "Never".into()),
+        });
+    }
     let mut available_models: Vec<String> = crate::db::combos::list(&state.db)
         .await?
         .into_iter()
@@ -199,14 +293,15 @@ pub(crate) async fn create(
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
-    let (access, expiry, limits) = policy(form.policy, false)?;
-    let issued = crate::db::api_keys::create_with_limits(
+    let policy = policy(form.policy, false)?;
+    let issued = crate::db::api_keys::create_with_budget(
         &state.db,
         &state.crypto,
         &form.name,
-        access,
-        expiry,
-        limits.unwrap_or_default(),
+        policy.access,
+        policy.expiry,
+        policy.limits.unwrap_or_default(),
+        policy.budget.flatten(),
     )
     .await?;
     Ok(see_other(&format!("/api-keys/{}", issued.id)))
@@ -218,8 +313,16 @@ pub(crate) async fn update_policy(
     Form(form): Form<UpdateForm>,
 ) -> Result<Response, AppError> {
     check_csrf(&state, &form._csrf)?;
-    let (access, expiry, limits) = policy(form.policy, true)?;
-    crate::db::api_keys::update_policy_with_limits(&state.db, &id, access, expiry, limits).await?;
+    let policy = policy(form.policy, true)?;
+    crate::db::api_keys::update_policy_with_budget(
+        &state.db,
+        &id,
+        policy.access,
+        policy.expiry,
+        policy.limits,
+        policy.budget,
+    )
+    .await?;
     Ok(see_other("/api-keys"))
 }
 

@@ -31,8 +31,12 @@ pub struct AppState {
     pub csrf_token: Arc<String>,
     pub dashboard_auth: Option<Arc<crate::web::auth::DashboardAuth>>,
     pub(crate) key_limits: Arc<crate::key_limits::Limiter>,
+    pub(crate) spending: Arc<crate::key_limits::Spending>,
     pub(crate) round_robin: Arc<crate::routing::combo::RoundRobin>,
     pub(crate) affinity: Arc<crate::routing::affinity::Affinity>,
+    pub(crate) cooldown: Arc<crate::routing::cooldown::Cooldown>,
+    pub(crate) metrics: Arc<crate::metrics::Metrics>,
+    pub(crate) metrics_token: Option<Arc<SecretString>>,
 }
 
 impl AppState {
@@ -70,6 +74,11 @@ impl AppState {
             config.dashboard_secure_cookie,
         )
         .await?;
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        metrics.set_enabled(
+            config.metrics_token.is_some()
+                || db::settings::metrics_token_hash(&db).await?.is_some(),
+        );
         Ok(Self {
             started_at: std::time::Instant::now(),
             history,
@@ -81,8 +90,12 @@ impl AppState {
             csrf_token: Arc::new(uuid::Uuid::new_v4().to_string()),
             dashboard_auth,
             key_limits: Arc::default(),
+            spending: Arc::default(),
             round_robin: Arc::default(),
             affinity: Arc::default(),
+            cooldown: Arc::default(),
+            metrics,
+            metrics_token: config.metrics_token.map(Arc::new),
         })
     }
 
@@ -100,8 +113,14 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    let api =
-        crate::api::router().layer(middleware::from_fn_with_state(state.clone(), authenticate));
+    let authenticated = |router: Router<AppState>| {
+        router.layer(middleware::from_fn_with_state(state.clone(), authenticate))
+    };
+    // Anthropic clients read errors in Anthropic's shape, authentication included.
+    let api = authenticated(crate::api::router()).merge(
+        authenticated(crate::api::anthropic_router())
+            .layer(middleware::from_fn(crate::api::anthropic_errors)),
+    );
     let dashboard = crate::web::router()
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -112,6 +131,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/v1", api)
         .merge(dashboard)
         .merge(crate::health::router())
+        .merge(crate::metrics::router())
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -127,7 +147,13 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let access = authorize(&state, request.headers()).await?;
+    let access = authorize(&state, request.headers())
+        .await
+        .inspect_err(|error| {
+            if matches!(error, AppError::Unauthorized) {
+                state.metrics.rejected("unauthorized");
+            }
+        })?;
     request.extensions_mut().insert(access.access.clone());
     request.extensions_mut().insert(access);
     Ok(next.run(request).await)
@@ -149,12 +175,42 @@ impl Authorization {
         }
     }
 
-    pub fn admit(&self, state: &AppState) -> Result<Option<crate::key_limits::Permit>, AppError> {
-        self.key
-            .as_ref()
-            .map(|key| state.key_limits.admit(&key.id, key.limits))
-            .transpose()
+    /// Check the key's budget, then reserve its traffic limits. A refused
+    /// budget does not consume rate quota.
+    pub(crate) async fn admit(&self, state: &AppState) -> Result<Admission, AppError> {
+        let Some(key) = &self.key else {
+            return Ok(Admission::default());
+        };
+        let charge = match key.budget {
+            Some(budget) => {
+                let admitted = state
+                    .spending
+                    .admit(&state.db, &key.id, budget, unix_now())
+                    .await;
+                if matches!(admitted, Err(AppError::BudgetExceeded(_))) {
+                    state.metrics.rejected("budget");
+                }
+                Some(admitted?)
+            }
+            None => None,
+        };
+        let permit = state.key_limits.admit(&key.id, key.limits);
+        if permit.is_err() {
+            state.metrics.rejected("rate_limit");
+        }
+        Ok(Admission {
+            permit: Some(permit?),
+            charge,
+        })
     }
+}
+
+/// What admission reserved for a request: its traffic-limit slot and the
+/// budget its reported usage is charged to.
+#[derive(Default)]
+pub(crate) struct Admission {
+    pub permit: Option<crate::key_limits::Permit>,
+    pub charge: Option<crate::key_limits::Charge>,
 }
 
 /// Shared by the public API and the dashboard's billable chat test action.
@@ -162,21 +218,20 @@ pub(crate) async fn authorize(
     state: &AppState,
     headers: &axum::http::HeaderMap,
 ) -> Result<Authorization, AppError> {
-    let supplied = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        // The auth scheme is case-insensitive (RFC 9110); the token is exact.
-        .and_then(|value| value.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .map_or("", |(_, token)| token);
-    let env_match = state.api_key.as_ref().is_some_and(|expected| {
-        bool::from(
-            supplied
-                .as_bytes()
-                .ct_eq(expected.expose_secret().as_bytes()),
-        )
-    });
-    if env_match {
+    let supplied = if headers.contains_key(header::AUTHORIZATION) {
+        bearer_token(headers)
+    } else {
+        // Anthropic SDKs send their key as `x-api-key` instead.
+        headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+    };
+    if state
+        .api_key
+        .as_ref()
+        .is_some_and(|expected| secret_matches(supplied, expected))
+    {
         return Ok(Authorization {
             access: crate::db::api_keys::KeyAccess::All,
             key: None,
@@ -199,6 +254,35 @@ pub(crate) async fn authorize(
     Err(AppError::Unauthorized)
 }
 
+/// The token of an `Authorization: Bearer` header, or empty. The scheme is
+/// case-insensitive (RFC 9110); the token is exact.
+pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> &str {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map_or("", |(_, token)| token)
+}
+
+/// Constant-time comparison with a configured secret.
+pub(crate) fn secret_matches(supplied: &str, expected: &SecretString) -> bool {
+    bool::from(
+        supplied
+            .as_bytes()
+            .ct_eq(expected.expose_secret().as_bytes()),
+    )
+}
+
+/// The system clock in Unix seconds.
+pub(crate) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
 /// [`crate::db::api_keys::authenticate_key`] through the configuration cache.
 async fn authenticate_key(
     state: &AppState,
@@ -208,12 +292,7 @@ async fn authenticate_key(
         return Ok(None);
     }
     let fingerprint = state.crypto.gateway_key_fingerprint(secret)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-        .try_into()
-        .unwrap_or(i64::MAX);
-    state.config.key(&state.db, fingerprint, now).await
+    state.config.key(&state.db, fingerprint, unix_now()).await
 }
 
 async fn dashboard_origin(request: Request, next: Next) -> Result<Response, AppError> {

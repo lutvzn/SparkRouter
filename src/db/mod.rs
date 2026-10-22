@@ -18,6 +18,7 @@ pub mod providers;
 pub mod request_history;
 pub mod request_payloads;
 pub mod settings;
+pub(crate) mod stored_responses;
 pub mod usage;
 
 use std::{str::FromStr, time::Duration};

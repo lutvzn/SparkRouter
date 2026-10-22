@@ -38,6 +38,29 @@
   <p class="hint">At least 12 characters. Changing it signs out every other session. Forgot it? Stop the server, run <code>sparkrouter reset-dashboard-password</code>, and set a new one with the setup code printed at the next start.</p>
 </section>
 {% endif %}
+<section class="settings-card" aria-labelledby="metrics-heading">
+  <h2 id="metrics-heading">Prometheus metrics</h2>
+  {% if !new_metrics_token.is_empty() %}
+  <code class="key-secret">{{ new_metrics_token }}</code>
+  <button type="button" class="btn" data-copy-model="{{ new_metrics_token }}" aria-label="Copy metrics token" hidden><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#copy"></use></svg><span class="btn-label">Copy</span></button>
+  {% endif %}
+  {% if metrics_token.is_empty() %}<p class="test fail" role="status">Metrics token status unavailable. Reload to try again.</p>{% else %}
+  <dl class="settings-facts"><dt>Dashboard token</dt><dd>{% if metrics_token == "set" %}Configured{% else %}None{% endif %}</dd><dt>ROUTER_METRICS_TOKEN</dt><dd>{% if metrics_environment %}Set{% else %}Not set{% endif %}</dd></dl>
+  <p class="hint">Scrape <code>GET /metrics</code> with <code>Authorization: Bearer &lt;token&gt;</code>. Without any token it answers 404 and nothing is counted. Counters cover routed requests, attempts, reported tokens and cost, rejections and active streams, labelled only by endpoint, combo, provider slug and outcome. They reset on restart.</p>
+  <form method="post" action="/settings/metrics-token"{% if metrics_token == "set" %} data-confirm="Regenerate the metrics token? Scrapers using the current one get 401 until updated."{% endif %}>
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="action" value="generate">
+    <button class="btn primary" type="submit">{% if metrics_token == "set" %}Regenerate token{% else %}Generate token{% endif %}</button>
+  </form>
+  {% if metrics_token == "set" %}
+  <form method="post" action="/settings/metrics-token" data-confirm="Remove the metrics token? Scrapers using it get 401.">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="action" value="remove">
+    <button class="btn danger" type="submit">Remove token</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
 <section class="settings-card" aria-labelledby="system-heading">
   <div class="home-section-head"><h2 id="system-heading">System</h2><a class="btn" href="/settings">Refresh</a></div>
   <dl class="settings-facts"><dt>Version</dt><dd>{{ version }}</dd><dt>Uptime</dt><dd>{{ uptime }}</dd><dt>Database status</dt><dd>{{ database_status }}</dd><dt>Memory usage</dt><dd>{{ memory }}</dd></dl>
@@ -101,6 +124,21 @@
     </form>
   </details>
   <p><a href="/history">View request history →</a></p>
+</section>
+<section class="settings-card" aria-labelledby="routing-heading">
+  <h2 id="routing-heading">Routing</h2>
+  {% if target_cooldown.is_empty() %}<p class="test fail" role="status">Routing settings unavailable. Reload to try again.</p>{% else %}
+  <form method="post" action="/settings/cooldown">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <label for="target-cooldown">Failing-target cooldown</label>
+    <select id="target-cooldown" name="target_cooldown">
+      <option value="off"{% if target_cooldown == "off" %} selected{% endif %}>Off — always follow the configured order (default)</option>
+      <option value="on"{% if target_cooldown == "on" %} selected{% endif %}>On — try targets that just failed last</option>
+    </select>
+    <p class="hint">After a retryable failure (connection error, timeout, 401, 402, 404, 408, 429, 5xx, 529), that connection and model wait for the upstream’s <code>Retry-After</code>, or 5 seconds doubling up to 5 minutes. While waiting they move to the end of each request’s order instead of being skipped, so a request still tries every target once. A success ends the wait. Process-local; resets on restart.</p>
+    <button class="btn primary" type="submit">Save cooldown</button>
+  </form>
+  {% endif %}
 </section>
 <section class="settings-card configuration-transfer" aria-labelledby="backup-heading">
   <h2 id="backup-heading">Backup &amp; restore</h2>

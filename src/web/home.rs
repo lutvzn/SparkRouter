@@ -199,7 +199,7 @@ fn provider_view(p: ProviderTotals, total: i64) -> ProviderView {
     }
 }
 
-fn number(value: i64) -> String {
+pub(super) fn number(value: i64) -> String {
     let raw = value.to_string();
     let mut result = String::with_capacity(raw.len() + raw.len() / 3);
     for (i, ch) in raw.chars().enumerate() {
@@ -215,7 +215,7 @@ fn optional_number(value: Option<i64>) -> String {
     value.map_or_else(|| "—".into(), number)
 }
 
-fn optional_cost(value: Option<f64>) -> String {
+pub(super) fn optional_cost(value: Option<f64>) -> String {
     match value {
         None => "—".into(),
         Some(n) if n != 0.0 && n.abs() < 0.0001 => "< $0.0001".into(),

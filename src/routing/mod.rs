@@ -1,5 +1,6 @@
 pub(crate) mod affinity;
 pub mod combo;
+pub(crate) mod cooldown;
 pub mod direct;
 
 use axum::response::Response;
@@ -144,6 +145,17 @@ async fn attempt(
                     )
                     .await
                 }
+                affinity::Endpoint::Messages => {
+                    providers::anthropic::messages(
+                        &state.client,
+                        &state.crypto,
+                        provider,
+                        model,
+                        body,
+                        &context.upstream_headers,
+                    )
+                    .await
+                }
                 affinity::Endpoint::Chat | affinity::Endpoint::SystemOne => {
                     providers::call(&state.client, &state.crypto, provider, model, body).await
                 }
@@ -170,13 +182,13 @@ async fn attempt(
         trace.reason = match &result {
             Ok(response) => format!("Upstream selected (HTTP {}); body owns any subsequent failure", response.status().as_u16()),
             Err(AttemptError::Retryable) => "Retryable upstream failure: transport or invalid/incomplete response".into(),
-            Err(AttemptError::RetryableStatus(status)) => format!("Retryable upstream HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("target unavailable")),
+            Err(AttemptError::RetryableStatus(status, _)) => format!("Retryable upstream HTTP {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("target unavailable")),
             Err(AttemptError::Permanent(AppError::Upstream(status))) => format!("Non-retryable upstream HTTP {}", status.as_u16()),
             Err(AttemptError::Permanent(_)) => "Non-retryable request/provider failure or possibly accepted media job; fallback stopped".into(),
         };
         trace.finish(match &result {
             Ok(_) => "selected",
-            Err(AttemptError::Retryable | AttemptError::RetryableStatus(_)) => "retryable_failure",
+            Err(AttemptError::Retryable | AttemptError::RetryableStatus(..)) => "retryable_failure",
             Err(AttemptError::Permanent(_)) => "permanent_failure",
         });
     }
@@ -256,6 +268,7 @@ mod tests {
             api_key: None,
             dashboard_login: crate::config::DashboardLogin::Disabled,
             dashboard_secure_cookie: false,
+            metrics_token: None,
         })
         .await
         .unwrap();
@@ -315,6 +328,7 @@ mod tests {
             api_key: None,
             dashboard_login: crate::config::DashboardLogin::Disabled,
             dashboard_secure_cookie: false,
+            metrics_token: None,
         })
         .await
         .unwrap();

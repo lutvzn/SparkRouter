@@ -72,6 +72,41 @@ pub async fn set_history_buffer(pool: &SqlitePool, scale: u32) -> Result<(), App
     Ok(())
 }
 
+/// Whether failing targets cool down (see `routing::cooldown`).
+pub async fn target_cooldown(pool: &SqlitePool) -> Result<bool, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT target_cooldown FROM dashboard_settings WHERE id = 1")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+pub async fn set_target_cooldown(pool: &SqlitePool, enabled: bool) -> Result<(), AppError> {
+    sqlx::query("UPDATE dashboard_settings SET target_cooldown = ? WHERE id = 1")
+        .bind(enabled)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The SHA-256 (hex) of the dashboard-generated metrics token, if any.
+pub async fn metrics_token_hash(pool: &SqlitePool) -> Result<Option<String>, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT metrics_token_hash FROM dashboard_settings WHERE id = 1")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// Replace (or with `None`, remove) the metrics token's hash.
+pub async fn set_metrics_token_hash(pool: &SqlitePool, hash: Option<&str>) -> Result<(), AppError> {
+    sqlx::query("UPDATE dashboard_settings SET metrics_token_hash = ? WHERE id = 1")
+        .bind(hash)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn history_retention(pool: &SqlitePool) -> Result<i64, AppError> {
     Ok(
         sqlx::query_scalar("SELECT history_retention FROM dashboard_settings WHERE id = 1")

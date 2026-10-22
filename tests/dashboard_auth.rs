@@ -46,6 +46,7 @@ fn auth_config(password: Option<&str>, secure_cookie: bool, api_key: Option<&str
             None => DashboardLogin::Disabled,
         },
         dashboard_secure_cookie: secure_cookie,
+        metrics_token: None,
     }
 }
 

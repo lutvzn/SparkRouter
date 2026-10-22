@@ -25,7 +25,8 @@
       <span class="hint"><code>{{ key.prefix }}&hellip;</code> &middot; Created <time datetime="{{ key.created_at }}" title="{{ key.created_at }}" data-local-time>{{ key.created_at }}</time></span>
       <p class="hint">{% if key.restricted %}Selected models{% else %}All combos and models{% endif %} &middot; Expires: {{ key.expiry }} {% if key.expired %}<span class="badge fail">Expired</span>{% endif %}</p>
       <p class="hint">Requests/min: {% if key.rpm.is_empty() %}Unlimited{% else %}{{ key.rpm }}{% endif %} &middot; Concurrent limit: {% if key.concurrency.is_empty() %}Unlimited{% else %}{{ key.concurrency }}{% endif %} &middot; Active: {{ key.active }} &middot; Rejections in current 60-second window: {{ key.rejected }}</p>
-      <details class="key-policy"><summary>Edit access / expiry / limits</summary>
+      <p class="hint">Budget: {% if key.budget_summary.is_empty() %}None{% else %}{{ key.budget_summary }}{% endif %}</p>
+      <details class="key-policy"><summary>Edit access / expiry / limits / budget</summary>
         <form method="post" action="/api-keys/{{ key.id }}/policy">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <label for="access-{{ key.id }}">Access</label>
@@ -41,6 +42,12 @@
           <input id="rpm-{{ key.id }}" name="requests_per_minute" type="number" min="1" max="1000000" value="{{ key.rpm }}">
           <label for="concurrency-{{ key.id }}">Maximum concurrent requests (blank: unlimited)</label>
           <input id="concurrency-{{ key.id }}" name="max_concurrent" type="number" min="1" max="10000" value="{{ key.concurrency }}">
+          <label for="budget-period-{{ key.id }}">Budget period</label>
+          <select id="budget-period-{{ key.id }}" name="budget_period"><option value="none"{% if key.budget_period.is_empty() %} selected{% endif %}>No budget</option><option value="day"{% if key.budget_period == "day" %} selected{% endif %}>Per UTC day</option><option value="month"{% if key.budget_period == "month" %} selected{% endif %}>Per UTC month</option></select>
+          <label for="token-budget-{{ key.id }}">Token budget (blank: no token limit)</label>
+          <input id="token-budget-{{ key.id }}" name="token_budget" type="number" min="1" max="1000000000000" value="{{ key.token_budget }}">
+          <label for="cost-budget-{{ key.id }}">USD budget (blank: no USD limit)</label>
+          <input id="cost-budget-{{ key.id }}" name="cost_budget_usd" type="number" min="0.0001" max="1000000" step="any" value="{{ key.cost_budget }}">
           <button class="btn small" type="submit">Save policy</button>
         </form>
       </details>
@@ -97,6 +104,13 @@
     <div><label for="concurrency">Maximum concurrent requests</label><input id="concurrency" name="max_concurrent" type="number" min="1" max="10000" placeholder="Unlimited"></div>
   </div>
   <p class="hint">Blank means unlimited. Chat and test chat share limits; model listing is exempt. Fixed 60-second windows and active counts reset on restart. Streams count until finished or dropped.</p>
+  <div class="grid2">
+    <div><label for="budget-period">Budget period</label><select id="budget-period" name="budget_period"><option value="none">No budget</option><option value="day">Per UTC day</option><option value="month">Per UTC month</option></select></div>
+    <div><label for="token-budget">Token budget</label><input id="token-budget" name="token_budget" type="number" min="1" max="1000000000000" placeholder="No token limit"></div>
+  </div>
+  <label for="cost-budget">USD budget</label>
+  <input id="cost-budget" name="cost_budget_usd" type="number" min="0.0001" max="1000000" step="any" placeholder="No USD limit">
+  <p class="hint">Once this period’s input plus output tokens or USD cost reaches a limit, requests get <code>429 insufficient_quota</code> until the next UTC day or month. Only usage that upstreams report counts, and requests already running can go past the limit.</p>
   <div class="form-actions">
     <button class="btn" type="button" popovertarget="generate-key" popovertargetaction="hide"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#x"></use></svg>Cancel</button>
     <button class="btn primary" type="submit"><svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#plus"></use></svg>Generate key</button>

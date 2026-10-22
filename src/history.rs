@@ -23,20 +23,23 @@ use crate::{
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Usage {
-    input: Option<i64>,
-    output: Option<i64>,
-    cached: Option<i64>,
-    cost_usd: Option<f64>,
+    pub(crate) input: Option<i64>,
+    pub(crate) output: Option<i64>,
+    pub(crate) cached: Option<i64>,
+    pub(crate) cost_usd: Option<f64>,
 }
 
 /// A streamed event with every field except `usage` skipped unparsed. The
-/// Responses API reports it inside the final event's `response` object.
+/// Responses API reports it inside the final event's `response` object, and
+/// Anthropic's `message_start` inside its `message`.
 #[derive(serde::Deserialize)]
 struct UsageEvent {
     #[serde(default)]
     usage: Value,
     #[serde(default)]
     response: Option<UsageEnvelope>,
+    #[serde(default)]
+    message: Option<UsageEnvelope>,
 }
 
 #[derive(serde::Deserialize)]
@@ -58,8 +61,8 @@ impl Usage {
             return Self::default();
         }
         serde_json::from_str::<UsageEvent>(data)
-            .map(|event| match event.response {
-                Some(response) if event.usage.is_null() => Self::from_usage(&response.usage),
+            .map(|event| match event.response.or(event.message) {
+                Some(envelope) if event.usage.is_null() => Self::from_usage(&envelope.usage),
                 _ => Self::from_usage(&event.usage),
             })
             .unwrap_or_default()
@@ -69,8 +72,8 @@ impl Usage {
         let mut result = Self {
             input: usage
                 .get("prompt_tokens")
-                .or_else(|| usage.get("input_tokens"))
-                .and_then(token_count),
+                .and_then(token_count)
+                .or_else(|| anthropic_input(usage)),
             cached: usage
                 .pointer("/prompt_tokens_details/cached_tokens")
                 .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
@@ -117,12 +120,29 @@ impl Usage {
         }
     }
 
+    /// Input plus output tokens, when either was reported.
+    fn total_tokens(self) -> Option<i64> {
+        match (self.input, self.output) {
+            (None, None) => None,
+            (input, output) => Some(input.unwrap_or(0).saturating_add(output.unwrap_or(0))),
+        }
+    }
+
     fn metrics(self) -> UsageMetrics {
         UsageMetrics {
             cached_tokens: self.cached,
             cost_usd: self.cost_usd,
         }
     }
+}
+
+/// `input_tokens`, plus Anthropic's cache reads and writes when present: its
+/// native count leaves them out, while the recorded input includes them, as
+/// for every other protocol. An invalid cache counter leaves input unknown.
+fn anthropic_input(usage: &Value) -> Option<i64> {
+    crate::providers::anthropic::input_tokens(usage)
+        .and_then(|input| i64::try_from(input).ok())
+        .filter(|input| *input <= 1_000_000_000)
 }
 
 fn token_count(value: &Value) -> Option<i64> {
@@ -142,22 +162,38 @@ fn millis(started: Instant) -> i64 {
     started.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
 
+/// Who made a routed request: its history source (`api` or `test`), its
+/// metrics endpoint label, and the budget its usage is charged to. Budgets
+/// and metrics do not depend on the logging mode.
+pub(crate) struct Meter {
+    pub source: &'static str,
+    pub endpoint: &'static str,
+    pub charge: Option<crate::key_limits::Charge>,
+}
+
+/// Metrics for one request while its body is still open.
+struct Measured {
+    metrics: std::sync::Arc<crate::metrics::Metrics>,
+    request: crate::metrics::Request,
+}
+
 pub(crate) async fn record_response(
     state: &AppState,
-    source: &str,
     model: &str,
     streaming: bool,
     started: Instant,
     attempts: &[AttemptTrace],
+    meter: Meter,
     mut response: Response,
 ) -> Response {
     let capture = response
         .extensions_mut()
         .remove::<crate::history_payload::Capture>();
-    if capture
+    let logging = capture
         .as_ref()
-        .is_some_and(|c| c.mode == crate::db::settings::LoggingMode::Off)
-    {
+        .is_none_or(|c| c.mode != crate::db::settings::LoggingMode::Off);
+    let metrics = state.metrics.enabled();
+    if !logging && meter.charge.is_none() && !metrics {
         return response;
     }
     let extended = capture
@@ -174,9 +210,33 @@ pub(crate) async fn record_response(
         .get::<Usage>()
         .copied()
         .unwrap_or_default();
+    let mut guard = StreamRecord {
+        writer: state.history.clone(),
+        id: None,
+        charge: meter.charge,
+        measured: metrics
+            .then(|| measure(state, meter.endpoint, model, started, attempts, is_stream)),
+        started,
+        usage,
+        streamed: is_stream,
+        done: false,
+        finalized: false,
+    };
+    // A finished response reports now, before its history insert; a stream
+    // reports when its body ends.
+    if !is_stream {
+        guard.finish(if success { "success" } else { "failure" });
+    }
+    if !logging {
+        return if is_stream {
+            observe_stream(response, guard, is_binary)
+        } else {
+            response
+        };
+    }
     let record = Record {
         id: history_id(),
-        source: source.into(),
+        source: meter.source.into(),
         model: model.chars().take(321).collect(),
         streaming,
         outcome: if is_stream {
@@ -229,29 +289,68 @@ pub(crate) async fn record_response(
             false
         }
     };
-    // Without a queued insert there is nothing to finalize.
-    if !queued {
-        return response;
+    // Without a queued insert there is no history to finalize.
+    if queued {
+        guard.id = Some(id.clone());
     }
-    let response = if extended {
-        crate::history_payload::wrap(response, state.history.clone(), id.clone())
+    let response = if extended && queued {
+        crate::history_payload::wrap(response, state.history.clone(), id)
     } else {
         response
     };
     if !is_stream {
         return response;
     }
-    let guard = StreamRecord {
-        history: state.history.clone(),
-        id,
-        started,
-        usage,
-        done: false,
-        finalized: false,
+    observe_stream(response, guard, is_binary)
+}
+
+/// Labels for a request that reached routing. Only names from configuration
+/// the request found become label values.
+fn measure(
+    state: &AppState,
+    endpoint: &'static str,
+    model: &str,
+    started: Instant,
+    attempts: &[AttemptTrace],
+    is_stream: bool,
+) -> Measured {
+    let slug = |trace: &AttemptTrace| {
+        trace
+            .provider_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.slug.clone())
     };
+    let combo = match model.strip_prefix("combo/") {
+        Some(name) if !attempts.is_empty() => name.to_owned(),
+        _ => String::new(),
+    };
+    let request = crate::metrics::Request {
+        endpoint,
+        combo,
+        provider: attempts
+            .iter()
+            .rev()
+            .find(|trace| trace.outcome == "selected")
+            .and_then(slug),
+    };
+    let attempted: Vec<_> = attempts
+        .iter()
+        .map(|trace| (slug(trace), trace.outcome))
+        .collect();
+    state
+        .metrics
+        .responded(&request, started.elapsed(), &attempted, is_stream);
+    Measured {
+        metrics: state.metrics.clone(),
+        request,
+    }
+}
+
+/// Watch a committed stream for its end and usage. Construct the guard
+/// outside the generator: even an entirely unpolled dropped body records
+/// cancellation. Bytes and errors are forwarded unchanged.
+fn observe_stream(response: Response, guard: StreamRecord, is_binary: bool) -> Response {
     let (parts, body) = response.into_parts();
-    // Construct the guard outside the generator: even an entirely unpolled
-    // dropped body records cancellation. Bytes/errors are forwarded unchanged.
     let stream = async_stream::stream! {
         let mut guard = guard;
         let mut decoder = if is_binary { None } else { Some(SseDecoder::default()) };
@@ -284,28 +383,43 @@ pub(crate) async fn record_response(
 }
 
 struct StreamRecord {
-    history: HistoryWriter,
-    id: String,
+    writer: HistoryWriter,
+    /// The history record to finalize, when one was queued.
+    id: Option<String>,
+    charge: Option<crate::key_limits::Charge>,
+    measured: Option<Measured>,
     started: Instant,
     usage: Usage,
+    /// A streaming body, counted as active until it ends.
+    streamed: bool,
     done: bool,
     finalized: bool,
 }
 
 impl StreamRecord {
-    /// Queue the terminal outcome once; it is written after the insert.
+    /// Report the terminal outcome once; history is written after its insert.
     fn finish(&mut self, outcome: &'static str) {
         if std::mem::replace(&mut self.finalized, true) {
             return;
         }
-        self.history.finish(Terminal {
-            id: self.id.clone(),
-            outcome,
-            latency_ms: millis(self.started),
-            input_tokens: self.usage.input,
-            output_tokens: self.usage.output,
-            usage: self.usage.metrics(),
-        });
+        if let Some(charge) = self.charge.take() {
+            charge.add(&self.writer, self.usage.total_tokens(), self.usage.cost_usd);
+        }
+        if let Some(id) = &self.id {
+            self.writer.finish(Terminal {
+                id: id.clone(),
+                outcome,
+                latency_ms: millis(self.started),
+                input_tokens: self.usage.input,
+                output_tokens: self.usage.output,
+                usage: self.usage.metrics(),
+            });
+        }
+        if let Some(measured) = &self.measured {
+            measured
+                .metrics
+                .finished(&measured.request, outcome, self.usage, self.streamed);
+        }
     }
 }
 
@@ -370,6 +484,29 @@ mod tests {
             assert_eq!(invalid.cached, None);
             assert_eq!(invalid.cost_usd, None);
         }
+    }
+
+    #[test]
+    fn native_anthropic_usage_counts_cache_tokens_as_input() {
+        use serde_json::json;
+        let usage = Usage::from_usage(&json!({"input_tokens":4, "cache_creation_input_tokens":3,
+            "cache_read_input_tokens":20, "output_tokens":5}));
+        assert_eq!(
+            (usage.input, usage.cached, usage.output),
+            (Some(27), Some(20), Some(5))
+        );
+        // Responses usage already includes cached input in `input_tokens`.
+        let responses = Usage::from_usage(
+            &json!({"input_tokens":30, "input_tokens_details":{"cached_tokens":20}}),
+        );
+        assert_eq!((responses.input, responses.cached), (Some(30), Some(20)));
+        // `message_start` carries usage inside its message.
+        let start = Usage::from_event(
+            r#"{"type":"message_start","message":{"id":"m","usage":{"input_tokens":2,"cache_read_input_tokens":8,"output_tokens":1}}}"#,
+        );
+        assert_eq!((start.input, start.cached), (Some(10), Some(8)));
+        let invalid = Usage::from_usage(&json!({"input_tokens":4, "cache_read_input_tokens":-1}));
+        assert_eq!(invalid.input, None);
     }
 
     #[test]
@@ -438,12 +575,23 @@ mod tests {
         }
     }
 
+    fn api_meter() -> Meter {
+        Meter {
+            source: "api",
+            endpoint: "chat",
+            charge: None,
+        }
+    }
+
     fn guard(history: &HistoryWriter, id: &str) -> StreamRecord {
         StreamRecord {
-            history: history.clone(),
-            id: id.into(),
+            writer: history.clone(),
+            id: Some(id.into()),
+            charge: None,
+            measured: None,
             started: Instant::now(),
             usage: Usage::default(),
+            streamed: true,
             done: false,
             finalized: false,
         }
@@ -468,6 +616,7 @@ mod tests {
             api_key: None,
             dashboard_login: crate::config::DashboardLogin::Disabled,
             dashboard_secure_cookie: false,
+            metrics_token: None,
         }
     }
 
@@ -505,11 +654,11 @@ mod tests {
         let lock = state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
         let response = record_response(
             &state,
-            "api",
             "combo/coding",
             false,
             Instant::now(),
             &[],
+            api_meter(),
             axum::response::Response::new(axum::body::Body::from("ok")),
         )
         .await;
@@ -534,11 +683,11 @@ mod tests {
         let started = Instant::now();
         let response = record_response(
             &state,
-            "api",
             "combo/coding",
             false,
             Instant::now(),
             &[],
+            api_meter(),
             axum::response::Response::new(axum::body::Body::from("ok")),
         )
         .await;

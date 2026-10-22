@@ -8,6 +8,7 @@ pub mod health;
 mod history;
 mod history_payload;
 mod key_limits;
+pub mod metrics;
 pub(crate) mod provider_catalog;
 pub mod providers;
 pub mod routing;

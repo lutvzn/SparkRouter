@@ -57,6 +57,9 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
   the target model without reconstructing the complete request schema.
 - Attempt enabled combo steps sequentially from the strategy-selected start,
   at most once per request. Round robin advances once per request, not per retry.
+  Only the affinity hint, the opt-in Settings cooldown (which moves cooling
+  targets last, never drops them), and a `previous_response_id`'s stored
+  connection may reorder that sequence.
   Permanent client/upstream request
   errors stop the chain; retry classification belongs in the routing helper.
   Target-specific 401, 402, 404, and 529 are retryable. 400, 403, and 422 are not.
@@ -88,9 +91,12 @@ are configuration, not separate implementations. Model IDs are arbitrary strings
 - Keep the default bind loopback. Gateway authentication protects `/v1/*`, not
   the dashboard. `ROUTER_API_KEY` is unrestricted; generated keys enforce exact
   public model-ID scopes and expiry before routing (including test chat) and
-  filter `/v1/models`. Empty selected scopes deny all. Expired keys keep `/v1/*`
+  filter `/v1/models`. Keys are read from `Authorization: Bearer` or, without
+  it, `x-api-key`. Empty selected scopes deny all. Expired keys keep `/v1/*`
   closed until revoked; it stays open only when neither key type is configured.
   Health/readiness probes are public, sanitized, and never call providers.
+  `/metrics` is off (404) until a scrape token exists, then requires it; never
+  label metrics with request input that did not match configuration.
   Preserve dashboard CSRF checks, origin checks, autoescaping,
   and security headers; they are not a substitute for dashboard authentication.
 - Use parameterized SQL. Serialize step mutations in transactions and preserve

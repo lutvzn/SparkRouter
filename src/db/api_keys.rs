@@ -26,6 +26,7 @@ pub struct ApiKey {
     pub expires_at: Option<String>,
     pub expired: bool,
     pub limits: KeyLimits,
+    pub budget: Option<KeyBudget>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -48,11 +49,126 @@ impl KeyLimits {
     }
 }
 
+/// A spending limit over a UTC calendar period. At least one of the token
+/// and USD limits is set; requests are refused once either is reached.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyBudget {
+    pub period: BudgetPeriod,
+    pub tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BudgetPeriod {
+    Day,
+    Month,
+}
+
+impl BudgetPeriod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Month => "month",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "day" => Ok(Self::Day),
+            "month" => Ok(Self::Month),
+            _ => Err(AppError::InvalidRequest(
+                "budget period must be day or month".into(),
+            )),
+        }
+    }
+
+    /// The UTC period containing `unix` seconds: `2026-10-21` or `2026-10`.
+    pub fn label(self, unix: i64) -> String {
+        let (year, month, day) = civil(unix.div_euclid(86_400));
+        match self {
+            Self::Day => format!("{year:04}-{month:02}-{day:02}"),
+            Self::Month => format!("{year:04}-{month:02}"),
+        }
+    }
+
+    /// Seconds from `unix` until the next period begins.
+    pub fn remaining(self, unix: i64) -> u64 {
+        let today = unix.div_euclid(86_400);
+        let next = match self {
+            Self::Day => today + 1,
+            Self::Month => {
+                let (year, month, _) = civil(today);
+                if month == 12 {
+                    days_from_civil(year + 1, 1, 1)
+                } else {
+                    days_from_civil(year, month + 1, 1)
+                }
+            }
+        };
+        u64::try_from(next * 86_400 - unix).unwrap_or(1).max(1)
+    }
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant).
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let month = i64::from(month);
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+impl KeyBudget {
+    pub fn validate(self) -> Result<Self, AppError> {
+        let tokens = self
+            .tokens
+            .is_none_or(|tokens| (1..=1_000_000_000_000).contains(&tokens));
+        let cost = self
+            .cost_usd
+            .is_none_or(|cost| cost.is_finite() && cost > 0.0 && cost <= 1_000_000.0);
+        if self.tokens.is_none() && self.cost_usd.is_none() || !tokens || !cost {
+            return Err(AppError::InvalidRequest(
+                "A budget needs a token limit (1–1000000000000) or a USD limit (above 0, up to 1000000)".into(),
+            ));
+        }
+        Ok(self)
+    }
+
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Option<Self>, AppError> {
+        let period: Option<String> = row.try_get("budget_period")?;
+        period
+            .map(|period| {
+                Ok(Self {
+                    period: BudgetPeriod::parse(&period)?,
+                    tokens: row.try_get("token_budget")?,
+                    cost_usd: row.try_get("cost_budget_usd")?,
+                })
+            })
+            .transpose()
+    }
+}
+
 #[derive(Clone)]
 pub struct AuthenticatedKey {
     pub id: String,
     pub access: KeyAccess,
     pub limits: KeyLimits,
+    pub budget: Option<KeyBudget>,
 }
 
 /// Exact public model IDs, not upstream targets inside an allowed combo.
@@ -88,6 +204,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKey>, AppError> {
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query(
         "SELECT id, name, key_prefix, created_at, restricted, requests_per_minute, max_concurrent,
+         budget_period, token_budget, cost_budget_usd,
          strftime('%Y-%m-%dT%H:%M:%SZ', expires_at, 'unixepoch') AS expires_at,
          expires_at IS NOT NULL AND expires_at <= unixepoch() AS expired
          FROM api_keys ORDER BY created_at, id",
@@ -124,6 +241,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<ApiKey>, AppError> {
                     requests_per_minute: row.try_get("requests_per_minute")?,
                     max_concurrent: row.try_get("max_concurrent")?,
                 },
+                budget: KeyBudget::from_row(row)?,
             })
         })
         .collect();
@@ -153,7 +271,20 @@ pub async fn create_with_limits(
     expiry: Expiry,
     limits: KeyLimits,
 ) -> Result<IssuedKey, AppError> {
+    create_with_budget(pool, crypto, name, access, expiry, limits, None).await
+}
+
+pub async fn create_with_budget(
+    pool: &SqlitePool,
+    crypto: &Crypto,
+    name: &str,
+    access: KeyAccess,
+    expiry: Expiry,
+    limits: KeyLimits,
+    budget: Option<KeyBudget>,
+) -> Result<IssuedKey, AppError> {
     let limits = limits.validate()?;
+    let budget = budget.map(KeyBudget::validate).transpose()?;
     let name = validate_name(name)?;
     let access = validate_access(access)?;
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -164,8 +295,9 @@ pub async fn create_with_limits(
     let key_hash = crypto.gateway_key_fingerprint(secret.expose_secret())?;
     let reveal_envelope = crypto.encrypt_api_key(&id, &secret)?;
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_prefix, key_hash, reveal_envelope, restricted, expires_at, requests_per_minute, max_concurrent)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, name, key_prefix, key_hash, reveal_envelope, restricted, expires_at, requests_per_minute, max_concurrent,
+         budget_period, token_budget, cost_budget_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
@@ -176,6 +308,9 @@ pub async fn create_with_limits(
     .bind(expires_at)
     .bind(limits.requests_per_minute)
     .bind(limits.max_concurrent)
+    .bind(budget.map(|budget| budget.period.as_str()))
+    .bind(budget.and_then(|budget| budget.tokens))
+    .bind(budget.and_then(|budget| budget.cost_usd))
     .execute(&mut *transaction)
     .await?;
     write_models(&mut transaction, &id, &access).await?;
@@ -201,7 +336,22 @@ pub async fn update_policy_with_limits(
     expiry: Expiry,
     limits: Option<KeyLimits>,
 ) -> Result<(), AppError> {
+    update_policy_with_budget(pool, id, access, expiry, limits, None).await
+}
+
+/// `budget`: `None` preserves it, `Some(None)` removes it.
+pub async fn update_policy_with_budget(
+    pool: &SqlitePool,
+    id: &str,
+    access: KeyAccess,
+    expiry: Expiry,
+    limits: Option<KeyLimits>,
+    budget: Option<Option<KeyBudget>>,
+) -> Result<(), AppError> {
     let limits = limits.map(KeyLimits::validate).transpose()?;
+    let budget = budget
+        .map(|budget| budget.map(KeyBudget::validate).transpose())
+        .transpose()?;
     let access = validate_access(access)?;
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let existing: Option<i64> = sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE id = ?")
@@ -224,12 +374,84 @@ pub async fn update_policy_with_limits(
             .execute(&mut *transaction)
             .await?;
     }
+    if let Some(budget) = budget {
+        sqlx::query(
+            "UPDATE api_keys SET budget_period = ?, token_budget = ?, cost_budget_usd = ? WHERE id = ?",
+        )
+        .bind(budget.map(|budget| budget.period.as_str()))
+        .bind(budget.and_then(|budget| budget.tokens))
+        .bind(budget.and_then(|budget| budget.cost_usd))
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    }
     sqlx::query("DELETE FROM api_key_models WHERE key_id = ?")
         .bind(id)
         .execute(&mut *transaction)
         .await?;
     write_models(&mut transaction, id, &access).await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+/// Tokens and USD counted against a key in one budget period.
+pub async fn spent(pool: &SqlitePool, id: &str, period: &str) -> Result<(i64, f64), AppError> {
+    let row =
+        sqlx::query("SELECT tokens, cost_usd FROM api_key_spend WHERE key_id = ? AND period = ?")
+            .bind(id)
+            .bind(period)
+            .fetch_optional(pool)
+            .await?;
+    row.map_or(Ok((0, 0.0)), |row| {
+        Ok((row.try_get("tokens")?, row.try_get("cost_usd")?))
+    })
+}
+
+/// Every key's counted usage by key ID and period. Only current periods are
+/// kept, so this is at most a row or two per budgeted key.
+pub async fn spending(
+    pool: &SqlitePool,
+) -> Result<HashMap<(String, String), (i64, f64)>, AppError> {
+    sqlx::query("SELECT key_id, period, tokens, cost_usd FROM api_key_spend")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                (row.try_get("key_id")?, row.try_get("period")?),
+                (row.try_get("tokens")?, row.try_get("cost_usd")?),
+            ))
+        })
+        .collect()
+}
+
+/// Add usage to a key's period, replacing rows of earlier periods. A key
+/// revoked meanwhile is skipped rather than failing the batch.
+pub(crate) async fn add_spend(
+    connection: &mut sqlx::SqliteConnection,
+    id: &str,
+    period: &str,
+    tokens: i64,
+    cost_usd: f64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM api_key_spend WHERE key_id = ? AND period <> ?")
+        .bind(id)
+        .bind(period)
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO api_key_spend (key_id, period, tokens, cost_usd)
+         SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM api_keys WHERE id = ?)
+         ON CONFLICT (key_id, period) DO UPDATE SET
+             tokens = tokens + excluded.tokens, cost_usd = cost_usd + excluded.cost_usd",
+    )
+    .bind(id)
+    .bind(period)
+    .bind(tokens)
+    .bind(cost_usd)
+    .bind(id)
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -415,7 +637,7 @@ pub(crate) async fn by_fingerprint(
     fingerprint: &str,
 ) -> Result<Option<super::config_cache::CachedKey>, AppError> {
     let mut transaction = pool.begin().await?;
-    let found = sqlx::query("SELECT id, restricted, requests_per_minute, max_concurrent, expires_at FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
+    let found = sqlx::query("SELECT id, restricted, requests_per_minute, max_concurrent, budget_period, token_budget, cost_budget_usd, expires_at FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > unixepoch())")
         .bind(fingerprint)
         .fetch_optional(&mut *transaction)
         .await?;
@@ -442,6 +664,7 @@ pub(crate) async fn by_fingerprint(
                         requests_per_minute: row.try_get("requests_per_minute")?,
                         max_concurrent: row.try_get("max_concurrent")?,
                     },
+                    budget: KeyBudget::from_row(&row)?,
                 },
                 expires_at: row.try_get("expires_at")?,
             })
@@ -472,9 +695,17 @@ fn validate_name(name: &str) -> Result<String, AppError> {
 }
 
 fn generate_secret() -> SecretString {
+    random_secret("sk-")
+}
+
+/// 256 random bits, base64url-encoded after `prefix`.
+pub(crate) fn random_secret(prefix: &str) -> SecretString {
     let mut bytes = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(bytes.as_mut());
-    SecretString::from(format!("sk-{}", URL_SAFE_NO_PAD.encode(bytes.as_slice())))
+    SecretString::from(format!(
+        "{prefix}{}",
+        URL_SAFE_NO_PAD.encode(bytes.as_slice())
+    ))
 }
 
 #[cfg(test)]

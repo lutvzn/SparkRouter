@@ -26,6 +26,7 @@ async fn start(url: &str, byte: u8) -> Result<AppState, AppError> {
         api_key: None,
         dashboard_login: DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
 }

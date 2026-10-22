@@ -52,13 +52,15 @@ async fn post_optional(
                     reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::NOT_IMPLEMENTED
                 ) =>
             {
-                AttemptError::RetryableStatus(status)
+                AttemptError::RetryableStatus(status, None)
             }
             error => error,
         })
 }
 
-fn upstream_events(response: reqwest::Response) -> impl Stream<Item = Result<Bytes, AttemptError>> {
+pub(super) fn upstream_events(
+    response: reqwest::Response,
+) -> impl Stream<Item = Result<Bytes, AttemptError>> {
     response
         .bytes_stream()
         .map(|chunk| chunk.map_err(transport_error))
@@ -120,7 +122,17 @@ pub async fn responses(
     let response = post_optional(client, crypto, provider, "responses", model, body).await?;
     if streaming {
         check_sse(&response)?;
-        return streaming_response(terminated(upstream_events(response), is_response_end)).await;
+        // `response.created` comes first and names the stored response.
+        let (first, source) = super::first_event(Box::pin(upstream_events(response))).await?;
+        let stored = serde_json::from_str::<Created>(&first.data)
+            .ok()
+            .filter(|created| created.r#type == "response.created")
+            .and_then(|created| created.response.stored_id());
+        let mut response = streaming_response(terminated(source, is_response_end)).await?;
+        if let Some(id) = stored {
+            response.extensions_mut().insert(StoredResponseId(id));
+        }
+        return Ok(response);
     }
     let status = response.status();
     let bytes = read_bounded(response).await?;
@@ -135,8 +147,18 @@ pub async fn responses(
         return Err(AttemptError::Retryable);
     }
     let usage = crate::history::Usage::from_usage(&envelope.usage);
-    Ok(json_response_with_usage(status, bytes, usage))
+    let stored = envelope.stored_id();
+    let mut response = json_response_with_usage(status, bytes, usage);
+    if let Some(id) = stored {
+        response.extensions_mut().insert(StoredResponseId(id));
+    }
+    Ok(response)
 }
+
+/// The ID of a response the upstream stored, for the API layer to remember
+/// which connection holds it.
+#[derive(Clone)]
+pub(crate) struct StoredResponseId(pub String);
 
 #[derive(serde::Deserialize)]
 struct ResponseObject {
@@ -146,6 +168,74 @@ struct ResponseObject {
     error: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     usage: Value,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    store: Option<bool>,
+}
+
+impl ResponseObject {
+    /// Responses are stored unless the request said `store: false`.
+    fn stored_id(&self) -> Option<String> {
+        self.id
+            .clone()
+            .filter(|id| self.store != Some(false) && crate::db::stored_responses::valid_id(id))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Created {
+    r#type: String,
+    response: ResponseObject,
+}
+
+/// Forward a call on a stored response (retrieve, delete, cancel, input
+/// items) to the connection that created it. There is no fallback: the
+/// response exists only there. Success bodies are passed through; a
+/// retrieval with `stream=true` streams until its terminal event. Upstream
+/// failures keep only their status.
+pub(crate) async fn stored_response(
+    client: &reqwest::Client,
+    crypto: &Crypto,
+    provider: &Provider,
+    method: reqwest::Method,
+    endpoint: &str,
+    streaming: bool,
+) -> Result<Response, AppError> {
+    let failed = |error: AttemptError| match error {
+        AttemptError::Permanent(error) => error,
+        _ => AppError::Provider,
+    };
+    let mut upstream = request(client, crypto, provider, method, endpoint)?;
+    if !streaming {
+        upstream = upstream.timeout(std::time::Duration::from_secs(120));
+    }
+    let response = upstream
+        .send()
+        .await
+        .map_err(|error| failed(transport_error(error)))?;
+    let status = response.status();
+    if !status.is_success() {
+        tracing::warn!(
+            status = status.as_u16(),
+            "upstream refused a stored response call"
+        );
+        return Err(AppError::Upstream(status));
+    }
+    if streaming && check_sse(&response).is_ok() {
+        return streaming_response(terminated(upstream_events(response), is_response_end))
+            .await
+            .map_err(failed);
+    }
+    let bytes = read_bounded(response).await.map_err(failed)?;
+    if bytes.trim_ascii_start().first() != Some(&b'{') {
+        return Err(AppError::Provider);
+    }
+    Ok(json_response_with_usage(
+        status,
+        bytes,
+        crate::history::Usage::default(),
+    ))
 }
 
 /// `POST /embeddings`; the vectors are forwarded unchanged.
@@ -209,9 +299,11 @@ fn is_response_end(event: &SseEvent) -> bool {
             .is_ok_and(|typed| RESPONSE_END.contains(&typed.r#type.as_ref()))
 }
 
-/// True for the last event of a Chat Completions or Responses stream.
+/// True for the last event of a Chat Completions, Responses, or native
+/// Anthropic Messages stream. Anthropic always names its events, so the
+/// unnamed Chat Completions events are not scanned again for it.
 pub(crate) fn is_terminal(event: &SseEvent) -> bool {
-    is_done(event) || is_response_end(event)
+    is_done(event) || is_response_end(event) || event.name == "message_stop"
 }
 
 /// Raw OpenAI SSE passthrough with terminal-event tracking.
@@ -229,7 +321,7 @@ pub(crate) fn is_terminal(event: &SseEvent) -> bool {
 /// still precommit (no bytes forwarded yet, e.g. an empty upstream body) it
 /// stays a retryable attempt; after commitment `streaming_response` turns it
 /// into a terminal body error with no fallback.
-fn terminated<S>(source: S, is_end: fn(&SseEvent) -> bool) -> ResponseStream
+pub(super) fn terminated<S>(source: S, is_end: fn(&SseEvent) -> bool) -> ResponseStream
 where
     S: Stream<Item = Result<Bytes, AttemptError>> + Send + 'static,
 {

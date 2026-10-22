@@ -457,6 +457,7 @@ fn test_config(database_url: &str) -> Config {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     }
 }
 

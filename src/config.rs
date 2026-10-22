@@ -9,6 +9,9 @@ pub struct Config {
     pub api_key: Option<SecretString>,
     pub dashboard_login: DashboardLogin,
     pub dashboard_secure_cookie: bool,
+    /// `ROUTER_METRICS_TOKEN`, accepted by `/metrics` alongside a token
+    /// generated in Settings.
+    pub metrics_token: Option<SecretString>,
 }
 
 /// Where the dashboard password comes from. Login is required unless disabled.
@@ -44,6 +47,20 @@ impl Config {
             Err(_) => {
                 return Err(AppError::Configuration(
                     "ROUTER_API_KEY must be valid Unicode".into(),
+                ));
+            }
+        };
+        let metrics_token = match env::var("ROUTER_METRICS_TOKEN") {
+            Ok(value) if value.len() < 16 || value.len() > 256 || value.trim() != value => {
+                return Err(AppError::Configuration(
+                    "ROUTER_METRICS_TOKEN must be 16–256 bytes without surrounding spaces".into(),
+                ));
+            }
+            Ok(value) => Some(SecretString::from(value)),
+            Err(env::VarError::NotPresent) => None,
+            Err(_) => {
+                return Err(AppError::Configuration(
+                    "ROUTER_METRICS_TOKEN must be valid Unicode".into(),
                 ));
             }
         };
@@ -88,6 +105,7 @@ impl Config {
             api_key,
             dashboard_login,
             dashboard_secure_cookie,
+            metrics_token,
         })
     }
 }

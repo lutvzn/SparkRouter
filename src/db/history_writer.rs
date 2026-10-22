@@ -60,7 +60,26 @@ enum Op {
     Insert(Box<NewRequest>, Option<Capture>),
     Finish(Terminal),
     FinishPayload(String, Capture),
+    Spend(Spend),
+    RememberResponse(RememberedResponse),
+    ForgetResponse(String),
     Flush(oneshot::Sender<()>),
+}
+
+/// The connection that created a stored Responses API response.
+struct RememberedResponse {
+    id: String,
+    provider_id: String,
+    scope: String,
+    model: String,
+}
+
+/// Usage counted against a key's budget period.
+struct Spend {
+    key: String,
+    period: String,
+    tokens: i64,
+    cost_usd: f64,
 }
 
 /// A bounded body capture whose bytes count against [`PAYLOAD_BUDGET`] until
@@ -147,6 +166,39 @@ impl HistoryWriter {
         }
     }
 
+    /// Queue usage counted against a key's budget. Written on this
+    /// connection, so it never invalidates the configuration cache.
+    pub(crate) fn spend(&self, key: String, period: String, tokens: i64, cost_usd: f64) {
+        self.submit(Op::Spend(Spend {
+            key,
+            period,
+            tokens,
+            cost_usd,
+        }));
+    }
+
+    /// Queue which connection created a stored response, for later
+    /// retrieval and `previous_response_id` continuation.
+    pub(crate) fn remember_response(
+        &self,
+        id: String,
+        provider_id: String,
+        scope: String,
+        model: String,
+    ) {
+        self.submit(Op::RememberResponse(RememberedResponse {
+            id,
+            provider_id,
+            scope,
+            model,
+        }));
+    }
+
+    /// Queue removal of a stored response the upstream deleted.
+    pub(crate) fn forget_response(&self, id: String) {
+        self.submit(Op::ForgetResponse(id));
+    }
+
     /// Wait until every write queued before this call is committed or
     /// dropped. Flushes do not count against the queue limit.
     pub(crate) async fn flush(&self) {
@@ -156,18 +208,29 @@ impl HistoryWriter {
         }
     }
 
+    /// Queue `op`, or warn that it was dropped.
+    fn submit(&self, op: Op) {
+        if let Err(op) = self.try_enqueue(op) {
+            warn_dropped(&op);
+        }
+    }
+
     /// Queue `op` unless the queue already holds its limit of writes.
     fn enqueue(&self, op: Op) -> bool {
+        self.try_enqueue(op).is_ok()
+    }
+
+    /// [`Self::enqueue`], handing a dropped `op` back.
+    fn try_enqueue(&self, op: Op) -> Result<(), Op> {
         let limit = QUEUE_CAPACITY * self.scale.load(Ordering::Relaxed);
         if self.queued.fetch_add(1, Ordering::Relaxed) >= limit {
             self.queued.fetch_sub(1, Ordering::Relaxed);
-            return false;
+            return Err(op);
         }
-        if self.queue.send(op).is_err() {
+        self.queue.send(op).map_err(|error| {
             self.queued.fetch_sub(1, Ordering::Relaxed);
-            return false;
-        }
-        true
+            error.0
+        })
     }
 
     fn capture(&self, body: String, truncated: bool, complete: bool) -> Option<Capture> {
@@ -248,6 +311,39 @@ async fn commit(pool: &SqlitePool, ops: &[&Op]) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     request_history::insert_all(&mut transaction, &inserts).await?;
     request_history::finish_all(&mut transaction, &terminals).await?;
+    // One statement pair per key and period, however many requests it had.
+    let mut spends = std::collections::BTreeMap::<(&str, &str), (i64, f64)>::new();
+    for op in ops {
+        if let Op::Spend(spend) = op {
+            let total = spends.entry((&spend.key, &spend.period)).or_default();
+            total.0 = total.0.saturating_add(spend.tokens);
+            total.1 += spend.cost_usd;
+        }
+    }
+    for ((key, period), (tokens, cost_usd)) in spends {
+        super::api_keys::add_spend(&mut transaction, key, period, tokens, cost_usd).await?;
+    }
+    let mut remembered = false;
+    for op in ops {
+        match op {
+            Op::RememberResponse(response) => {
+                remembered = true;
+                super::stored_responses::insert(
+                    &mut transaction,
+                    &response.id,
+                    &response.provider_id,
+                    &response.scope,
+                    &response.model,
+                )
+                .await?;
+            }
+            Op::ForgetResponse(id) => super::stored_responses::delete(&mut transaction, id).await?,
+            _ => {}
+        }
+    }
+    if remembered {
+        super::stored_responses::prune(&mut transaction).await?;
+    }
     let captures = ops
         .iter()
         .filter(|op| matches!(op, Op::Insert(_, Some(_)) | Op::FinishPayload(..)))
@@ -304,6 +400,10 @@ fn warn_dropped(op: &Op) {
         Op::Insert(..) => tracing::warn!("request history write unavailable"),
         Op::Finish(_) => tracing::warn!("request history finalization unavailable"),
         Op::FinishPayload(..) => tracing::warn!("request payload write unavailable"),
+        Op::Spend(_) => tracing::warn!("budget usage write unavailable"),
+        Op::RememberResponse(_) | Op::ForgetResponse(_) => {
+            tracing::warn!("stored response write unavailable");
+        }
         Op::Flush(_) => {}
     }
 }

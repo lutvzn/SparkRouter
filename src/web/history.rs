@@ -87,9 +87,15 @@ pub(crate) async fn page(
         let mut row = HistoryRow::from_stored(record);
         row.routing = diagnostics.selection.map_or_else(
             || "Direct routing or historical record without selection metadata".into(),
-            |selection| format!("Strategy: {} · strategy start: step {} · actual start: step {} · affinity: {} ({})",
-                selection.strategy, selection.strategy_position, selection.starting_position,
-                selection.affinity_mode, selection.affinity));
+            |selection| {
+                let mut routing = format!("Strategy: {} · strategy start: step {} · actual start: step {} · affinity: {} ({})",
+                    selection.strategy, selection.strategy_position, selection.starting_position,
+                    selection.affinity_mode, selection.affinity);
+                if selection.cooling_deferred > 0 {
+                    routing.push_str(&format!(" · cooldown: {} cooling target(s) moved last", selection.cooling_deferred));
+                }
+                routing
+            });
         for (attempt, reason) in row.attempts.iter_mut().zip(diagnostics.reasons) {
             attempt.reason = reason;
         }

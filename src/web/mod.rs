@@ -50,6 +50,11 @@ pub fn router() -> Router<AppState> {
             "/settings/history-buffer",
             post(settings::save_history_buffer),
         )
+        .route("/settings/cooldown", post(settings::save_cooldown))
+        .route(
+            "/settings/metrics-token",
+            post(settings::save_metrics_token),
+        )
         .route("/history", get(history::page))
         .route("/history/{id}/payload", get(history::payload))
         .route("/history/clear", post(history::clear))
@@ -230,8 +235,12 @@ mod tests {
             dashboard_auth: None,
             csrf_token: Arc::new("expected-token".to_string()),
             key_limits: Arc::default(),
+            spending: Arc::default(),
             round_robin: Arc::default(),
             affinity: Arc::default(),
+            cooldown: Arc::default(),
+            metrics: Arc::default(),
+            metrics_token: None,
         };
         assert!(super::check_csrf(&state, "expected-token").is_ok());
         assert!(super::check_csrf(&state, "expected-toke").is_err());

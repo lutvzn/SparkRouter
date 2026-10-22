@@ -108,6 +108,7 @@ fn config(master_key: &[u8; 32]) -> Config {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     }
 }
 

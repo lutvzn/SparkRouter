@@ -36,6 +36,9 @@ pub enum AppError {
     Forbidden,
     #[error("API key request or concurrency limit exceeded")]
     RateLimited(u64),
+    /// Seconds until the key's budget period ends.
+    #[error("API key budget for this period is used up")]
+    BudgetExceeded(u64),
     #[error("upstream rejected the request (HTTP {0})")]
     Upstream(StatusCode),
 }
@@ -70,6 +73,12 @@ impl IntoResponse for AppError {
                 self.to_string(),
                 "rate_limit_error",
             ),
+            // OpenAI's type for an exhausted quota; clients do not retry it.
+            Self::BudgetExceeded(_) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                self.to_string(),
+                "insufficient_quota",
+            ),
             Self::Upstream(status) => (
                 if status.is_client_error() || status.is_server_error() {
                     *status
@@ -98,7 +107,7 @@ impl IntoResponse for AppError {
             Json(json!({"error": {"message": message, "type": kind, "code": status.as_u16()}})),
         )
             .into_response();
-        if let Self::RateLimited(seconds) = self {
+        if let Self::RateLimited(seconds) | Self::BudgetExceeded(seconds) = self {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 seconds.to_string().parse().expect("integer header"),

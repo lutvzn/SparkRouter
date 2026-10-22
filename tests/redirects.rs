@@ -62,6 +62,7 @@ async fn redirects_never_forward_any_protocols_credentials() {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap();

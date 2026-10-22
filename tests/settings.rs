@@ -28,6 +28,7 @@ async fn state(password: bool) -> AppState {
             sparkrouter::config::DashboardLogin::Disabled
         },
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap()

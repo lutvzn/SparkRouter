@@ -89,6 +89,9 @@ pub(crate) struct RoutingSelection {
     pub affinity: String,
     pub strategy_position: i64,
     pub starting_position: i64,
+    /// Cooling targets moved to the end of this request's order.
+    #[serde(default)]
+    pub cooling_deferred: i64,
 }
 
 impl AttemptTrace {
@@ -183,12 +186,28 @@ async fn route_inner(
             affinity = "Preferred target unavailable; strategy used";
         }
     }
+    let cooldown = state.config.cooldown(&state.db).await?;
+    let cooling_deferred = if cooldown {
+        super::cooldown::defer(&mut steps, |step| {
+            state.cooldown.is_cooling(&step.provider_id, &step.model)
+        })
+    } else {
+        0
+    };
+    state.metrics.deferred(cooling_deferred);
+    // A continued stored response only exists on the connection that made it.
+    if let Some(connection) = &context.preferred_connection
+        && super::cooldown::prefer(&mut steps, |step| &step.provider_id == connection)
+    {
+        affinity = "Stored response's connection selected";
+    }
     let selection = RoutingSelection {
         strategy: combo.strategy.label().into(),
         affinity_mode: combo.affinity.mode.label().into(),
         affinity: affinity.into(),
         strategy_position,
         starting_position: steps.first().map_or(0, |step| step.position + 1),
+        cooling_deferred: cooling_deferred as i64,
     };
     let remaining = steps.len();
     for (index, step) in steps.into_iter().enumerate() {
@@ -237,6 +256,9 @@ async fn route_inner(
             &mut attempts,
         )
         .await;
+        if cooldown {
+            state.cooldown.record(&provider.id, &step.model, &attempt);
+        }
         match attempt {
             Ok(response) => {
                 tracing::info!(combo = name, provider = %provider.id, model = %step.model,
@@ -262,7 +284,7 @@ async fn route_inner(
                 }
                 return Ok(response);
             }
-            Err(AttemptError::Retryable | AttemptError::RetryableStatus(_)) => {
+            Err(AttemptError::Retryable | AttemptError::RetryableStatus(..)) => {
                 if let Some(binding) = &binding {
                     state
                         .affinity

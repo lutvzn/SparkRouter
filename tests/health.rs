@@ -22,6 +22,7 @@ async fn state() -> AppState {
             "probe-dashboard-password",
         )),
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap()

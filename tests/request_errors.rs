@@ -22,6 +22,7 @@ async fn malformed_and_oversized_json_have_sanitized_openai_errors() {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap();
@@ -82,6 +83,7 @@ async fn json_media_type_parameters_and_suffixes_are_accepted() {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap();

@@ -34,6 +34,7 @@ async fn state() -> AppState {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap()
@@ -751,6 +752,7 @@ async fn combo_rename_does_not_expand_name_based_permissions_and_restart_keeps_p
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     };
     let state = AppState::from_config(config()).await.unwrap();
     let combo = db::combos::create(&state.db, "old").await.unwrap();

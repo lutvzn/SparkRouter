@@ -31,6 +31,8 @@ pub(crate) enum Endpoint {
     SystemOne,
     Responses,
     Embeddings,
+    /// Anthropic's native `/v1/messages`, passed through to Anthropic connections.
+    Messages,
 }
 
 // No Debug: the transient header may contain a private session identifier.
@@ -40,6 +42,12 @@ pub(crate) struct RequestContext {
     pub(crate) endpoint: Endpoint,
     pub(crate) media: Option<crate::providers::media::Kind>,
     pub(crate) upload: Option<crate::providers::media::Upload>,
+    /// Client protocol headers forwarded upstream (Anthropic's version and
+    /// beta flags on `/v1/messages`); never credentials.
+    pub(crate) upstream_headers: HeaderMap,
+    /// The connection holding the response a Responses request continues
+    /// (`previous_response_id`); tried first when the chain includes it.
+    pub(crate) preferred_connection: Option<String>,
 }
 
 impl Default for RequestContext {
@@ -50,6 +58,21 @@ impl Default for RequestContext {
             endpoint: Endpoint::Chat,
             media: None,
             upload: None,
+            upstream_headers: HeaderMap::new(),
+            preferred_connection: None,
+        }
+    }
+}
+
+impl Endpoint {
+    /// The `endpoint` label in metrics.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::SystemOne => "systemone",
+            Self::Responses => "responses",
+            Self::Embeddings => "embeddings",
+            Self::Messages => "messages",
         }
     }
 }
@@ -63,6 +86,7 @@ impl RequestContext {
             Endpoint::SystemOne => ":systemone",
             Endpoint::Responses => ":responses",
             Endpoint::Embeddings => ":embeddings",
+            Endpoint::Messages => ":messages",
         });
         self
     }
@@ -87,7 +111,7 @@ impl RequestContext {
             (Some(Kind::Music), _) => Category::Music,
             (Some(Kind::Speech), _) => Category::Tts,
             (Some(Kind::Transcription | Kind::Translation), _) => Category::Stt,
-            (None, Endpoint::Chat | Endpoint::Responses) => Category::Text,
+            (None, Endpoint::Chat | Endpoint::Responses | Endpoint::Messages) => Category::Text,
             (None, Endpoint::SystemOne) => Category::Decision,
             (None, Endpoint::Embeddings) => Category::Embedding,
         }
@@ -107,6 +131,7 @@ impl RequestContext {
             // Only these protocols implement OpenAI's `/responses` wire format.
             Endpoint::Responses => matches!(provider.protocol, Protocol::OpenAi | Protocol::Xai),
             Endpoint::Embeddings => provider.protocol == Protocol::OpenAi,
+            Endpoint::Messages => provider.protocol == Protocol::Anthropic,
         }
     }
 
@@ -126,6 +151,8 @@ impl RequestContext {
             endpoint: Endpoint::Chat,
             media: None,
             upload: None,
+            upstream_headers: HeaderMap::new(),
+            preferred_connection: None,
         }
     }
 }
@@ -266,6 +293,16 @@ fn prompt_start(endpoint: Endpoint, body: &Value) -> Result<Option<Zeroizing<Vec
             }
             _ => return Ok(None),
         }
+    } else if endpoint == Endpoint::Messages {
+        // Messages keep the system prompt in a top-level `system` field.
+        let Some(user) = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| messages.iter().find(|item| role(item) == Some("user")))
+        else {
+            return Ok(None);
+        };
+        serde_json::to_vec(&(body.get("system"), user, tools))
     } else {
         let Some((initial, user)) = body
             .get("messages")

@@ -144,9 +144,20 @@ impl serde::Serialize for WithModel<'_> {
 #[derive(Debug)]
 pub enum AttemptError {
     Retryable,
-    /// Sanitized numeric status, retained for diagnostics without upstream bodies.
-    RetryableStatus(StatusCode),
+    /// Sanitized numeric status, retained for diagnostics without upstream
+    /// bodies, and the upstream's `Retry-After` in seconds when it sent one.
+    RetryableStatus(StatusCode, Option<u64>),
     Permanent(AppError),
+}
+
+impl AttemptError {
+    /// The upstream's `Retry-After`, in seconds, when it sent one.
+    pub(crate) fn retry_after(&self) -> Option<u64> {
+        match self {
+            Self::RetryableStatus(_, retry_after) => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 impl From<AppError> for AttemptError {
@@ -722,7 +733,13 @@ fn check_status(response: &reqwest::Response) -> Result<(), AttemptError> {
     if status.is_success() {
         Ok(())
     } else if crate::routing::combo::is_retryable_status(status) {
-        Err(AttemptError::RetryableStatus(status))
+        // Only the delta-seconds form; an HTTP date is ignored.
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse().ok());
+        Err(AttemptError::RetryableStatus(status, retry_after))
     } else {
         Err(AttemptError::Permanent(AppError::Upstream(status)))
     }
@@ -798,6 +815,33 @@ fn json_response_with_usage(
         header::HeaderValue::from_static("application/json"),
     );
     response
+}
+
+/// Hold a stream back until its first complete SSE event, so an adapter can
+/// inspect it while fallback is still possible. Returns that event and a
+/// stream that replays every byte read so far, then the rest unchanged.
+async fn first_event(
+    mut source: ResponseStream,
+) -> Result<(sse::SseEvent, ResponseStream), AttemptError> {
+    let mut decoder = sse::SseDecoder::default();
+    let mut buffered = Vec::new();
+    loop {
+        let bytes = source.next().await.ok_or(AttemptError::Retryable)??;
+        // Comments before the first event count against the same bound.
+        if bytes.len() > sse::MAX_EVENT_BYTES.saturating_sub(buffered.len()) {
+            return Err(AttemptError::Retryable);
+        }
+        buffered.extend_from_slice(&bytes);
+        let mut first = None;
+        decoder.push_chunk(&bytes, |event| {
+            first = Some(event);
+            std::ops::ControlFlow::Break(())
+        })?;
+        if let Some(event) = first {
+            let replay = futures_util::stream::once(async move { Ok(Bytes::from(buffered)) });
+            return Ok((event, Box::pin(replay.chain(source))));
+        }
+    }
 }
 
 async fn streaming_response(mut stream: ResponseStream) -> Result<Response, AttemptError> {

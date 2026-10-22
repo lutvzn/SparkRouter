@@ -17,8 +17,10 @@ There is one Cargo package with a library (`src/lib.rs`) and executable
 (`src/main.rs`). The library lets integration tests exercise the actual router
 without starting a separate gateway process. No frontend service, distributed
 state, response cache, or routing worker is involved; the only in-process queue
-holds request history, and the only configuration cache is described below. Optional combo
-placement hints are bounded process-local state, not saved prompt/completion data.
+is the history writer (request history, budget usage, and stored-response
+mappings), and the only configuration cache is described below. Optional combo
+placement hints, opt-in target cooldowns, budget totals, and metrics counters are
+bounded process-local state, not saved prompt/completion data.
 
 ## Module boundaries
 
@@ -44,9 +46,14 @@ placement hints are bounded process-local state, not saved prompt/completion dat
 | `routing/combo.rs` | Sequential combo fallback loop and retryable status helper |
 | `routing/affinity.rs` | Per-caller/combo session, prompt, and timed placement hints; successful-body recording |
 | `routing/direct.rs` | Direct model lookup and the same pre-commit fallback policy |
+| `routing/cooldown.rs` | Opt-in, process-local cooldown that moves just-failed targets to the end of a request's order |
+| `api/responses.rs` | Stored-response retrieve/delete/cancel/input-items calls, forwarded to the creating connection |
+| `db/stored_responses.rs` | Which connection and caller created each stored Responses API response (30 days) |
+| `key_limits.rs` | Per-key traffic admission and budget totals for the current UTC day or month |
+| `metrics.rs` | Token-protected Prometheus `/metrics` counters with configuration-bounded labels |
 | `providers/mod.rs` | Protocol selection, authentication, bounded HTTP bodies and stream commitment |
 | `providers/openai.rs` | OpenAI passthrough and terminal SSE tracking |
-| `providers/anthropic.rs` | Anthropic request, response, and event translation |
+| `providers/anthropic.rs` | Anthropic request, response, and event translation; native `/messages` passthrough |
 | `providers/systemone.rs` | Native evaluation passthrough and SystemOne model-list parsing |
 | `providers/sse.rs` | Private incremental SSE framing shared by both adapters |
 
@@ -277,6 +284,9 @@ The public router is mounted at `/v1` separately from the dashboard:
 
 - `POST /v1/chat/completions`
 - `POST /v1/responses` (OpenAI Responses passthrough, JSON or SSE)
+- `GET`/`DELETE /v1/responses/{id}`, `POST /v1/responses/{id}/cancel`,
+  `GET /v1/responses/{id}/input_items` (forwarded to the creating connection)
+- `POST /v1/messages` (Anthropic Messages passthrough to Anthropic connections, JSON or SSE)
 - `POST /v1/embeddings` (non-streaming)
 - `POST /v1/systemone` (native, non-streaming evaluations)
 - `GET /v1/models`
@@ -286,7 +296,8 @@ The public router is mounted at `/v1` separately from the dashboard:
 
 If `ROUTER_API_KEY` is configured, or at least one dashboard-generated API key
 exists, API middleware requires `Authorization: Bearer <key>` (scheme matched
-case-insensitively, token exactly). The environment
+case-insensitively, token exactly) or, without an Authorization header, the
+same key as `x-api-key`, as Anthropic SDKs send it. The environment
 key is compared with `subtle`. Generated keys are matched by a master-key HMAC
 fingerprint and checked against expiry, then their authorization policy is loaded
 in one read transaction. A request-local `KeyAccess` extension carries either
@@ -331,6 +342,19 @@ accounting resets on restart and is not shared across processes. Updates preserv
 counters and never cancel existing streams. Local limit failures are sanitized
 429 responses with Retry-After, distinct from upstream 429 fallback decisions.
 
+Optional per-key budgets (tokens and/or USD per UTC day or month) are checked
+before traffic admission. `key_limits::Spending` keeps each budgeted key's
+current-period total in memory, loading it from `api_key_spend` at the key's
+first request in a period; concurrent first requests keep whichever load landed
+first. `record_response` charges reported usage (input plus output tokens, and
+reported USD) when a response finishes, or when a stream's body ends, to the
+period the request was admitted in, in every logging mode. Totals are written
+through the history writer, summed per key and period in each batch, replacing
+rows of older periods; that connection has no commit hook, so charges never
+invalidate the configuration cache. A refusal is `429 insufficient_quota` with
+`Retry-After` until the period ends. Requests already admitted can exceed a
+budget; totals are not shared across processes.
+
 For chat requests:
 
 1. Parse the body into `serde_json::Value`, requiring an object, a nonempty model
@@ -364,7 +388,26 @@ are permanent. Malformed-request statuses, including 400 and 422, stop the chain
 On `/v1/responses` and `/v1/embeddings` only, 405 and 501 are retryable too:
 OpenAI-compatible servers often implement just chat completions, so those
 statuses mean the target lacks the endpoint rather than that the request is bad.
-There are no repeated attempts, hedged requests, cooldowns, or adaptive routing.
+There are no repeated attempts on one target, hedged requests, or adaptive routing.
+
+The order a request tries its targets is built in this sequence: strategy start,
+then the affinity hint, then (when enabled in Settings) the cooldown, which
+stable-partitions cooling targets after ready ones, then, for a Responses request
+with `previous_response_id`, the connection that stored that response first.
+Each eligible target is still tried at most once, and cooling targets are never
+dropped. `routing::cooldown` records a retryable failure per connection/model
+(upstream `Retry-After` seconds, else 5 s doubling to 5 min) and clears it on
+success. The count of moved targets is kept in the routing diagnostics.
+
+`/v1/messages` passes the client's body through with only `model` replaced and
+forwards a validated `anthropic-version` and combined `anthropic-beta` header.
+Only Anthropic-protocol connections are eligible. A stream is held until its
+first complete event, so an `error` event there can still fall back; after that
+the body owns the request and `message_stop` marks completion. A response
+middleware reshapes gateway errors on that path into Anthropic's error envelope.
+Responses streams are likewise held for their first event, `response.created`,
+whose ID (unless `store: false`) is remembered with the serving connection,
+caller scope, and public model through the history writer.
 
 Unknown combos and model IDs that no connection lists return `404`. Exhausted,
 empty, or wholly disabled chains, including a direct model listed only by
@@ -696,6 +739,15 @@ API-key envelope with the same associated data, seals the current fingerprint ke
 as `fingerprint` and a new `check` with the new key, and aborts without changes if
 any envelope fails to decrypt. Stored API-key fingerprints therefore stay valid.
 Rotation does not rewrite backups or exports; keep old keys for old backups.
+
+`metrics.rs` serves `GET /metrics` outside dashboard and gateway authentication.
+It answers 404 until a token exists (a SHA-256 stored by Settings, or
+`ROUTER_METRICS_TOKEN`), then requires it as a bearer token, compared in constant
+time. Counting starts with the token. `record_response` records each routed
+request once, labelled with its endpoint, the combo name only when the combo was
+found, the serving connection's slug, and its outcome; streams count when their
+body ends. Labels never come from unmatched request input, so callers cannot add
+series. Counters are process-local and reset on restart.
 
 Request middleware generates/propagates `x-request-id` and creates tracing spans.
 Routing records combo, provider ID, model, status, latency, and fallback events.

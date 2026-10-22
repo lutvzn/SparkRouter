@@ -330,9 +330,9 @@ Set an OpenAI-compatible client's base URL to `http://127.0.0.1:14673/v1` and mo
 
 Generated API keys optionally support **Requests per minute** (1–1,000,000) and
 **Maximum concurrent requests** (1–10,000). Set these when generating a key or
-under **Edit access / expiry / limits**; blank means unlimited. Existing keys
-remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions, SystemOne evaluations, media generation/transcription,
-and test chat together; `/v1/models` is exempt.
+under **Edit access / expiry / limits / budget**; blank means unlimited. Existing keys
+remain unlimited, as does `ROUTER_API_KEY`. Limits apply to chat completions, Responses, Messages, embeddings, SystemOne evaluations, media generation/transcription,
+and test chat together; `/v1/models` and stored-response calls are exempt.
 
 Rate accounting uses fixed 60-second windows beginning with the first admitted
 request for that key. Each admitted gateway request counts once, including
@@ -355,6 +355,26 @@ in the current 60-second window; reload to refresh. Configuration persists in
 SQLite, but counters are process-local and reset on restart. Multiple gateway
 processes do not share counters. Editing limits does not reset existing counters
 or cancel active requests; new admissions use the updated limits.
+
+### Per-key budgets
+
+A generated key can also have a **budget**: a token limit, a USD limit, or both,
+per UTC day or UTC month. Set it when generating a key or under **Edit access /
+expiry / limits / budget**; **No budget** removes it. Tokens are input plus
+output as the upstream reports them (cached input included); USD is the cost
+the upstream reports, such as OpenRouter's `usage.cost`. Usage that is not
+reported is not counted, so a USD budget only covers providers that report cost.
+The API keys page shows each budget and this period's usage.
+
+Before routing, a key whose period has reached either limit gets `429` with
+`error.type: "insufficient_quota"` and `Retry-After` set to the seconds until the
+next period begins, without calling a provider; such rejections do not consume
+traffic-limit quota. Usage is charged when a response finishes (a stream when its
+body ends) to the period the request started in. Requests already running when a
+limit is reached still finish, so a budget can be exceeded by them. Budgets
+count in every logging mode, including Off. Usage is kept in SQLite (only the
+current period per key) and survives restarts; revoking a key deletes it.
+Several gateway processes do not share in-memory totals.
 
 ### Scoped gateway API keys
 
@@ -442,6 +462,7 @@ process environment variables.
 | `ROUTER_DASHBOARD_PASSWORD` | unset | Optional fixed admin password instead of the one chosen at first-run setup; 16–1024 bytes, not blank. It cannot be changed in the dashboard |
 | `ROUTER_DASHBOARD_AUTH` | `required` | `required` or `disabled`. Disable only behind an authenticating reverse proxy; cannot be combined with `ROUTER_DASHBOARD_PASSWORD` |
 | `ROUTER_DASHBOARD_SECURE_COOKIE` | `false` | Set `true` for HTTPS deployment; marks dashboard session cookies Secure. Must be `true` or `false` |
+| `ROUTER_METRICS_TOKEN` | unset | Optional bearer token for `GET /metrics`, accepted alongside one generated in **Settings**; 16–256 bytes without surrounding spaces. See [Prometheus metrics](#prometheus-metrics) |
 | `RUST_LOG` | `info` | `tracing` filter |
 
 The parent database directory must already exist and be writable. SQLite WAL/SHM sidecar files are normal while running. For backups, stop the application first or use SQLite's online backup facility rather than copying an active database file alone. Change configuration through the dashboard while the gateway runs: it caches request-path configuration (keys, combos, connections, logging mode) and does not notice edits made to the database by another process until it restarts or commits a change itself.
@@ -518,6 +539,59 @@ curl http://127.0.0.1:14673/v1/embeddings \
   -H "Authorization: Bearer $ROUTER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"combo/vectors","input":["first text","second text"]}'
+```
+
+### Stored responses
+
+The gateway remembers which connection created each stored response (any
+`/v1/responses` result unless the request sent `store: false`; for streams, the
+ID in `response.created`). These calls are forwarded to that connection:
+
+- `GET /v1/responses/{id}` (query parameters such as `stream=true` pass through)
+- `DELETE /v1/responses/{id}` (also forgets the mapping)
+- `POST /v1/responses/{id}/cancel`
+- `GET /v1/responses/{id}/input_items`
+
+Only the caller that created a response can reach it — the same generated key,
+the environment key, or open access — and only while that key still allows the
+model ID the response was created with; otherwise the answer is `404` or `403`.
+A request with `previous_response_id` starts at the connection holding that
+response when its combo or direct model includes it, ahead of the strategy,
+affinity, and cooldown order; the rest of the chain still follows as fallback.
+Mappings are kept 30 days, OpenAI's default retention. These calls generate
+nothing, so like `/v1/models` they skip traffic limits, budgets, and history.
+They never fall back, and upstream failures return only their status. Responses
+created before this feature, or through another gateway, are not reachable.
+
+### Anthropic Messages API
+
+`POST /v1/messages` accepts Anthropic-native requests, for clients such as
+Claude Code or the Anthropic SDKs (`ANTHROPIC_BASE_URL=http://127.0.0.1:14673`).
+It uses **Text** combos and direct IDs; only **Anthropic**-protocol connections
+are eligible, and other steps are skipped (an all-OpenAI combo has no target).
+That includes vendors with Anthropic-compatible endpoints configured as custom
+Anthropic providers. The request is forwarded unchanged except for `model`, and
+the JSON or SSE response bytes are returned as sent, so thinking, tools,
+`cache_control`, and newer features work without translation. The client's
+`anthropic-version` (a date) and `anthropic-beta` flags are forwarded, replacing
+the default `anthropic-version: 2023-06-01`.
+
+Generated keys and `ROUTER_API_KEY` are accepted as `x-api-key` as well as
+`Authorization: Bearer` on every `/v1` endpoint; Authorization wins when both are
+sent. Fallback follows the chat rules: retryable statuses, and an `error` event
+before any byte was forwarded (such as `overloaded_error`), try the next target;
+nothing falls back afterwards. A stream is complete only at `message_stop`.
+Gateway errors on this endpoint use Anthropic's shape,
+`{"type":"error","error":{"type":"…","message":"…"}}`, with the same status codes.
+Usage is recorded with cache reads and writes counted as input, as for
+translated chat. `/v1/messages/count_tokens` and the Batches API are not proxied.
+
+```sh
+curl http://127.0.0.1:14673/v1/messages \
+  -H "x-api-key: $ROUTER_API_KEY" \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"combo/coding","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ### SystemOne evaluations (TypeSafe AI)
@@ -615,6 +689,21 @@ routing and request/response bodies are unchanged. Clients must support these
 optional discovery fields to display/use them. Scoped-key filtering still applies
 only to the public IDs; an allowed combo does not expose its underlying direct ID.
 
+### Failing-target cooldown
+
+**Settings → Routing → Failing-target cooldown** is **Off** by default. When On,
+a retryable failure of a target (that exact connection and model: connection
+errors, timeouts, invalid responses, or a retryable status) starts a cooldown:
+the upstream's `Retry-After` in seconds when it sent one, otherwise 5 seconds,
+doubling with each consecutive failure up to 5 minutes. While a target cools
+down, combo and direct requests move it to the end of their order, after every
+ready target, keeping both groups in their usual order. Cooling targets are
+never skipped: a request still tries each eligible target once, so it fails only
+if every target fails. A success ends that target's cooldown. Round robin still
+advances once per request, and affinity hits on a cooling target are moved last
+too. History's attempts disclosure notes how many cooling targets were moved.
+State is process-local and resets on restart.
+
 ### Routing behavior
 
 - **Priority** (default) starts at the first enabled step, then follows configured order on retryable failures.
@@ -622,7 +711,8 @@ only to the public IDs; an allowed combo does not expose its underlying direct I
 - **Random** chooses a uniformly random enabled starting step for each request. Repeated selections are normal; it does not guarantee equal traffic counts.
 - Round robin and Random fall back cyclically through the remaining enabled steps in configured order. Each step is attempted at most once per request. Disabled providers never consume a turn. Permanent errors stop all strategies; streaming cannot switch after commitment.
 - Connect/read/request failures and HTTP **401, 402, 404, 408, 429, 500, 502, 503, 504, 529** try the next step. The status policy lives in `src/routing/combo.rs`. Upstream authentication, billing, model-not-found, and Anthropic overload are properties of that target, so another connection or combo step is still tried. Anthropic JSON and pre-commit SSE error payloads use the same retry policy.
-- Other HTTP failures, including **400, 403, 422**, stop the chain. No repeated attempts, cooldown state, or background work.
+- Other HTTP failures, including **400, 403, 422**, stop the chain. Nothing is retried on the same target, and nothing runs in the background.
+- With the opt-in [failing-target cooldown](#failing-target-cooldown), targets that just failed move to the end of the order; they are still tried once.
 - Empty combos, entirely disabled combos, or exhausted chains return a sanitized OpenAI-shaped `502` error. Unknown combo names return `404`.
 - Direct IDs use `<provider-slug>/<upstream-model-id>`. Only connections within that provider whose last **Refresh models** listed the upstream ID are tried, oldest first. Retryable failures never cross to another provider slug; permanent errors stop. Unknown public IDs return `404`; wholly disabled or exhausted targets return `502`. Never-refreshed connections are not direct targets. The prefix is stripped once, preserving slashes inside the upstream ID. `combo/<name>` always selects a combo; an upstream ID starting with `combo/` can be called as `<provider-slug>/combo/...`. `/v1/models` lists distinct qualified IDs from enabled connections. Combo step IDs remain arbitrary upstream strings of up to 256 characters.
 - OpenAI requests remain `serde_json::Value`; only the model is replaced for each target. Unknown fields are preserved by the OpenAI adapter. Non-streaming success responses must contain a `choices` array and no non-null `error`; invalid envelopes are retryable before commitment. Valid response bytes and unknown fields remain unchanged.
@@ -655,7 +745,9 @@ Every provider credential and unrevealed generated-key envelope is decrypted wit
 request-history retention (1–10,000 records, default 10,000), a confirmed clear
 history action, configuration export/import with inline preview, a dashboard
 password change form (stored passwords only; it requires the current password and
-signs out other sessions), and read-only authentication and system status (version, uptime, database read connectivity, Linux resident
+signs out other sessions), the [failing-target cooldown](#failing-target-cooldown)
+switch, the [Prometheus metrics](#prometheus-metrics) token, and read-only
+authentication and system status (version, uptime, database read connectivity, Linux resident
 RAM). Refresh the page to update status. Retention persists in SQLite; lowering
 it immediately and irreversibly prunes older requests and attempts and updates
 Overview totals. Increasing it cannot recover deleted history. Clearing history
@@ -740,6 +832,48 @@ The dashboard uses `Referrer-Policy: same-origin`: native form submissions retai
 Use `/healthz` for liveness and `/readyz` for reverse-proxy/orchestrator readiness.
 From the host: `curl --fail http://127.0.0.1:14673/readyz`. The minimal Docker image
 does not contain curl; configure probes externally or supply your own probe tool.
+
+### Prometheus metrics
+
+`GET /metrics` serves Prometheus text-format counters once a scrape token
+exists. Generate it under **Settings → Prometheus metrics**; it is shown once,
+and only its SHA-256 is stored. **Regenerate token** replaces it at once (the old
+token gets `401`), and **Remove token** turns the endpoint off again. A token in
+`ROUTER_METRICS_TOKEN` is accepted too and cannot be changed from the dashboard.
+Without any token, `/metrics` answers `404` and nothing is counted. Scrapes need
+`Authorization: Bearer <token>`; a missing or wrong token gets `401`. The endpoint
+is separate from both the dashboard login and gateway API keys, so a scraper's
+credential cannot use models or the dashboard.
+
+```yaml
+scrape_configs:
+  - job_name: sparkrouter
+    authorization:
+      credentials_file: /etc/prometheus/sparkrouter.token
+    static_configs:
+      - targets: ['127.0.0.1:14673']
+```
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `sparkrouter_requests_total` | `endpoint`, `combo`, `outcome` | Routed requests: `success`, `failure`, or for streams `interrupted`/`cancelled`; streams count when their body ends |
+| `sparkrouter_request_duration_seconds` | `endpoint` | Histogram of time until response headers, fallback included |
+| `sparkrouter_upstream_attempts_total` | `provider`, `outcome` | Attempts: `selected`, `retryable_failure`, `permanent_failure`, `timed_out` |
+| `sparkrouter_tokens_total` | `provider`, `type` | Input, output, and cached tokens the serving upstream reported |
+| `sparkrouter_cost_usd_total` | `provider` | USD cost the serving upstream reported |
+| `sparkrouter_rejections_total` | `reason` | Refused before routing: `unauthorized`, `rate_limit`, `budget` |
+| `sparkrouter_cooldown_deferrals_total` | | Cooling targets moved to the end of a request's order |
+| `sparkrouter_active_streams` | | Streaming responses still open |
+| `sparkrouter_build_info`, `sparkrouter_process_start_time_seconds` | `version` | Version and process start |
+
+`endpoint` is `chat`, `responses`, `embeddings`, `messages`, `systemone`, or a
+media kind; `combo` is the combo name (empty for direct models) and `provider` the
+connection's routing slug. Label values come only from configuration a request
+reached: a request naming an unknown combo or model counts with an empty label,
+so callers cannot create series. No key IDs, request model IDs, prompts, or URLs
+are labels. Validation, authentication, and permission rejections are not
+routed requests. Counters are process-local, count every logging mode, and reset
+on restart and while no token exists.
 
 ### Container deployment (Docker and Podman)
 
@@ -892,6 +1026,6 @@ Tests use local mock HTTP servers and temporary SQLite databases; no real upstre
 
 ## MVP boundaries
 
-`/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
+`/v1/chat/completions`, `/v1/responses` (plus [stored-response calls](#stored-responses)), `/v1/messages`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, and the [media endpoints](MEDIA.md#implemented-endpoints) are implemented as provider APIs. Requests route via `combo/<name>` or via an upstream model ID from a connection's last refresh. Combos support Priority, Round robin, and Random starting-step selection with ordered fallback. Direct IDs try matching enabled connections from oldest to newest, once each. Optional per-combo session/prompt affinity and timed Sticky placement do not cache responses. The opt-in cooldown only reorders targets that just failed. No Gemini, OAuth, adaptive routing optimization, price optimization, gateway queues, response caching, telemetry platform beyond the `/metrics` endpoint, or background model discovery. Model IDs are arbitrary strings. Steps can be edited inline without reordering. Model listing includes configured combos even if empty or disabled, plus distinct model IDs from enabled connections, filtered by key permissions.
 
-Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools, and text/tool streaming. Multiple choices, developer/named messages, legacy functions, strict schemas, structured response formats, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; `cache_control` on parts, messages, and tools is kept; unknown extension fields pass through. Thinking, server-tool, and other auxiliary content blocks (and citation metadata) are not exposed as answer text. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.
+Anthropic is a translation subset, not full OpenAI feature parity. It supports system/user/assistant/tool messages, text and images, function tools (including `strict`), and text/tool streaming. `reasoning_effort` becomes adaptive thinking at that effort (`output_config.effort`; `minimal` maps to `low`, `none` sends nothing), which needs Claude 4.6 or later; while the adapter turns thinking on it drops `temperature`, `top_p`, and `top_k`, and it leaves thinking off when `tool_choice` forces a tool. `response_format` `json_schema` becomes `output_config.format`; `json_object` has no schema to send and is rejected. A client's own `thinking` or `output_config` extension is kept, and setting the same option both ways is rejected. Thinking comes back as `reasoning_content` text and, with signatures, as `thinking_blocks` on the assistant message (in streams, `reasoning_content` deltas and one `thinking_blocks` delta per finished block); send `thinking_blocks` back unchanged on that assistant message so tool-use turns can continue. Multiple choices, developer/named messages, legacy functions, log probabilities, nonzero penalties, and other untranslatable generation options are rejected. Bookkeeping fields and image-detail hints are omitted; `cache_control` on parts, messages, and tools is kept; unknown extension fields pass through. Server-tool and other auxiliary content blocks (and citation metadata) are not exposed as answer text. Use `/v1/messages` for full Anthropic features without translation. OpenAI temperatures above 1 are clamped to Anthropic's maximum of 1. `max_tokens` defaults to 8192 if unspecified. Set `max_tokens` or `max_completion_tokens` when a model rejects that ceiling or a different budget is required. Provider connection testing normally requires a `/models` endpoint; fal.ai has a documented starter catalog but no connectivity probe. Streams idle for 120 seconds end as incomplete responses. Master-key rotation is an offline command; the running server never changes its key.

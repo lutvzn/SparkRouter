@@ -64,6 +64,29 @@ async fn route_inner(
             "no connection lists public model '{public_model}'"
         )));
     }
+    let cooldown = state.config.cooldown(&state.db).await?;
+    let preferred = context
+        .preferred_connection
+        .as_ref()
+        .filter(|connection| provider_ids.contains(connection));
+    let cooling = |id: &String| state.cooldown.is_cooling(id, &model);
+    // Copy the cached listing only when its order changes.
+    let provider_ids: std::borrow::Cow<[String]> =
+        if preferred.is_some() || (cooldown && provider_ids.iter().any(cooling)) {
+            let mut ids = provider_ids.to_vec();
+            if cooldown {
+                state
+                    .metrics
+                    .deferred(super::cooldown::defer(&mut ids, cooling));
+            }
+            // A continued stored response only exists on the connection that made it.
+            if let Some(preferred) = preferred {
+                super::cooldown::prefer(&mut ids, |id| id == preferred);
+            }
+            ids.into()
+        } else {
+            (&*provider_ids).into()
+        };
     // Listed connections bound the chain; ineligible ones only add headroom.
     let remaining = provider_ids.len();
     let deadline = super::Budget::for_context(context).deadline(started, remaining);
@@ -109,6 +132,9 @@ async fn route_inner(
             &mut attempts,
         )
         .await;
+        if cooldown {
+            state.cooldown.record(&provider.id, &model, &attempt);
+        }
         match attempt {
             Ok(response) => {
                 tracing::info!(
@@ -121,7 +147,7 @@ async fn route_inner(
                 // The response body now exclusively owns this attempt.
                 return Ok(response);
             }
-            Err(AttemptError::Retryable | AttemptError::RetryableStatus(_)) => {
+            Err(AttemptError::Retryable | AttemptError::RetryableStatus(..)) => {
                 tracing::warn!(
                     provider = %provider.id,
                     model = %model,

@@ -1,5 +1,8 @@
 //! Process-local admission accounting. No lock spans database or upstream I/O.
-use crate::{db::api_keys::KeyLimits, error::AppError};
+use crate::{
+    db::api_keys::{KeyBudget, KeyLimits},
+    error::AppError,
+};
 use axum::{body::Body, response::Response};
 use futures_util::StreamExt;
 use std::{
@@ -115,9 +118,169 @@ impl Permit {
     }
 }
 
+/// Usage counted against each budgeted key's current period. Loaded from
+/// SQLite at the key's first request in a period, then kept here and added to
+/// as requests finish; writes go through the history writer. Process-local
+/// like the counters above: concurrent requests are admitted against what had
+/// finished when they started, so a budget can be overrun by the requests
+/// already in flight.
+#[derive(Default)]
+pub(crate) struct Spending {
+    entries: Mutex<HashMap<String, Spent>>,
+}
+
+#[derive(Clone)]
+struct Spent {
+    period: String,
+    tokens: i64,
+    cost_usd: f64,
+}
+
+/// Charges a request's reported usage to the period it was admitted in.
+#[derive(Clone)]
+pub(crate) struct Charge {
+    spending: Arc<Spending>,
+    key: String,
+    period: String,
+}
+
+impl Spending {
+    pub async fn admit(
+        self: &Arc<Self>,
+        pool: &sqlx::SqlitePool,
+        key: &str,
+        budget: KeyBudget,
+        now: i64,
+    ) -> Result<Charge, AppError> {
+        let period = budget.period.label(now);
+        let cached = self
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .filter(|spent| spent.period == period)
+            .cloned();
+        let spent = match cached {
+            Some(spent) => spent,
+            None => {
+                let (tokens, cost_usd) = crate::db::api_keys::spent(pool, key, &period).await?;
+                let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+                // A concurrent first request may have loaded this period already.
+                if entries.get(key).is_none_or(|spent| spent.period != period) {
+                    let spent = Spent {
+                        period: period.clone(),
+                        tokens,
+                        cost_usd,
+                    };
+                    entries.insert(key.to_owned(), spent);
+                }
+                entries[key].clone()
+            }
+        };
+        if budget.tokens.is_some_and(|max| spent.tokens >= max)
+            || budget.cost_usd.is_some_and(|max| spent.cost_usd >= max)
+        {
+            return Err(AppError::BudgetExceeded(budget.period.remaining(now)));
+        }
+        Ok(Charge {
+            spending: self.clone(),
+            key: key.to_owned(),
+            period,
+        })
+    }
+}
+
+impl Charge {
+    /// Count usage the upstream reported; unknown usage is not charged.
+    pub fn add(
+        self,
+        writer: &crate::db::history_writer::HistoryWriter,
+        tokens: Option<i64>,
+        cost_usd: Option<f64>,
+    ) {
+        if tokens.is_none() && cost_usd.is_none() {
+            return;
+        }
+        let tokens = tokens.unwrap_or(0);
+        let cost_usd = cost_usd.unwrap_or(0.0);
+        if let Some(spent) = self
+            .spending
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&self.key)
+            .filter(|spent| spent.period == self.period)
+        {
+            spent.tokens = spent.tokens.saturating_add(tokens);
+            spent.cost_usd += cost_usd;
+        }
+        writer.spend(self.key, self.period, tokens, cost_usd);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_periods_label_utc_days_and_months_and_count_down_to_the_next() {
+        use crate::db::api_keys::BudgetPeriod;
+        // 2026-10-21T13:00:00Z
+        let now = 1_792_587_600;
+        assert_eq!(BudgetPeriod::Day.label(now), "2026-10-21");
+        assert_eq!(BudgetPeriod::Month.label(now), "2026-10");
+        assert_eq!(BudgetPeriod::Day.remaining(now), 11 * 3600);
+        assert_eq!(BudgetPeriod::Month.remaining(now), 10 * 86_400 + 11 * 3600);
+        // Year and leap-day boundaries.
+        assert_eq!(BudgetPeriod::Day.label(951_782_400), "2000-02-29");
+        assert_eq!(BudgetPeriod::Month.remaining(1_798_761_599), 1);
+        assert_eq!(BudgetPeriod::Month.label(1_798_761_600), "2027-01");
+        assert_eq!(BudgetPeriod::Day.label(0), "1970-01-01");
+    }
+
+    #[tokio::test]
+    async fn spending_refuses_at_the_limit_and_resets_with_the_period() {
+        use crate::db::api_keys::{BudgetPeriod, KeyBudget};
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let writer = crate::db::history_writer::HistoryWriter::start(pool.clone());
+        let spending = Arc::new(Spending::default());
+        let budget = KeyBudget {
+            period: BudgetPeriod::Day,
+            tokens: Some(100),
+            cost_usd: Some(1.0),
+        };
+        let now = 1_792_587_600;
+        let admit = |now| spending.admit(&pool, "key", budget, now);
+        admit(now).await.unwrap().add(&writer, Some(60), None);
+        admit(now).await.unwrap().add(&writer, None, None);
+        // Admitted today, finishing after midnight.
+        let late = admit(now).await.unwrap();
+        admit(now).await.unwrap().add(&writer, Some(40), Some(0.1));
+        assert!(matches!(
+            spending.admit(&pool, "key", budget, now).await,
+            Err(AppError::BudgetExceeded(seconds)) if seconds == 11 * 3600
+        ));
+        // Another key and the next day start from nothing.
+        assert!(spending.admit(&pool, "other", budget, now).await.is_ok());
+        let tomorrow = spending
+            .admit(&pool, "key", budget, now + 86_400)
+            .await
+            .unwrap();
+        tomorrow.add(&writer, None, Some(1.0));
+        assert!(matches!(
+            spending.admit(&pool, "key", budget, now + 86_400).await,
+            Err(AppError::BudgetExceeded(_))
+        ));
+        // A late completion from yesterday cannot reopen today.
+        late.add(&writer, Some(1), None);
+        assert!(
+            spending
+                .admit(&pool, "key", budget, now + 86_400)
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn windows_rejections_and_keys_are_independent() {
         let limiter = Arc::new(Limiter::default());

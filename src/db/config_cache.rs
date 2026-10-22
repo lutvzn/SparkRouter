@@ -101,6 +101,7 @@ pub(crate) type RoutingSnapshot = (Combo, Vec<RoutingStep>);
 struct Entries {
     generation: u64,
     logging_mode: Option<LoggingMode>,
+    cooldown: Option<bool>,
     keys_exist: Option<bool>,
     keys: HashMap<String, CachedKey>,
     combos: HashMap<(String, Category), Arc<RoutingSnapshot>>,
@@ -158,6 +159,17 @@ impl ConfigCache {
         let mode = load.await?;
         self.store(token, |entries| entries.logging_mode = Some(mode));
         Some(mode)
+    }
+
+    /// Whether failing targets cool down.
+    pub(crate) async fn cooldown(&self, pool: &SqlitePool) -> Result<bool, AppError> {
+        let (token, cached) = self.read(|entries| entries.cooldown);
+        if let Some(enabled) = cached {
+            return Ok(enabled);
+        }
+        let enabled = super::settings::target_cooldown(pool).await?;
+        self.store(token, |entries| entries.cooldown = Some(enabled));
+        Ok(enabled)
     }
 
     /// Whether any generated API key exists, expired ones included.

@@ -212,7 +212,8 @@ pub(crate) async fn execute(
     let context = routing::affinity::RequestContext::new(auth.affinity_scope(&state), &headers)
         .for_media(kind, upload);
     routing::validate_combo_category(&state, model, context.category()).await?;
-    let permit = auth.admit(&state)?;
+    let admission = auth.admit(&state).await?;
+    let permit = admission.permit;
     // Media is metadata-only even in Extended mode: no audio, images, URLs or prompts in SQLite.
     let mut capture = crate::history_payload::Capture::start(&state, &Value::Null).await;
     if capture.mode == crate::db::settings::LoggingMode::Extended {
@@ -249,11 +250,15 @@ pub(crate) async fn execute(
     response.extensions_mut().insert(capture);
     let response = crate::history::record_response(
         &state,
-        if dashboard { "test" } else { "api" },
         model,
         streaming,
         started,
         &attempts,
+        crate::history::Meter {
+            source: if dashboard { "test" } else { "api" },
+            endpoint: kind.name(),
+            charge: admission.charge,
+        },
         response,
     )
     .await;

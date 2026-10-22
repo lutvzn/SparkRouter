@@ -37,6 +37,7 @@ async fn state() -> AppState {
         api_key: None,
         dashboard_login: sparkrouter::config::DashboardLogin::Disabled,
         dashboard_secure_cookie: false,
+        metrics_token: None,
     })
     .await
     .unwrap()

@@ -61,6 +61,82 @@ pub async fn call(
     }
 }
 
+/// `POST /messages` for Anthropic-native clients, passed through unchanged:
+/// only `model` is replaced, unknown fields are preserved, and the upstream
+/// JSON or SSE bytes are returned as sent. `headers` are the client's
+/// `anthropic-version` and `anthropic-beta`, which replace the defaults.
+pub async fn messages(
+    client: &reqwest::Client,
+    crypto: &Crypto,
+    provider: &Provider,
+    model: &str,
+    body: &Value,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Response, AttemptError> {
+    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    // `headers` replaces the default `anthropic-version`.
+    let response = request(client, crypto, provider, reqwest::Method::POST, "messages")?
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(super::model_body(body, model)?)
+        .headers(headers.clone())
+        .send()
+        .await
+        .map_err(transport_error)?;
+    check_status(&response)?;
+    if streaming {
+        check_sse(&response)?;
+        let source = Box::pin(super::openai::upstream_events(response));
+        // An overload or error reported as the first event can still fall back.
+        let (first, source) = super::first_event(source).await?;
+        if first.name == "error" || first.data.contains("\"error\"") {
+            let value: Value =
+                serde_json::from_str(&first.data).map_err(|_| AttemptError::Retryable)?;
+            if first.name == "error" || value.get("type").and_then(Value::as_str) == Some("error") {
+                return Err(upstream_error(&value));
+            }
+        }
+        return streaming_response(super::openai::terminated(source, is_message_stop)).await;
+    }
+    let status = response.status();
+    let bytes = read_bounded(response).await?;
+    if bytes.trim_ascii_start().first() != Some(&b'{') {
+        return Err(AttemptError::Retryable);
+    }
+    let envelope: NativeMessage =
+        serde_json::from_slice(&bytes).map_err(|_| AttemptError::Retryable)?;
+    if envelope.kind.as_deref() == Some("error") {
+        return Err(upstream_error(&json!({"error": envelope.error})));
+    }
+    if envelope.content.is_none() {
+        return Err(AttemptError::Retryable);
+    }
+    let usage = crate::history::Usage::from_usage(&envelope.usage);
+    Ok(super::json_response_with_usage(status, bytes, usage))
+}
+
+/// The fields a native message is checked for; content blocks are skipped.
+#[derive(serde::Deserialize)]
+struct NativeMessage {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    content: Option<Vec<serde::de::IgnoredAny>>,
+    #[serde(default)]
+    error: Value,
+    #[serde(default)]
+    usage: Value,
+}
+
+/// A Messages stream ends with `message_stop`; an `error` event is not an end.
+pub(crate) fn is_message_stop(event: &SseEvent) -> bool {
+    if !event.name.is_empty() {
+        return event.name == "message_stop";
+    }
+    event.data.contains("message_stop")
+        && serde_json::from_str::<Value>(&event.data)
+            .is_ok_and(|value| value.get("type").and_then(Value::as_str) == Some("message_stop"))
+}
+
 fn invalid(message: &str) -> AppError {
     AppError::InvalidRequest(message.into())
 }
@@ -168,7 +244,6 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
         "function_call",
         "audio",
         "prediction",
-        "reasoning_effort",
         "seed",
         "logit_bias",
     ] {
@@ -196,13 +271,6 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
             .is_some_and(|value| !value.is_null() && value.as_u64() != Some(0))
     {
         return Err(invalid("Anthropic does not support log probabilities"));
-    }
-    if body.get("response_format").is_some_and(|value| {
-        !value.is_null() && value.get("type").and_then(Value::as_str) != Some("text")
-    }) {
-        return Err(invalid(
-            "Anthropic adapter does not support response_format other than text",
-        ));
     }
     if body
         .get("modalities")
@@ -294,6 +362,15 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
         {
             return Err(invalid("Only assistant messages may contain tool_calls"));
         }
+        if role != "assistant"
+            && message
+                .get("thinking_blocks")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(invalid(
+                "Only assistant messages may contain thinking_blocks",
+            ));
+        }
         if message.get("refusal").is_some_and(|value| !value.is_null()) {
             return Err(invalid(
                 "Refusal message fields are not supported by the Anthropic adapter",
@@ -308,14 +385,14 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
         }
         let (role, mut parts) = match role {
             "user" => ("user", content_parts(content, true)?),
-            "assistant" => (
-                "assistant",
-                if content.is_null() {
-                    Vec::new()
-                } else {
-                    content_parts(content, false)?
-                },
-            ),
+            "assistant" => {
+                // Thinking comes first in an assistant turn, as Anthropic sent it.
+                let mut parts = thinking_blocks(message)?;
+                if !content.is_null() {
+                    parts.extend(content_parts(content, false)?);
+                }
+                ("assistant", parts)
+            }
             "tool" => (
                 "user",
                 vec![json!({
@@ -381,12 +458,11 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
             let function = tool
                 .get("function")
                 .ok_or_else(|| invalid("Missing tool function"))?;
-            if function.get("strict").and_then(Value::as_bool) == Some(true) {
-                return Err(invalid(
-                    "Strict function schemas are not supported by the Anthropic adapter",
-                ));
-            }
             let mut target = Map::new();
+            // Anthropic's strict tool use guarantees schema-valid input too.
+            if function.get("strict").and_then(Value::as_bool) == Some(true) {
+                target.insert("strict".into(), json!(true));
+            }
             target.insert("name".into(), json!(required_string(function, "name")?));
             let schema = function
                 .get("parameters")
@@ -435,6 +511,7 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
             choice["disable_parallel_tool_use"] = json!(true);
         }
     }
+    output_options(body, output)?;
     // OpenAI accepts temperatures up to 2; Anthropic's ceiling is 1 and a
     // higher value is a permanent 400 that would stop a mixed combo. Clamp
     // rather than reject so the same request stays valid across steps.
@@ -463,6 +540,117 @@ fn translate_request(body: &Value, model: &str) -> Result<Value, AppError> {
         }
     }
     Ok(translated)
+}
+
+/// `thinking_blocks` on an assistant message: the thinking and redacted
+/// thinking blocks an earlier response returned, sent back unchanged. Their
+/// signatures let Anthropic continue a tool-use turn that thought first.
+fn thinking_blocks(message: &Value) -> Result<Vec<Value>, AppError> {
+    let Some(blocks) = message
+        .get("thinking_blocks")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(Vec::new());
+    };
+    let blocks = blocks
+        .as_array()
+        .ok_or_else(|| invalid("thinking_blocks must be an array"))?;
+    for block in blocks {
+        let valid = match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                block.get("thinking").is_some_and(Value::is_string)
+                    && block.get("signature").is_some_and(Value::is_string)
+            }
+            Some("redacted_thinking") => block.get("data").is_some_and(Value::is_string),
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid(
+                "thinking_blocks entries must be thinking or redacted_thinking blocks",
+            ));
+        }
+    }
+    Ok(blocks.clone())
+}
+
+/// Translate `reasoning_effort` and `response_format` into `output_config`.
+///
+/// Reasoning becomes adaptive thinking at that effort (Claude 4.6 and later).
+/// `none` sends neither, leaving the model's default. Adaptive thinking only
+/// allows default sampling and no forced tool, so the adapter drops
+/// `temperature`, `top_p` and `top_k` when it turns thinking on, and leaves
+/// thinking off while `tool_choice` forces a tool. A client's own `thinking`
+/// or `output_config` extension is kept; setting the same option both ways is
+/// rejected rather than guessed.
+fn output_options(body: &Value, output: &mut Map<String, Value>) -> Result<(), AppError> {
+    let effort = match body
+        .get("reasoning_effort")
+        .filter(|value| !value.is_null())
+    {
+        None => None,
+        Some(effort) => match effort.as_str() {
+            Some("none") => None,
+            Some("minimal" | "low") => Some("low"),
+            Some("medium") => Some("medium"),
+            Some("high") => Some("high"),
+            Some("xhigh") => Some("xhigh"),
+            _ => return Err(invalid("Unsupported reasoning_effort for Anthropic")),
+        },
+    };
+    let format = match body.get("response_format").filter(|value| !value.is_null()) {
+        None => None,
+        Some(format) => match format.get("type").and_then(Value::as_str) {
+            Some("text") => None,
+            Some("json_schema") => {
+                let schema = format
+                    .pointer("/json_schema/schema")
+                    .filter(|schema| schema.is_object())
+                    .ok_or_else(|| invalid("response_format json_schema needs a schema object"))?;
+                Some(json!({"type":"json_schema", "schema":schema}))
+            }
+            _ => {
+                return Err(invalid(
+                    "Anthropic adapter supports response_format text or json_schema",
+                ));
+            }
+        },
+    };
+    if effort.is_none() && format.is_none() {
+        return Ok(());
+    }
+    let config = output
+        .entry("output_config")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| invalid("output_config must be an object"))?;
+    if let Some(effort) = effort {
+        if config.contains_key("effort") {
+            return Err(invalid(
+                "Use reasoning_effort or output_config.effort, not both",
+            ));
+        }
+        config.insert("effort".into(), json!(effort));
+    }
+    if let Some(format) = format {
+        if config.contains_key("format") {
+            return Err(invalid(
+                "Use response_format or output_config.format, not both",
+            ));
+        }
+        config.insert("format".into(), format);
+    }
+    let forced_tool = output
+        .get("tool_choice")
+        .and_then(|choice| choice.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "any" | "tool"));
+    if effort.is_some() && !forced_tool && output.get("thinking").is_none_or(Value::is_null) {
+        output.insert("thinking".into(), json!({"type":"adaptive"}));
+        for field in ["temperature", "top_p", "top_k"] {
+            output.remove(field);
+        }
+    }
+    Ok(())
 }
 
 fn finish_reason(reason: Option<&str>) -> &'static str {
@@ -495,7 +683,7 @@ fn cache_read_tokens(value: &Value) -> Option<u64> {
     value.get("cache_read_input_tokens").and_then(Value::as_u64)
 }
 
-fn input_tokens(value: &Value) -> Option<u64> {
+pub(crate) fn input_tokens(value: &Value) -> Option<u64> {
     let mut input = value.get("input_tokens")?.as_u64()?;
     // Cache counters are optional, but a missing base count is not zero.
     for key in ["cache_creation_input_tokens", "cache_read_input_tokens"] {
@@ -520,9 +708,21 @@ fn translate_response(message: &Value) -> Result<Value, AttemptError> {
         .and_then(Value::as_array)
         .ok_or(AttemptError::Retryable)?;
     let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut thinking = Vec::new();
     let mut calls = Vec::new();
     for block in content {
         match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                reasoning.push_str(
+                    block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .ok_or(AttemptError::Retryable)?,
+                );
+                thinking.push(block.clone());
+            }
+            Some("redacted_thinking") => thinking.push(block.clone()),
             Some("text") => text.push_str(
                 block
                     .get("text")
@@ -544,8 +744,8 @@ fn translate_response(message: &Value) -> Result<Value, AttemptError> {
                     .ok_or(AttemptError::Retryable)?;
                 calls.push(json!({"id":id, "type":"function", "function":{"name":name, "arguments":input.to_string()}}));
             }
-            // Thinking, server-tool and other newer block types are auxiliary
-            // Anthropic data, not answer text. A block without a type is corrupt.
+            // Server-tool and other newer block types are auxiliary Anthropic
+            // data, not answer text. A block without a type is corrupt.
             Some(_) => {}
             None => return Err(AttemptError::Retryable),
         }
@@ -553,6 +753,14 @@ fn translate_response(message: &Value) -> Result<Value, AttemptError> {
     let mut assistant = json!({"role":"assistant", "content":if text.is_empty() && !calls.is_empty() { Value::Null } else { json!(text) }});
     if !calls.is_empty() {
         assistant["tool_calls"] = Value::Array(calls);
+    }
+    // Readable reasoning, plus the exact blocks a client sends back on its
+    // next turn (`thinking_blocks` on that assistant message).
+    if !reasoning.is_empty() {
+        assistant["reasoning_content"] = json!(reasoning);
+    }
+    if !thinking.is_empty() {
+        assistant["thinking_blocks"] = Value::Array(thinking);
     }
     let tokens = &message["usage"];
     Ok(json!({
@@ -585,14 +793,20 @@ fn upstream_error(event: &Value) -> AttemptError {
     }
 }
 
-#[derive(Clone, Copy)]
 enum Block {
     Text,
     Tool {
         index: usize,
         has_arguments: bool,
     },
-    /// Thinking or newer block types: consumed, never exposed as answer text.
+    /// Streamed as `reasoning_content`; the whole signed block follows as
+    /// `thinking_blocks` when it stops, for the client to send back.
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    Redacted(Value),
+    /// Newer block types: consumed, never exposed as answer text.
     Auxiliary,
 }
 
@@ -729,6 +943,29 @@ impl StreamState {
                             has_arguments: !arguments.is_empty(),
                         }
                     }
+                    Some("thinking") => {
+                        let text = block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            output.push(self.chunk(json!({"reasoning_content":text}), None));
+                        }
+                        Block::Thinking {
+                            text: text.to_owned(),
+                            signature: block
+                                .get("signature")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        }
+                    }
+                    Some("redacted_thinking") => {
+                        if !block.get("data").is_some_and(Value::is_string) {
+                            return Err(AttemptError::Retryable);
+                        }
+                        Block::Redacted(block.clone())
+                    }
                     Some(_) => Block::Auxiliary,
                     None => return Err(AttemptError::Retryable),
                 };
@@ -742,15 +979,16 @@ impl StreamState {
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or(AttemptError::Retryable)?;
-                let block = *self.blocks.get(&index).ok_or(AttemptError::Retryable)?;
+                let block = self.blocks.get_mut(&index).ok_or(AttemptError::Retryable)?;
                 let delta = &value["delta"];
+                let mut emit = None;
                 match (block, delta.get("type").and_then(Value::as_str)) {
                     (Block::Text, Some("text_delta")) => {
                         let text = delta
                             .get("text")
                             .and_then(Value::as_str)
                             .ok_or(AttemptError::Retryable)?;
-                        output.push(self.chunk(json!({"content":text}), None));
+                        emit = Some(json!({"content":text}));
                     }
                     (
                         Block::Tool {
@@ -763,18 +1001,35 @@ impl StreamState {
                             .get("partial_json")
                             .and_then(Value::as_str)
                             .ok_or(AttemptError::Retryable)?;
-                        self.blocks.insert(
-                            index,
-                            Block::Tool {
-                                index: tool_index,
-                                has_arguments: has_arguments || !arguments.is_empty(),
-                            },
+                        *has_arguments |= !arguments.is_empty();
+                        emit = Some(
+                            json!({"tool_calls":[{"index":*tool_index, "function":{"arguments":arguments}}]}),
                         );
-                        output.push(self.chunk(json!({"tool_calls":[{"index":tool_index, "function":{"arguments":arguments}}]}), None));
+                    }
+                    (Block::Thinking { text, .. }, Some("thinking_delta")) => {
+                        let thinking = delta
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .ok_or(AttemptError::Retryable)?;
+                        text.push_str(thinking);
+                        if !thinking.is_empty() {
+                            emit = Some(json!({"reasoning_content":thinking}));
+                        }
+                    }
+                    (Block::Thinking { signature, .. }, Some("signature_delta")) => {
+                        signature.push_str(
+                            delta
+                                .get("signature")
+                                .and_then(Value::as_str)
+                                .ok_or(AttemptError::Retryable)?,
+                        );
                     }
                     // Citation metadata accompanies text; it is not answer text.
                     (Block::Text, Some("citations_delta")) | (Block::Auxiliary, Some(_)) => {}
                     _ => return Err(AttemptError::Retryable),
+                }
+                if let Some(delta) = emit {
+                    output.push(self.chunk(delta, None));
                 }
             }
             "content_block_stop" => {
@@ -783,15 +1038,22 @@ impl StreamState {
                     .and_then(Value::as_u64)
                     .ok_or(AttemptError::Retryable)?;
                 let block = self.blocks.remove(&index).ok_or(AttemptError::Retryable)?;
-                if let Block::Tool {
-                    index,
-                    has_arguments: false,
-                } = block
-                {
-                    output.push(self.chunk(
+                match block {
+                    Block::Tool {
+                        index,
+                        has_arguments: false,
+                    } => output.push(self.chunk(
                         json!({"tool_calls":[{"index":index, "function":{"arguments":"{}"}}]}),
                         None,
-                    ));
+                    )),
+                    Block::Thinking { text, signature } => output.push(self.chunk(
+                        json!({"thinking_blocks":[{"type":"thinking", "thinking":text, "signature":signature}]}),
+                        None,
+                    )),
+                    Block::Redacted(block) => {
+                        output.push(self.chunk(json!({"thinking_blocks":[block]}), None));
+                    }
+                    _ => {}
                 }
             }
             "message_delta" => {
@@ -1339,6 +1601,205 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn reasoning_effort_becomes_adaptive_thinking_with_default_sampling() {
+        let translate = |extra: Value| {
+            let mut body = json!({"messages":[{"role":"user", "content":"hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            translate_request(&body, "claude")
+        };
+        let translated = translate(
+            json!({"reasoning_effort":"high", "temperature":0.2, "top_p":0.5, "top_k":5}),
+        )
+        .unwrap();
+        assert_eq!(translated["thinking"], json!({"type":"adaptive"}));
+        assert_eq!(translated["output_config"], json!({"effort":"high"}));
+        assert!(translated.get("reasoning_effort").is_none());
+        for field in ["temperature", "top_p", "top_k"] {
+            assert!(translated.get(field).is_none(), "{field}");
+        }
+        assert_eq!(
+            translate(json!({"reasoning_effort":"minimal"})).unwrap()["output_config"]["effort"],
+            "low"
+        );
+        // `none` leaves the model's default; sampling is untouched.
+        let none = translate(json!({"reasoning_effort":"none", "temperature":0.3})).unwrap();
+        assert!(none.get("thinking").is_none() && none.get("output_config").is_none());
+        assert_eq!(none["temperature"], 0.3);
+        // A forced tool keeps effort but not thinking; a client's own thinking stays.
+        let forced = translate(json!({"reasoning_effort":"low", "temperature":0.3,
+            "tools":[{"type":"function", "function":{"name":"f"}}], "tool_choice":"required"}))
+        .unwrap();
+        assert!(forced.get("thinking").is_none());
+        assert_eq!(forced["temperature"], 0.3);
+        assert_eq!(forced["output_config"]["effort"], "low");
+        let own = translate(json!({"reasoning_effort":"medium",
+            "thinking":{"type":"adaptive", "display":"summarized"}, "output_config":{"task":1}}))
+        .unwrap();
+        assert_eq!(own["thinking"]["display"], "summarized");
+        assert_eq!(own["output_config"], json!({"task":1, "effort":"medium"}));
+        for invalid in [
+            json!({"reasoning_effort":"extreme"}),
+            json!({"reasoning_effort":3}),
+            json!({"reasoning_effort":"low", "output_config":{"effort":"high"}}),
+            json!({"reasoning_effort":"low", "output_config":"high"}),
+        ] {
+            assert!(translate(invalid.clone()).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn json_schema_response_format_and_strict_tools_translate() {
+        let schema = json!({"type":"object", "properties":{"a":{"type":"string"}},
+            "required":["a"], "additionalProperties":false});
+        let translated = translate_request(
+            &json!({"messages":[{"role":"user", "content":"hi"}],
+                "response_format":{"type":"json_schema", "json_schema":{"name":"answer", "strict":true, "schema":schema}},
+                "tools":[{"type":"function", "function":{"name":"f", "strict":true, "parameters":schema}}]}),
+            "claude",
+        )
+        .unwrap();
+        assert_eq!(
+            translated["output_config"],
+            json!({"format":{"type":"json_schema", "schema":schema}})
+        );
+        assert!(translated.get("response_format").is_none());
+        assert!(translated.get("thinking").is_none());
+        assert_eq!(translated["tools"][0]["strict"], true);
+        let text = translate_request(
+            &json!({"messages":[{"role":"user", "content":"hi"}], "response_format":{"type":"text"}}),
+            "claude",
+        )
+        .unwrap();
+        assert!(text.get("output_config").is_none());
+        for format in [
+            json!({"type":"json_object"}),
+            json!({"type":"json_schema", "json_schema":{"name":"x"}}),
+        ] {
+            let body =
+                json!({"messages":[{"role":"user", "content":"hi"}], "response_format":format});
+            assert!(translate_request(&body, "claude").is_err(), "{format}");
+        }
+    }
+
+    #[test]
+    fn thinking_blocks_round_trip_through_responses_and_requests() {
+        let thinking = json!({"type":"thinking", "thinking":"Check the map.", "signature":"sig"});
+        let redacted = json!({"type":"redacted_thinking", "data":"opaque"});
+        let value = translate_response(&json!({"id":"m", "model":"c", "content":[
+            thinking, redacted, {"type":"tool_use", "id":"t", "name":"look", "input":{}}
+        ], "stop_reason":"tool_use"}))
+        .unwrap();
+        let message = &value["choices"][0]["message"];
+        assert_eq!(message["reasoning_content"], "Check the map.");
+        assert_eq!(message["thinking_blocks"], json!([thinking, redacted]));
+        assert!(message["content"].is_null());
+        // The blocks go back first, unchanged, on the next request.
+        let mut next = message.clone();
+        next.as_object_mut().unwrap().remove("reasoning_content");
+        let translated = translate_request(
+            &json!({"messages":[{"role":"user", "content":"where?"}, next,
+                {"role":"tool", "tool_call_id":"t", "content":"north"}]}),
+            "claude",
+        )
+        .unwrap();
+        let content = &translated["messages"][1]["content"];
+        assert_eq!(content[0], thinking);
+        assert_eq!(content[1], redacted);
+        assert_eq!(content[2]["type"], "tool_use");
+        let plain = translate_response(
+            &json!({"id":"m", "model":"c", "content":[{"type":"text", "text":"hi"}]}),
+        )
+        .unwrap();
+        assert!(
+            plain["choices"][0]["message"]
+                .get("thinking_blocks")
+                .is_none()
+        );
+        for (role, blocks) in [
+            ("assistant", json!([{"type":"thinking", "thinking":"x"}])),
+            ("assistant", json!({"type":"thinking"})),
+            ("assistant", json!([{"type":"text", "text":"x"}])),
+            ("user", json!([thinking])),
+        ] {
+            let body = json!({"messages":[{"role":"user", "content":"q"},
+                {"role":role, "content":"a", "thinking_blocks":blocks}]});
+            assert!(
+                translate_request(&body, "claude").is_err(),
+                "{role} {blocks}"
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_thinking_becomes_reasoning_deltas_and_a_signed_block() {
+        let mut state = StreamState::new(false);
+        let mut apply = |value: Value| {
+            state
+                .event(SseEvent {
+                    name: String::new(),
+                    data: value.to_string(),
+                })
+                .unwrap()
+                .into_iter()
+                .map(|chunk| {
+                    let text = std::str::from_utf8(&chunk).unwrap().to_owned();
+                    serde_json::from_str::<Value>(text.strip_prefix("data: ").unwrap().trim())
+                        .unwrap()["choices"][0]["delta"]
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        apply(json!({"type":"message_start", "message":{"id":"msg", "model":"claude"}}));
+        assert!(
+            apply(json!({"type":"content_block_start", "index":0, "content_block":{"type":"thinking", "thinking":"", "signature":""}}))
+                .is_empty()
+        );
+        assert_eq!(
+            apply(
+                json!({"type":"content_block_delta", "index":0, "delta":{"type":"thinking_delta", "thinking":"Step one. "}})
+            ),
+            vec![json!({"reasoning_content":"Step one. "})]
+        );
+        apply(
+            json!({"type":"content_block_delta", "index":0, "delta":{"type":"thinking_delta", "thinking":"Two."}}),
+        );
+        assert!(
+            apply(json!({"type":"content_block_delta", "index":0, "delta":{"type":"signature_delta", "signature":"abc"}}))
+                .is_empty()
+        );
+        assert_eq!(
+            apply(json!({"type":"content_block_stop", "index":0})),
+            vec![
+                json!({"thinking_blocks":[{"type":"thinking", "thinking":"Step one. Two.", "signature":"abc"}]})
+            ]
+        );
+        apply(
+            json!({"type":"content_block_start", "index":1, "content_block":{"type":"redacted_thinking", "data":"opaque"}}),
+        );
+        assert_eq!(
+            apply(json!({"type":"content_block_stop", "index":1})),
+            vec![json!({"thinking_blocks":[{"type":"redacted_thinking", "data":"opaque"}]})]
+        );
+        let text = apply(
+            json!({"type":"content_block_start", "index":2, "content_block":{"type":"text", "text":""}}),
+        );
+        assert!(text.is_empty());
+        let mut state = StreamState::new(false);
+        state
+            .event(SseEvent {
+                name: String::new(),
+                data: json!({"type":"message_start", "message":{"id":"m", "model":"c"}})
+                    .to_string(),
+            })
+            .unwrap();
+        state.event(SseEvent { name: String::new(), data: json!({"type":"content_block_start", "index":0, "content_block":{"type":"thinking", "thinking":""}}).to_string() }).unwrap();
+        // A text delta on a thinking block is corruption, as on other blocks.
+        assert!(state.event(SseEvent { name: String::new(), data: json!({"type":"content_block_delta", "index":0, "delta":{"type":"text_delta", "text":"x"}}).to_string() }).is_err());
     }
 
     #[test]
