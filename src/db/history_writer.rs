@@ -70,7 +70,10 @@ impl Op {
     /// History and captures are best-effort and count against the queue
     /// limit. Budget usage and stored-response links are small, one per
     /// request, and must survive a stalled disk, so like flushes they are
-    /// always queued.
+    /// always queued, and a failed commit holds them for the next batch.
+    // shortcut: uncapped writes grow memory (~100 bytes per request) for as
+    // long as the disk stalls or commits fail; merge spends per key and
+    // period if outages that long become real.
     fn capped(&self) -> bool {
         matches!(self, Op::Insert(..) | Op::Finish(_) | Op::FinishPayload(..))
     }
@@ -209,8 +212,9 @@ impl HistoryWriter {
         self.submit(Op::ForgetResponse(id));
     }
 
-    /// Wait until every write queued before this call is committed or
-    /// dropped. Flushes do not count against the queue limit.
+    /// Wait until every write queued before this call is committed, dropped,
+    /// or held for retry after a failed commit. Flushes do not count against
+    /// the queue limit.
     pub(crate) async fn flush(&self) {
         let (done, wait) = oneshot::channel();
         if self.queue.send(Op::Flush(done)).is_ok() {
@@ -271,29 +275,57 @@ async fn run(
     batches: Arc<AtomicUsize>,
 ) {
     let mut batch = Vec::with_capacity(MAX_BATCH);
+    // Uncapped writes from a failed commit, retried ahead of the next batch.
+    let mut held = Vec::new();
     while receiver.recv_many(&mut batch, MAX_BATCH).await > 0 {
-        let writes: Vec<_> = batch
-            .iter()
-            .filter(|op| !matches!(op, Op::Flush(_)))
-            .collect();
         // Like a bounded channel, taking writes frees their room in the queue.
-        let capped = writes.iter().filter(|op| op.capped()).count();
+        let capped = batch.iter().filter(|op| op.capped()).count();
         queued.fetch_sub(capped, Ordering::Relaxed);
-        match commit(&pool, &writes).await {
+        let (flushes, writes): (Vec<_>, Vec<_>) = held
+            .drain(..)
+            .chain(batch.drain(..))
+            .partition(|op| matches!(op, Op::Flush(_)));
+        let refs: Vec<_> = writes.iter().collect();
+        let mut hold = vec![false; refs.len()];
+        // History is dropped. Budget usage and stored responses are dropped
+        // only when the database rejects the row itself.
+        let mut failed = |index: usize, op: &Op, error: &sqlx::Error| {
+            if op.capped() || is_constraint_violation(error) {
+                warn_dropped(op);
+            } else {
+                hold[index] = true;
+            }
+        };
+        match commit(&pool, &refs).await {
             Ok(()) => {}
             // A row the database rejects must not discard the rest of the
             // batch. Other failures (I/O, lock timeout) would only repeat.
-            Err(error) if is_constraint_violation(&error) && writes.len() > 1 => {
-                for op in &writes {
-                    if commit(&pool, &[op]).await.is_err() {
-                        warn_dropped(op);
+            Err(error) if is_constraint_violation(&error) && refs.len() > 1 => {
+                for (index, op) in refs.iter().enumerate() {
+                    if let Err(error) = commit(&pool, &[op]).await {
+                        failed(index, op, &error);
                     }
                 }
             }
-            Err(_) => writes.iter().for_each(|op| warn_dropped(op)),
+            Err(error) => {
+                for (index, op) in refs.iter().enumerate() {
+                    failed(index, op, &error);
+                }
+            }
+        }
+        held = writes
+            .into_iter()
+            .zip(hold)
+            .filter_map(|(op, hold)| hold.then_some(op))
+            .collect();
+        if !held.is_empty() {
+            tracing::warn!(
+                writes = held.len(),
+                "budget usage or stored response writes held for retry"
+            );
         }
         batches.fetch_add(1, Ordering::Relaxed);
-        for op in batch.drain(..) {
+        for op in flushes {
             if let Op::Flush(done) = op {
                 let _ = done.send(());
             }
@@ -585,17 +617,22 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn budget_usage_and_stored_responses_survive_a_full_queue() {
+    async fn key_id(pool: &SqlitePool) -> String {
         use base64::{Engine, engine::general_purpose::STANDARD};
-        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
         let crypto = crate::crypto::Crypto::from_base64(&secrecy::SecretString::from(
             STANDARD.encode([7; 32]),
         ))
         .unwrap();
-        let key = crate::db::api_keys::create(&pool, &crypto, "client")
+        crate::db::api_keys::create(pool, &crypto, "client")
             .await
-            .unwrap();
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn budget_usage_and_stored_responses_survive_a_full_queue() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let key = key_id(&pool).await;
         crate::db::providers::save(
             &pool,
             &crate::db::providers::Provider {
@@ -616,7 +653,7 @@ mod tests {
             queued += 1;
             assert!(queued <= QUEUE_CAPACITY + MAX_BATCH, "queue is unbounded");
         }
-        history.spend(key.id.clone(), "2026-10-21".into(), 40, 0.25);
+        history.spend(key.clone(), "2026-10-21".into(), 40, 0.25);
         history.remember_response(
             "resp_1".into(),
             "provider".into(),
@@ -626,7 +663,7 @@ mod tests {
         drop(connection);
         history.flush().await;
         assert_eq!(
-            crate::db::api_keys::spent(&pool, &key.id, "2026-10-21")
+            crate::db::api_keys::spent(&pool, &key, "2026-10-21")
                 .await
                 .unwrap(),
             (40, 0.25)
@@ -638,6 +675,35 @@ mod tests {
                 .is_some()
         );
         assert_eq!(history.queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn budget_usage_from_a_failed_commit_is_retried_with_the_next_batch() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let key = key_id(&pool).await;
+        let history = HistoryWriter::start(pool.clone());
+        // A missing table fails the commit without a constraint violation.
+        sqlx::query("ALTER TABLE api_key_spend RENAME TO api_key_spend_away")
+            .execute(&pool)
+            .await
+            .unwrap();
+        history.spend(key.clone(), "2026-10-21".into(), 40, 0.25);
+        assert!(history.insert(request("dropped", false), None));
+        history.flush().await;
+        sqlx::query("ALTER TABLE api_key_spend_away RENAME TO api_key_spend")
+            .execute(&pool)
+            .await
+            .unwrap();
+        history.spend(key.clone(), "2026-10-21".into(), 2, 0.5);
+        history.flush().await;
+        assert_eq!(
+            crate::db::api_keys::spent(&pool, &key, "2026-10-21")
+                .await
+                .unwrap(),
+            (42, 0.75)
+        );
+        // Best-effort history from the failed commit is not held.
+        assert_eq!(count(&pool, "request_history").await, 0);
     }
 
     #[tokio::test]
